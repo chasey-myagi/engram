@@ -78,7 +78,7 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
     expect(await db.select().from(claimProvenance)).toHaveLength(0)
   })
 
-  it('dedupes sources by content_hash (UNIQUE) and round-trips arbitrary meta JSON the kernel never reads', async () => {
+  it('dedupes sources by content_hash (UNIQUE), preserving the first row, round-tripping arbitrary meta JSON', async () => {
     const hash = randomUUID()
     const meta = {
       domain: 'bidding',
@@ -87,21 +87,27 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
       nested: { axes: [1, 2, 3], ok: true },
     }
     const a = await addSource(db, {
-      content: 'same bytes',
+      content: 'first bytes',
       contentHash: hash,
       kind: 'formal_document',
+      authorityScore: 0.9,
       meta,
     })
     const b = await addSource(db, {
-      content: 'same bytes',
+      content: 'SECOND bytes',
       contentHash: hash,
-      kind: 'formal_document',
+      kind: 'human_qa',
+      authorityScore: 0.1,
       meta: { totally: 'different' },
     })
     expect(b.sourceId).toBe(a.sourceId) // second insert deduped to the same row
     const rows = await db.select().from(source).where(eq(source.contentHash, hash))
     expect(rows).toHaveLength(1)
-    expect(rows[0]!.meta).toEqual(meta) // first write's meta round-trips faithfully
+    // the conflicting second write must NOT overwrite the existing row's fields
+    expect(rows[0]!.content).toBe('first bytes')
+    expect(rows[0]!.kind).toBe('formal_document')
+    expect(rows[0]!.authorityScore).toBe(0.9)
+    expect(rows[0]!.meta).toEqual(meta)
   })
 
   it('supersede appends a new claim under the SAME lineage_id, marks old superseded, no physical delete', async () => {
@@ -183,6 +189,45 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
     expect(byId.get(v2.claimId)!.status).toBe('superseded')
     expect(byId.get(v3.claimId)!.status).toBe('draft') // head
     expect(rows).toHaveLength(3) // append-only: nothing deleted
+  })
+
+  it('supersedeClaim enforces D1 — empty provenance throws and writes no new version', async () => {
+    const { sourceId } = await seedSource()
+    const { claimId: v1 } = await appendClaim(db, { claimText: 'v1' }, [{ sourceId, locator: 'l' }])
+    await expect(supersedeClaim(db, v1, { claimText: 'v2' }, [])).rejects.toThrow(/D1|provenance/i)
+    expect(await db.select().from(claim)).toHaveLength(1) // only v1; no v2 written
+    expect(await db.select().from(relation)).toHaveLength(0) // no supersedes edge
+  })
+
+  it('supersedeClaim throws and writes nothing when the target claim does not exist', async () => {
+    const { sourceId } = await seedSource()
+    await expect(
+      supersedeClaim(db, randomUUID(), { claimText: 'v2' }, [{ sourceId, locator: 'l' }]),
+    ).rejects.toThrow(/not found/i)
+    expect(await db.select().from(claim)).toHaveLength(0)
+    expect(await db.select().from(relation)).toHaveLength(0)
+  })
+
+  it('supersedeClaim refuses to supersede an already-superseded claim (no lineage fork)', async () => {
+    const { sourceId } = await seedSource()
+    const { claimId: v1 } = await appendClaim(db, { claimText: 'v1' }, [{ sourceId, locator: 'l' }])
+    await supersedeClaim(db, v1, { claimText: 'v2' }, [{ sourceId, locator: 'l' }]) // v1 -> superseded
+    await expect(
+      supersedeClaim(db, v1, { claimText: 'v2-fork' }, [{ sourceId, locator: 'l' }]),
+    ).rejects.toThrow(/already superseded/i)
+    expect(await db.select().from(claim)).toHaveLength(2) // v1, v2 only — no forked head
+  })
+
+  it('D1 DB-layer backstop: a provenance with NULL source_id is physically rejected (NOT NULL)', async () => {
+    const { sourceId } = await seedSource()
+    const { claimId } = await appendClaim(db, { claimText: 'real' }, [{ sourceId, locator: 'l' }])
+    // bypass the SPI guard, hit the table directly: a NULL source_id must be rejected by the DB (Story 36)
+    await expect(
+      pool.query(
+        'INSERT INTO claim_provenance (id, claim_id, source_id, locator) VALUES ($1, $2, NULL, $3)',
+        [randomUUID(), claimId, 'x'],
+      ),
+    ).rejects.toThrow()
   })
 
   it('all five enums match Appendix A.1 exactly', () => {

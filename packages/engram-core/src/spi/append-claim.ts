@@ -141,11 +141,18 @@ export async function supersedeClaim(
   requireProvenance(provenances)
   return db.transaction(async (tx) => {
     const old = await tx
-      .select({ lineageId: claim.lineageId })
+      .select({ lineageId: claim.lineageId, status: claim.status })
       .from(claim)
       .where(eq(claim.id, oldClaimId))
     if (old.length === 0) {
       throw new Error(`supersede_claim: claim ${oldClaimId} not found`)
+    }
+    // 单 head 不变量：只取代当前 head；取代一个已 superseded 的旧版会让同 lineage 出现两个 head（谱系分叉）。
+    // （并发取代同一 head 的竞态需 SELECT ... FOR UPDATE / lineage 唯一 head 约束，待引入并发写时处理。）
+    if (old[0]!.status === 'superseded') {
+      throw new Error(
+        `supersede_claim: claim ${oldClaimId} is already superseded (would fork its lineage); supersede the current head`,
+      )
     }
     const claimId = await insertClaim(tx, draft, old[0]!.lineageId)
     await insertProvenances(tx, claimId, provenances)
