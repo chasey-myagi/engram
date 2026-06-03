@@ -4,7 +4,7 @@ CREATE TYPE "public"."relation_type" AS ENUM('supports', 'contradicts', 'refines
 CREATE TYPE "public"."source_kind" AS ENUM('formal_document', 'structured_spec', 'human_qa', 'conversation_log', 'historical_artifact', 'agent_synthesis', 'external_feed');--> statement-breakpoint
 CREATE TYPE "public"."verification_kind" AS ENUM('patrol', 'usage_truth', 'reembed_marker');--> statement-breakpoint
 CREATE TABLE "claim" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"id" uuid PRIMARY KEY NOT NULL,
 	"claim_text" text NOT NULL,
 	"subject" text,
 	"predicate" text,
@@ -20,7 +20,7 @@ CREATE TABLE "claim" (
 );
 --> statement-breakpoint
 CREATE TABLE "claim_provenance" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"id" uuid PRIMARY KEY NOT NULL,
 	"claim_id" uuid NOT NULL,
 	"source_id" uuid NOT NULL,
 	"locator" text NOT NULL,
@@ -29,7 +29,7 @@ CREATE TABLE "claim_provenance" (
 );
 --> statement-breakpoint
 CREATE TABLE "claim_verification" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"id" uuid PRIMARY KEY NOT NULL,
 	"claim_id" uuid NOT NULL,
 	"kind" "verification_kind" NOT NULL,
 	"verdict" jsonb NOT NULL,
@@ -45,14 +45,14 @@ CREATE TABLE "page_claims" (
 );
 --> statement-breakpoint
 CREATE TABLE "relation" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"id" uuid PRIMARY KEY NOT NULL,
 	"from_claim" uuid NOT NULL,
 	"to_claim" uuid,
 	"type" "relation_type" NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "source" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"id" uuid PRIMARY KEY NOT NULL,
 	"content" text NOT NULL,
 	"content_hash" text NOT NULL,
 	"kind" "source_kind" NOT NULL,
@@ -66,4 +66,10 @@ ALTER TABLE "claim_provenance" ADD CONSTRAINT "claim_provenance_claim_id_claim_i
 ALTER TABLE "claim_provenance" ADD CONSTRAINT "claim_provenance_source_id_source_id_fk" FOREIGN KEY ("source_id") REFERENCES "public"."source"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "claim_verification" ADD CONSTRAINT "claim_verification_claim_id_claim_id_fk" FOREIGN KEY ("claim_id") REFERENCES "public"."claim"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "relation" ADD CONSTRAINT "relation_from_claim_claim_id_fk" FOREIGN KEY ("from_claim") REFERENCES "public"."claim"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "relation" ADD CONSTRAINT "relation_to_claim_claim_id_fk" FOREIGN KEY ("to_claim") REFERENCES "public"."claim"("id") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "relation" ADD CONSTRAINT "relation_to_claim_claim_id_fk" FOREIGN KEY ("to_claim") REFERENCES "public"."claim"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "idx_claim_lineage" ON "claim" USING btree ("lineage_id");--> statement-breakpoint
+CREATE INDEX "idx_claim_provenance_claim" ON "claim_provenance" USING btree ("claim_id");--> statement-breakpoint
+CREATE INDEX "idx_claim_provenance_source" ON "claim_provenance" USING btree ("source_id");--> statement-breakpoint
+CREATE INDEX "idx_claim_verification_claim" ON "claim_verification" USING btree ("claim_id");--> statement-breakpoint
+CREATE INDEX "idx_relation_from" ON "relation" USING btree ("from_claim");--> statement-breakpoint
+CREATE INDEX "idx_relation_to" ON "relation" USING btree ("to_claim");

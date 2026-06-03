@@ -1,6 +1,6 @@
 /**
  * 乐观写入路径（Consumer SPI 的写半边，附录 A.2）。S1 walking skeleton：
- *   - addSource：幂等入原文（content_hash UNIQUE 去重），meta 透传不解释。
+ *   - addSource：幂等入原文（content_hash UNIQUE 去重，单语句 ON CONFLICT 总返存活 id），meta 透传不解释。
  *   - appendClaim：默认 draft、强制 ≥1 provenance、单事务原子写入（D1 硬门）。
  *   - supersedeClaim：append-only 取代 —— 新版本沿用同 lineage_id + 一条 supersedes 边，旧版标
  *     superseded 而**不物理删**。
@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto'
 
 import { eq } from 'drizzle-orm'
 
-import type { DB } from '../db/client.js'
+import type { DB, Tx } from '../db/client.js'
 import {
   claim,
   claimProvenance,
@@ -20,8 +20,6 @@ import {
   type ProvRelevance,
   type SourceKind,
 } from '../db/schema.js'
-
-type Tx = Parameters<Parameters<DB['transaction']>[0]>[0]
 
 export interface SourceInput {
   content: string
@@ -85,6 +83,7 @@ async function insertProvenances(
 ): Promise<void> {
   for (const p of provenances) {
     await tx.insert(claimProvenance).values({
+      id: randomUUID(),
       claimId,
       sourceId: p.sourceId, // NOT NULL FK = D1（null / 不存在的 source 会被 DB 拒、整事务回滚）
       locator: p.locator,
@@ -94,27 +93,28 @@ async function insertProvenances(
   }
 }
 
-/** 幂等入原文：content_hash 撞号则复用既有行（不重复落库），返回其 id。meta 原样存、内核不读业务键。 */
+/**
+ * 幂等入原文：content_hash 撞号则复用既有行（不重复落库），单语句 ON CONFLICT 总返存活 id。
+ * DO UPDATE 只把 content_hash 写成自身（no-op），既触发 RETURNING 返回既有行、又不动既有 meta / content。
+ * meta 原样存、内核不读业务键。
+ */
 export async function addSource(db: DB, input: SourceInput): Promise<{ sourceId: string }> {
-  const id = randomUUID()
-  const inserted = await db
+  const rows = await db
     .insert(source)
     .values({
-      id,
+      id: randomUUID(),
       content: input.content,
       contentHash: input.contentHash,
       kind: input.kind,
       authorityScore: input.authorityScore ?? 0.5,
       meta: input.meta ?? {},
     })
-    .onConflictDoNothing({ target: source.contentHash })
+    .onConflictDoUpdate({
+      target: source.contentHash,
+      set: { contentHash: input.contentHash },
+    })
     .returning({ id: source.id })
-  if (inserted.length > 0) return { sourceId: inserted[0]!.id }
-  const existing = await db
-    .select({ id: source.id })
-    .from(source)
-    .where(eq(source.contentHash, input.contentHash))
-  return { sourceId: existing[0]!.id }
+  return { sourceId: rows[0]!.id }
 }
 
 /** 乐观写入：默认 draft，强制 ≥1 出处，claim + 出处单事务原子写入。新 claim 起一个新 lineage。 */
@@ -151,7 +151,7 @@ export async function supersedeClaim(
     await insertProvenances(tx, claimId, provenances)
     await tx
       .insert(relation)
-      .values({ fromClaim: claimId, toClaim: oldClaimId, type: 'supersedes' })
+      .values({ id: randomUUID(), fromClaim: claimId, toClaim: oldClaimId, type: 'supersedes' })
     await tx.update(claim).set({ status: 'superseded' }).where(eq(claim.id, oldClaimId))
     return { claimId }
   })

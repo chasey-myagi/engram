@@ -1,5 +1,5 @@
 {
-  "id": "9fdeb60b-733a-4738-b751-5985eb59b134",
+  "id": "ad567e94-f276-4842-90e5-fea91b6b3672",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -12,8 +12,7 @@
           "name": "id",
           "type": "uuid",
           "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
+          "notNull": true
         },
         "claim_text": {
           "name": "claim_text",
@@ -91,7 +90,23 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "idx_claim_lineage": {
+          "name": "idx_claim_lineage",
+          "columns": [
+            {
+              "expression": "lineage_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
@@ -107,8 +122,7 @@
           "name": "id",
           "type": "uuid",
           "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
+          "notNull": true
         },
         "claim_id": {
           "name": "claim_id",
@@ -143,7 +157,38 @@
           "default": "'supporting'"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "idx_claim_provenance_claim": {
+          "name": "idx_claim_provenance_claim",
+          "columns": [
+            {
+              "expression": "claim_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_claim_provenance_source": {
+          "name": "idx_claim_provenance_source",
+          "columns": [
+            {
+              "expression": "source_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "claim_provenance_claim_id_claim_id_fk": {
           "name": "claim_provenance_claim_id_claim_id_fk",
@@ -186,8 +231,7 @@
           "name": "id",
           "type": "uuid",
           "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
+          "notNull": true
         },
         "claim_id": {
           "name": "claim_id",
@@ -222,7 +266,23 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "idx_claim_verification_claim": {
+          "name": "idx_claim_verification_claim",
+          "columns": [
+            {
+              "expression": "claim_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "claim_verification_claim_id_claim_id_fk": {
           "name": "claim_verification_claim_id_claim_id_fk",
@@ -291,8 +351,7 @@
           "name": "id",
           "type": "uuid",
           "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
+          "notNull": true
         },
         "from_claim": {
           "name": "from_claim",
@@ -314,7 +373,38 @@
           "notNull": true
         }
       },
-      "indexes": {},
+      "indexes": {
+        "idx_relation_from": {
+          "name": "idx_relation_from",
+          "columns": [
+            {
+              "expression": "from_claim",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_relation_to": {
+          "name": "idx_relation_to",
+          "columns": [
+            {
+              "expression": "to_claim",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "relation_from_claim_claim_id_fk": {
           "name": "relation_from_claim_claim_id_fk",
@@ -357,8 +447,7 @@
           "name": "id",
           "type": "uuid",
           "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
+          "notNull": true
         },
         "content": {
           "name": "content",

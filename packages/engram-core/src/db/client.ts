@@ -8,6 +8,9 @@ import * as schema from './schema.js'
 
 export type DB = NodePgDatabase<typeof schema>
 
+/** 事务句柄类型：drizzle 不导出公共 tx 类型，从 transaction 回调参数里解出来。 */
+export type Tx = Parameters<Parameters<DB['transaction']>[0]>[0]
+
 export function createPool(databaseUrl: string | undefined = process.env.DATABASE_URL): pg.Pool {
   if (!databaseUrl) {
     throw new Error(

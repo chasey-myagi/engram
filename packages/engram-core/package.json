@@ -21,7 +21,9 @@
     "build": "tsc -p .",
     "typecheck": "tsc -p . --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

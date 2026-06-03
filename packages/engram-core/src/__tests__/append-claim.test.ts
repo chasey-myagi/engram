@@ -125,6 +125,66 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
     expect(rels.some((r) => r.type === 'supersedes' && r.toClaim === oldId)).toBe(true)
   })
 
+  it('persists multiple provenances for one claim in a single transaction', async () => {
+    const s1 = await seedSource()
+    const s2 = await seedSource()
+    const { claimId } = await appendClaim(db, { claimText: 'multi-src fact' }, [
+      { sourceId: s1.sourceId, locator: 'a', relevance: 'exact' },
+      { sourceId: s2.sourceId, locator: 'b', relevance: 'supporting' },
+    ])
+    const provs = await db
+      .select()
+      .from(claimProvenance)
+      .where(eq(claimProvenance.claimId, claimId))
+    expect(provs).toHaveLength(2)
+    expect(new Set(provs.map((p) => p.sourceId))).toEqual(new Set([s1.sourceId, s2.sourceId]))
+    expect(new Set(provs.map((p) => p.relevance))).toEqual(new Set(['exact', 'supporting']))
+  })
+
+  it('rolls back the WHOLE append when one of several provenances has a bad source (atomic across rows)', async () => {
+    const { sourceId } = await seedSource()
+    await expect(
+      appendClaim(db, { claimText: 'partial' }, [
+        { sourceId, locator: 'good' },
+        { sourceId: randomUUID(), locator: 'bad' }, // nonexistent source → FK fails after prov #1 inserted
+      ]),
+    ).rejects.toThrow()
+    // the claim AND the already-inserted first provenance must both be gone
+    expect(await db.select().from(claim)).toHaveLength(0)
+    expect(await db.select().from(claimProvenance)).toHaveLength(0)
+  })
+
+  it('defaults provenance relevance to "supporting" when omitted', async () => {
+    const { sourceId } = await seedSource()
+    const { claimId } = await appendClaim(db, { claimText: 'def' }, [{ sourceId, locator: 'l' }])
+    const provs = await db
+      .select()
+      .from(claimProvenance)
+      .where(eq(claimProvenance.claimId, claimId))
+    expect(provs[0]!.relevance).toBe('supporting')
+  })
+
+  it('keeps one stable lineage across a supersede chain (v1 -> v2 -> v3), append-only', async () => {
+    const { sourceId } = await seedSource()
+    const v1 = await appendClaim(db, { claimText: 'v1' }, [{ sourceId, locator: 'l' }])
+    const v2 = await supersedeClaim(db, v1.claimId, { claimText: 'v2' }, [
+      { sourceId, locator: 'l' },
+    ])
+    const v3 = await supersedeClaim(db, v2.claimId, { claimText: 'v3' }, [
+      { sourceId, locator: 'l' },
+    ])
+
+    const rows = await db.select().from(claim)
+    const byId = new Map(rows.map((r) => [r.id, r]))
+    const lineage = byId.get(v1.claimId)!.lineageId
+    expect(byId.get(v2.claimId)!.lineageId).toBe(lineage)
+    expect(byId.get(v3.claimId)!.lineageId).toBe(lineage) // one stable lineage across all three
+    expect(byId.get(v1.claimId)!.status).toBe('superseded')
+    expect(byId.get(v2.claimId)!.status).toBe('superseded')
+    expect(byId.get(v3.claimId)!.status).toBe('draft') // head
+    expect(rows).toHaveLength(3) // append-only: nothing deleted
+  })
+
   it('all five enums match Appendix A.1 exactly', () => {
     expect(sourceKind.enumValues).toEqual([
       'formal_document',
