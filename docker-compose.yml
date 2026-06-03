@@ -1,0 +1,23 @@
+# 本地 dev/test 数据库：pgvector/pgvector:pg16（pgvector 预装，S9 召回/去重直接用）。
+# 端口映射到 5433，避开常见的 :5432 占用。
+#   docker compose up -d db
+#   export DATABASE_URL=postgresql://engram:engram@localhost:5433/engram
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: engram
+      POSTGRES_PASSWORD: engram
+      POSTGRES_DB: engram
+    ports:
+      - '5433:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U engram -d engram']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - engram-pgdata:/var/lib/postgresql/data
+
+volumes:
+  engram-pgdata:

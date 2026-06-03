@@ -8,5 +8,6 @@ CLAUDE.md
 # 生成物
 dist/
 coverage/
+**/drizzle/
 node_modules/
 pnpm-lock.yaml

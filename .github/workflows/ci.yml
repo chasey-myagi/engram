@@ -7,6 +7,20 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: engram
+          POSTGRES_PASSWORD: engram
+          POSTGRES_DB: engram
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U engram -d engram"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      DATABASE_URL: postgresql://engram:engram@localhost:5433/engram
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
