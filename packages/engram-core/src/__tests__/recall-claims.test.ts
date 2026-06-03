@@ -15,7 +15,7 @@ import {
 } from '../confidence/confidence.js'
 import { createDb, type DB } from '../db/client.js'
 import { addSource, appendClaim } from '../spi/append-claim.js'
-import { claim, claimProvenance, type ClaimStatus } from '../db/schema.js'
+import { claim, claimProvenance, relation, type ClaimStatus } from '../db/schema.js'
 import { recallClaims } from '../spi/recall-claims.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
@@ -433,5 +433,96 @@ describe('S3 g mapping at recall (criterion 5)', () => {
       expect(v).toBeGreaterThanOrEqual(prev)
       prev = v
     }
+  })
+})
+
+describe('S8 contradicts — dual-return + real-time conflictDecay (A.3/A.5)', () => {
+  const contradict = (from: string, to: string) =>
+    db
+      .insert(relation)
+      .values({ id: randomUUID(), fromClaim: from, toClaim: to, type: 'contradicts' })
+
+  it('returns BOTH contradicting claims, each annotated with the contradicts edge — neither dropped nor auto-picked', async () => {
+    const a = await seedClaim({ raw: 0.8, text: 'sky color blue' })
+    const b = await seedClaim({ raw: 0.8, text: 'sky color green' })
+    await contradict(a, b)
+
+    const results = await recallClaims(db, 'sky color')
+    expect(results).toHaveLength(2)
+    const byId = new Map(results.map((r) => [r.claim.id, r]))
+    expect(byId.get(a)!.contradicts).toEqual([b]) // each tagged with its contradicts edge
+    expect(byId.get(b)!.contradicts).toEqual([a])
+  })
+
+  it('an active contradicts edge drives conflictDecay so BOTH sides drop vs no-conflict (real time)', async () => {
+    const a = await seedClaim({ raw: 0.8, text: 'engram conflict a' })
+    const b = await seedClaim({ raw: 0.8, text: 'engram conflict b' })
+
+    // before the edge: full confidence, conflictDecay = 1
+    const before = new Map((await recallClaims(db, 'engram conflict')).map((r) => [r.claim.id, r]))
+    expect(before.get(a)!.confidence.value).toBeCloseTo(0.8, 6)
+    expect(before.get(a)!.confidence.factors.conflictDecay).toBe(1)
+
+    await contradict(a, b) // one active contradiction each → conflictDecay(1) = 1/1.5
+
+    const after = new Map((await recallClaims(db, 'engram conflict')).map((r) => [r.claim.id, r]))
+    for (const id of [a, b]) {
+      expect(after.get(id)!.confidence.value).toBeCloseTo(0.8 / 1.5, 6) // measurably reduced, both sides
+      expect(after.get(id)!.confidence.factors.activeContradicts).toBe(1)
+      expect(after.get(id)!.confidence.factors.conflictDecay).toBeCloseTo(1 / 1.5, 6)
+    }
+  })
+
+  it('a claim with no contradictions is unaffected (conflictDecay = 1, contradicts = [])', async () => {
+    await seedClaim({ raw: 0.8, text: 'lonely fact' })
+    const [r] = await recallClaims(db, 'lonely fact')
+    expect(r!.confidence.value).toBeCloseTo(0.8, 6)
+    expect(r!.confidence.factors.conflictDecay).toBe(1)
+    expect(r!.confidence.factors.activeContradicts).toBe(0)
+    expect(r!.contradicts).toEqual([])
+  })
+
+  it('a contradiction whose other side is superseded is not counted (resolved → conflictDecay back to 1)', async () => {
+    const a = await seedClaim({ raw: 0.8, text: 'resolved conflict head' })
+    const b = await seedClaim({ raw: 0.8, text: 'resolved conflict old', status: 'superseded' })
+    await contradict(a, b)
+    const [r] = await recallClaims(db, 'resolved conflict head')
+    expect(r!.confidence.value).toBeCloseTo(0.8, 6) // b superseded → not an active contradiction
+    expect(r!.contradicts).toEqual([])
+  })
+
+  it('multiple active contradictions stack: conflictDecay(2) = 1/(1+0.5·2) = 0.5', async () => {
+    const a = await seedClaim({ raw: 0.9, text: 'multi target' })
+    const b = await seedClaim({ raw: 0.9, text: 'multi rival one' })
+    const c = await seedClaim({ raw: 0.9, text: 'multi rival two' })
+    await contradict(b, a)
+    await contradict(c, a)
+    const [r] = await recallClaims(db, 'multi target')
+    expect(r!.confidence.factors.activeContradicts).toBe(2)
+    expect(r!.confidence.value).toBeCloseTo(0.9 * 0.5, 6) // conflictDecay(2) = 0.5
+    expect(new Set(r!.contradicts)).toEqual(new Set([b, c]))
+  })
+
+  it('all five relation types persist with correct from/to references', async () => {
+    const a = await seedClaim({ raw: 0.8, text: 'rel from' })
+    const b = await seedClaim({ raw: 0.8, text: 'rel to' })
+    for (const type of [
+      'supports',
+      'contradicts',
+      'refines',
+      'derived_from',
+      'supersedes',
+    ] as const) {
+      await db.insert(relation).values({ id: randomUUID(), fromClaim: a, toClaim: b, type })
+    }
+    const rows = await db.select().from(relation).where(eq(relation.fromClaim, a))
+    expect(rows.map((r) => r.type).sort()).toEqual([
+      'contradicts',
+      'derived_from',
+      'refines',
+      'supersedes',
+      'supports',
+    ])
+    expect(rows.every((r) => r.toClaim === b)).toBe(true)
   })
 })

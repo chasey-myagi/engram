@@ -42,6 +42,7 @@ function makeResult(id: string, value: number, sourceId = `src-${id}`): RecallRe
     },
     provenances: [{ sourceId, locator: 'p1', relevance: 'exact' }],
     mustVerify: value < 0.6,
+    contradicts: [],
   }
 }
 

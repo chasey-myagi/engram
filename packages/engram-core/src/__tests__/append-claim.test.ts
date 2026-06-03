@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { eq } from 'drizzle-orm'
+import { eq, inArray } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -411,5 +411,65 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
     ])
     expect(provRelevance.enumValues).toEqual(['exact', 'supporting', 'tangential', 'irrelevant'])
     expect(verificationKind.enumValues).toEqual(['patrol', 'usage_truth', 'reembed_marker'])
+  })
+})
+
+describe('S8 contradiction detection (append, optimistic — record both, never block)', () => {
+  async function appendStructured(
+    subject: string,
+    predicate: string,
+    object: string,
+    text: string,
+  ) {
+    const { sourceId } = await seedSource()
+    return appendClaim(db, { claimText: text, subject, predicate, object }, [
+      { sourceId, locator: 'l', relevance: 'exact' },
+    ])
+  }
+  const contradictsEdges = () => db.select().from(relation).where(eq(relation.type, 'contradicts'))
+
+  it('records a contradicts edge for a reversed-object fact and keeps BOTH claims (append not blocked)', async () => {
+    const { claimId: a } = await appendStructured('sku-1', 'supports', '4k@120', 'A')
+    const { claimId: b } = await appendStructured('sku-1', 'supports', '1080p@60', "A'")
+    expect(
+      await db
+        .select()
+        .from(claim)
+        .where(inArray(claim.id, [a, b])),
+    ).toHaveLength(2) // both kept
+    const edges = await contradictsEdges()
+    expect(edges).toHaveLength(1)
+    expect(edges[0]!.fromClaim).toBe(b) // new → existing
+    expect(edges[0]!.toClaim).toBe(a)
+  })
+
+  it('records no contradiction for the SAME object (same fact, not reversed)', async () => {
+    await appendStructured('sku-1', 'supports', '4k@120', 'first')
+    await appendStructured('sku-1', 'supports', '4k@120', 'second')
+    expect(await contradictsEdges()).toHaveLength(0)
+  })
+
+  it('records no contradiction across a different subject or predicate', async () => {
+    await appendStructured('sku-1', 'supports', '4k@120', 'base')
+    await appendStructured('sku-2', 'supports', '1080p', 'diff subject')
+    await appendStructured('sku-1', 'requires', '1080p', 'diff predicate')
+    expect(await contradictsEdges()).toHaveLength(0)
+  })
+
+  it('does not detect contradictions for unstructured claims (no subject/predicate/object)', async () => {
+    const { sourceId } = await seedSource()
+    await appendClaim(db, { claimText: 'unstructured one' }, [{ sourceId, locator: 'l' }])
+    await appendClaim(db, { claimText: 'unstructured two' }, [{ sourceId, locator: 'l' }])
+    expect(await contradictsEdges()).toHaveLength(0)
+  })
+
+  it('a third reversed-object fact contradicts BOTH prior versions (two edges)', async () => {
+    await appendStructured('sku-9', 'maxres', '720p', 'v1')
+    await appendStructured('sku-9', 'maxres', '1080p', 'v2')
+    const { claimId: c } = await appendStructured('sku-9', 'maxres', '4k', 'v3')
+    const edges = await contradictsEdges()
+    // v2 contradicts v1 (1), v3 contradicts v1 and v2 (2) → 3 total
+    expect(edges).toHaveLength(3)
+    expect(edges.filter((e) => e.fromClaim === c)).toHaveLength(2) // v3 → v1, v3 → v2
   })
 })
