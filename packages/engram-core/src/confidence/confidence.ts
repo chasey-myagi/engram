@@ -61,18 +61,22 @@ export const CONFLICT_ALPHA = 0.5
 /** g 的起步版本：identity（conf=raw）。 */
 export const CALIBRATION_IDENTITY = 'identity'
 
-/** 时效半衰期（天）按 source kind（A.3：formal=730 / artifact=180 / conversation=90）。 */
+/**
+ * 时效半衰期（天）按 source kind。A.3 只点名 formal=730 / artifact=180 / conversation=90；
+ * 其余 7 个 kind 归入最贴近的桶：external_feed 是近实时/未核实外部流（设计稿 FIG 4a 最低 unverified 层），
+ * 最易变 → 最短半衰期 90，绝不能和正式文档同寿。
+ */
 export function halfLifeDaysForKind(kind: string): number {
   switch (kind) {
     case 'formal_document':
     case 'structured_spec':
-    case 'external_feed':
       return 730
     case 'historical_artifact':
     case 'agent_synthesis':
       return 180
     case 'human_qa':
     case 'conversation_log':
+    case 'external_feed':
       return 90
     default:
       return 180
@@ -94,7 +98,7 @@ function assertWeights(w: FactorWeights): void {
   }
 }
 
-/** base = Σ wᵢ·fᵢ（Σw=1 ⇒ base∈[0,1]）。 */
+/** base = Σ wᵢ·fᵢ（因子先夹到 [0,1]，Σw=1 ⇒ base∈[0,1]）。 */
 export function computeBase(f: AdditiveFactors, w: FactorWeights = DEFAULT_WEIGHTS): number {
   assertWeights(w)
   return (
@@ -106,15 +110,20 @@ export function computeBase(f: AdditiveFactors, w: FactorWeights = DEFAULT_WEIGH
   )
 }
 
-/** staleDecay = 0.5^(ageDays/halfLife)；ageDays=halfLife 时 = 0.5。 */
+/** staleDecay = 0.5^(ageDays/halfLife)；ageDays=halfLife 时 = 0.5；负 age 视为 0（=1）。 */
 export function staleDecay(ageDays: number, halfLifeDays: number): number {
   if (!(halfLifeDays > 0)) throw new Error('confidence: halfLifeDays must be > 0')
   return Math.pow(0.5, Math.max(0, ageDays) / halfLifeDays)
 }
 
-/** conflictDecay = 1/(1+α·n)；n=0 时 = 1。 */
+/** conflictDecay = 1/(1+α·n)；n=0（或负）时 = 1。 */
 export function conflictDecay(activeContradicts: number): number {
   return 1 / (1 + CONFLICT_ALPHA * Math.max(0, activeContradicts))
+}
+
+/** 独立印证数 → indepSupport ∈ [0,1)。1 源→0（无独立印证），越多越高（起步基线 1−0.5^(n−1)，可配置）。 */
+export function independentSupportScore(independentCount: number): number {
+  return 1 - Math.pow(0.5, Math.max(0, independentCount - 1))
 }
 
 /** raw = base · staleDecay · conflictDecay ∈ [0,1]。纯函数。 */
@@ -138,8 +147,11 @@ export function applyG(raw: number, calibrationVersion: string = CALIBRATION_IDE
   }
 }
 
-/** 召回当刻可复盘的 confidence 快照（持久化进 claim.confidence_factors）。 */
-export interface ConfidenceSnapshot {
+/**
+ * 写入/重算时算出的 confidence（持久化进 claim.confidence_factors）。
+ * 注意与 A.2 recall-time `ConfidenceSnapshot`（带 takenAt、value/raw）区分：这是**写路径**的计算结果。
+ */
+export interface ComputedConfidence {
   confidence: number
   confidenceRaw: number
   factors: {
@@ -157,12 +169,12 @@ export interface ConfidenceSnapshot {
   calibrationVersion: string
 }
 
-/** 一站式：因子 + 惩罚 → 完整快照。"为什么信"（w）与"数值=真实概率"（g）分开记。 */
+/** 一站式：因子 + 惩罚 → 完整计算结果。"为什么信"（w）与"数值=真实概率"（g）分开记。 */
 export function computeConfidence(
   f: AdditiveFactors,
   p: PenaltyInputs,
   opts: { weights?: FactorWeights; calibrationVersion?: string } = {},
-): ConfidenceSnapshot {
+): ComputedConfidence {
   const weights = opts.weights ?? DEFAULT_WEIGHTS
   const calibrationVersion = opts.calibrationVersion ?? CALIBRATION_IDENTITY
   const confidenceRaw = computeRaw(f, p, weights)

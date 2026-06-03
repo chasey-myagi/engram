@@ -12,6 +12,7 @@ import {
   computeRaw,
   conflictDecay,
   halfLifeDaysForKind,
+  independentSupportScore,
   staleDecay,
 } from './confidence.js'
 
@@ -106,12 +107,59 @@ describe('命门 — continuous 7-factor confidence (A.3)', () => {
     expect(() => applyG(0.5, 'isotonic-v7')).toThrow(/calibration/i)
   })
 
-  it('maps source kinds to A.3 half-lives (formal 730 / artifact 180 / conversation 90)', () => {
+  it('clamps out-of-range factors so raw stays in [0,1] (the core invariant guard)', () => {
+    const over = computeRaw(f({ authority: 1.5, entailment: 2 }), noPenalty)
+    expect(over).toBe(computeRaw(f({ authority: 1, entailment: 1 }), noPenalty)) // 1.5/2 dragged to 1
+    expect(over).toBeLessThanOrEqual(1)
+    const under = computeRaw(f({ authority: -0.5 }), noPenalty)
+    expect(under).toBe(computeRaw(f({ authority: 0 }), noPenalty)) // -0.5 → 0
+    expect(under).toBeGreaterThanOrEqual(0)
+  })
+
+  it('treats negative ageDays / activeContradicts as no penalty (decay = 1)', () => {
+    expect(staleDecay(-10, 730)).toBe(1)
+    expect(conflictDecay(-1)).toBe(1)
+  })
+
+  it('staleDecay throws on a non-positive half-life', () => {
+    expect(() => staleDecay(10, 0)).toThrow(/halfLife/i)
+    expect(() => staleDecay(10, -5)).toThrow(/halfLife/i)
+  })
+
+  it('independentSupportScore: 1 source = 0 (no corroboration), rising + saturating with more', () => {
+    expect(independentSupportScore(1)).toBe(0)
+    expect(independentSupportScore(2)).toBeCloseTo(0.5, 10)
+    expect(independentSupportScore(3)).toBeCloseTo(0.75, 10)
+    expect(independentSupportScore(2)).toBeLessThan(independentSupportScore(4)) // monotonic
+    expect(independentSupportScore(0)).toBe(0) // guard (n<1)
+  })
+
+  it('applyG default argument is identity', () => {
+    expect(applyG(0.42)).toBe(0.42)
+  })
+
+  it('honors custom (config-state) weights — base shifts with the weight vector', () => {
+    const factors = f({ authority: 1 }) // only authority high
+    const heavyAuthority: FactorWeights = {
+      authority: 0.6,
+      humanReview: 0.1,
+      entailment: 0.1,
+      indepSupport: 0.1,
+      usageCorrect: 0.1,
+    }
+    expect(computeBase(factors, heavyAuthority)).toBeGreaterThan(
+      computeBase(factors, DEFAULT_WEIGHTS),
+    )
+  })
+
+  it('maps source kinds to A.3 half-lives (formal 730 / artifact 180 / conversation 90; external_feed shortest)', () => {
     expect(halfLifeDaysForKind('formal_document')).toBe(730)
     expect(halfLifeDaysForKind('structured_spec')).toBe(730)
     expect(halfLifeDaysForKind('historical_artifact')).toBe(180)
     expect(halfLifeDaysForKind('agent_synthesis')).toBe(180)
     expect(halfLifeDaysForKind('human_qa')).toBe(90)
     expect(halfLifeDaysForKind('conversation_log')).toBe(90)
+    expect(halfLifeDaysForKind('external_feed')).toBe(90) // 近实时/未核实 → 最短，绝不与正式文档同寿
+    expect(halfLifeDaysForKind('???unknown')).toBe(180) // default bucket
   })
 })

@@ -16,7 +16,8 @@ import {
   NEUTRAL_FACTORS,
   computeConfidence,
   halfLifeDaysForKind,
-  type ConfidenceSnapshot,
+  independentSupportScore,
+  type ComputedConfidence,
 } from '../confidence/confidence.js'
 import type { DB, Tx } from '../db/client.js'
 import {
@@ -73,7 +74,7 @@ async function computeClaimConfidence(
   tx: Tx,
   draft: DraftClaim,
   provenances: ProvenanceInput[],
-): Promise<ConfidenceSnapshot> {
+): Promise<ComputedConfidence> {
   const sourceIds = [...new Set(provenances.map((p) => p.sourceId))]
   const sources = sourceIds.length
     ? await tx
@@ -81,14 +82,14 @@ async function computeClaimConfidence(
         .from(source)
         .where(inArray(source.id, sourceIds))
     : []
-  const authority = sources.length > 0 ? Math.max(...sources.map((s) => s.authority)) : 0
+  // 最强源（authority 最高）一遍扫出：它的 authority_score 作 f0、它的 kind 定半衰期。
   const dominant = sources.reduce<(typeof sources)[number] | null>(
     (best, s) => (best === null || s.authority > best.authority ? s : best),
     null,
   )
+  const authority = dominant?.authority ?? 0
   const halfLifeDays = dominant ? halfLifeDaysForKind(dominant.kind) : 180
-  const independentCount = sources.length
-  const indepSupport = 1 - Math.pow(0.5, Math.max(0, independentCount - 1)) // 1 源→0（无独立印证），越多越高
+  const indepSupport = independentSupportScore(sources.length) // 1 源→0（无独立印证），越多越高
   const asOf = draft.asOf ?? new Date()
   const ageDays = Math.max(0, (Date.now() - asOf.getTime()) / MS_PER_DAY)
   return computeConfidence(
@@ -101,7 +102,7 @@ async function insertClaim(
   tx: Tx,
   draft: DraftClaim,
   lineageId: string,
-  conf: ConfidenceSnapshot,
+  conf: ComputedConfidence,
 ): Promise<string> {
   const id = randomUUID()
   await tx.insert(claim).values({

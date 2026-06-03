@@ -61,6 +61,7 @@ async function seedSource(meta: Record<string, unknown> = {}) {
     content: 'datasheet body',
     contentHash: randomUUID(),
     kind: 'structured_spec',
+    authorityScore: 0.5, // explicit so confidence-factor assertions don't ride the schema default
     meta,
   })
 }
@@ -324,6 +325,27 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
       expect(v).toBeLessThan(1)
     }
     expect(new Set([cSingle, cTriple, cStale]).size).toBe(3) // three distinct, non-bucketed values
+  })
+
+  it('supersede recomputes confidence from the NEW version provenances (v1 single < v2 three independent)', async () => {
+    const s1 = await seedSource()
+    const v1 = await appendClaim(db, { claimText: 'fact' }, [
+      { sourceId: s1.sourceId, locator: 'l' },
+    ])
+    const a = await seedSource()
+    const b = await seedSource()
+    const c = await seedSource()
+    const v2 = await supersedeClaim(db, v1.claimId, { claimText: 'fact' }, [
+      { sourceId: a.sourceId, locator: 'l' },
+      { sourceId: b.sourceId, locator: 'l' },
+      { sourceId: c.sourceId, locator: 'l' },
+    ])
+    const rowOf = async (id: string) => (await db.select().from(claim).where(eq(claim.id, id)))[0]!
+    const r1 = await rowOf(v1.claimId)
+    const r2 = await rowOf(v2.claimId)
+    expect(r2.confidence).toBeGreaterThan(r1.confidence) // recomputed from 3 independent sources
+    const cf2 = r2.confidenceFactors as { factors: { indepSupport: number } }
+    expect(cf2.factors.indepSupport).toBeCloseTo(0.75, 10) // 3 sources → 1 - 0.5^2
   })
 
   it('all five enums match Appendix A.1 exactly', () => {
