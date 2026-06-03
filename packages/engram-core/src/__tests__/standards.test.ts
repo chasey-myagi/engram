@@ -112,17 +112,62 @@ describe('S7 config-state Standards (A.2/A.3)', () => {
     expect(await db.select().from(standards)).toHaveLength(0) // nothing written
   })
 
-  it('setStandards rejects threshold violations: consumeFloor below kernel 0.4, and must_verify out of [floor,1]', async () => {
+  it('setStandards rejects threshold violations: consumeFloor < 0.4, must_verify < kernel 0.6 (relaxation!), must_verify < floor, must_verify > 1', async () => {
     await expect(setStandards(db, { factorWeights: FULL, consumeFloor: 0.3 })).rejects.toThrow(
       /consumeFloor|0\.4/i,
     )
+    // the dangerous direction: lowering the trust bar below kernel 0.6 would flatten the must-verify band
     await expect(
-      setStandards(db, { factorWeights: FULL, consumeFloor: 0.5, mustVerifyThreshold: 0.45 }),
+      setStandards(db, { factorWeights: FULL, consumeFloor: 0.4, mustVerifyThreshold: 0.5 }),
+    ).rejects.toThrow(/trust bar|mustVerify|0\.6/i)
+    await expect(
+      setStandards(db, { factorWeights: FULL, consumeFloor: 0.7, mustVerifyThreshold: 0.65 }), // < floor
     ).rejects.toThrow(/mustVerify/i)
     await expect(
       setStandards(db, { factorWeights: FULL, mustVerifyThreshold: 1.2 }),
     ).rejects.toThrow(/mustVerify/i)
     expect(await db.select().from(standards)).toHaveLength(0)
+  })
+
+  it('accepts and persists the inclusive threshold boundaries exactly (0.4 floor, 0.6 / 1.0 / =floor verify)', async () => {
+    const a = await setStandards(db, {
+      factorWeights: FULL,
+      consumeFloor: 0.4,
+      mustVerifyThreshold: 0.6,
+    })
+    expect(a.consumeFloor).toBe(0.4) // kernel floor edge accepted
+    expect(a.mustVerifyThreshold).toBe(0.6) // kernel trust-bar edge accepted
+    const b = await setStandards(db, { factorWeights: FULL, mustVerifyThreshold: 1 })
+    expect(b.mustVerifyThreshold).toBe(1) // upper edge accepted
+    const c = await setStandards(db, {
+      factorWeights: FULL,
+      consumeFloor: 0.6,
+      mustVerifyThreshold: 0.6,
+    })
+    expect(c.consumeFloor).toBe(0.6) // mustVerify === consumeFloor (lower ≤ edge) accepted
+  })
+
+  it('defaults consumeFloor=0.4 / mustVerify=0.6 / createdBy=editor:unknown and returns a populated row', async () => {
+    const row = await setStandards(db, { factorWeights: FULL })
+    expect(row.consumeFloor).toBe(0.4)
+    expect(row.mustVerifyThreshold).toBe(0.6)
+    expect(row.createdBy).toBe('editor:unknown')
+    expect(row.id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(row.createdAt).toBeInstanceOf(Date)
+  })
+
+  it('effective consume floor = max(config consumeFloor, request ctx.confidenceFloor) — the stricter wins', async () => {
+    await seedClaimWithFactors(
+      factors({ authority: 0.5, humanReview: 0.5, indepSupport: 0.5, usageCorrect: 0.5 }), // recomputes to 0.5
+      'engram floor combo',
+    )
+    // baseline: default config floor 0.4, ctx floor 0.4 → 0.5 surfaces
+    expect(await recallClaims(db, 'engram floor combo', { confidenceFloor: 0.4 })).toHaveLength(1)
+    // request wins: config 0.4 (default), ctx 0.7 → effective 0.7 → 0.5 dropped
+    expect(await recallClaims(db, 'engram floor combo', { confidenceFloor: 0.7 })).toHaveLength(0)
+    // config wins: config 0.6, ctx 0.4 → effective 0.6 → 0.5 dropped
+    await setStandards(db, { factorWeights: FULL, consumeFloor: 0.6 })
+    expect(await recallClaims(db, 'engram floor combo', { confidenceFloor: 0.4 })).toHaveLength(0)
   })
 
   it('is append-only: each setStandards adds a row; getActiveStandards returns the latest', async () => {

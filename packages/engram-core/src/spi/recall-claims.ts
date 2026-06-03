@@ -7,11 +7,13 @@
  *   - provenances[]（每个结果至少 1 条出处；无出处的 claim 绝不出现）
  *   - mustVerify（落在 [0.4,0.6) 的可用但须先核验）
  *
- * 内核消费门（硬判据）：value<0.4 永不出现；0.4≤value<0.6 带 mustVerify=true；value≥0.6 mustVerify=false。
- * ctx.confidenceFloor 只能**抬高**门槛（≥0.4），更低会被夹到 0.4 —— consumer 可更严，绝不能放松内核底线。
+ * 内核消费门（硬判据）：value 低于消费下界永不出现；落在 [floor, mustVerify) 带 mustVerify=true；≥mustVerify 直接可用。
+ * 门限来自配置态活动规范（S7）：consumeFloor≥内核 0.4、mustVerifyThreshold≥内核 0.6，且与请求态 ctx.confidenceFloor
+ * 取最严（max）—— consumer/config 都只能更严，绝不能放松内核底线。
  *
- * 关键设计：raw 写时存、g 召回时现算（value=applyG(raw, 版本)）。所以 S27/S28 换 g（identity↔isotonic）
- * 对所有召回即时生效，无需回写每条 claim。检索匹配 S3 用确定性子串（text/subject）；语义向量是 S9。
+ * 关键设计：raw 召回时用**活动权重**对存档因子现算（rawFromStoredFactors，S7 配置态变更即刻生效），
+ * 再 value=applyG(raw, 版本)（g 现算，S27/S28 换 g 即时生效）。存档的 confidence_raw 自 S7 起是写时审计快照、
+ * 召回不再读它。检索匹配 S3 用确定性子串（text/subject）；语义向量是 S9。
  */
 import { and, eq, ilike, inArray, or } from 'drizzle-orm'
 

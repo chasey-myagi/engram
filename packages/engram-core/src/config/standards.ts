@@ -6,7 +6,7 @@
  *
  * 写时护不变量（拒绝违反）：
  *   - 权重：各 ≥0、0 < Σw ≤ 1、authority(出处)权重 >0（护 D1）—— 走 confidence.assertWeights。
- *   - 门限：consume_floor ≥ 内核硬下界 0.4（consumer 只能更严，绝不能低于内核）；
+ *   - 门限：consume_floor ≥ 内核硬下界 0.4、must_verify_threshold ≥ 内核 0.6（都只能抬严，绝不能降到内核门以下）；
  *           consume_floor ≤ must_verify_threshold ≤ 1。
  */
 import { randomUUID } from 'node:crypto'
@@ -55,9 +55,17 @@ export const DEFAULT_STANDARDS: Standards = {
 }
 
 function assertThresholds(consumeFloor: number, mustVerify: number): void {
+  // 配置态只能把门**抬严**，绝不能降到内核硬门以下（红线：consumer/config 只收紧）。
   if (!(consumeFloor >= KERNEL_CONFIDENCE_FLOOR)) {
     throw new Error(
       `standards: consumeFloor must be ≥ kernel floor ${KERNEL_CONFIDENCE_FLOOR} (got ${consumeFloor})`,
+    )
+  }
+  // mustVerifyThreshold 同理只能 ≥ 内核 0.6：降到 0.6 以下会抹平 [floor,0.6) 的"须先核验"band（放松信任门），
+  // 且与 adapter.ts 硬编码的 0.6 收紧校验自相矛盾。
+  if (!(mustVerify >= MUST_VERIFY_THRESHOLD)) {
+    throw new Error(
+      `standards: mustVerifyThreshold must be ≥ kernel trust bar ${MUST_VERIFY_THRESHOLD} (config can only raise the gate, never relax it; got ${mustVerify})`,
     )
   }
   if (!(mustVerify >= consumeFloor && mustVerify <= 1)) {
