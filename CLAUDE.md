@@ -14,6 +14,7 @@
 
 - `pnpm -r typecheck` · `pnpm -r test` · `pnpm -r build` · `pnpm format`（pnpm monorepo；先 `pnpm -r build` 再 typecheck/test）
 - Node ≥22，ESM（`"type": "module"`，相对 import 带 `.js` 后缀）。
+- **测试需要数据库**：`docker compose up -d db`（pgvector，:5433）后再 `pnpm -r test`；连接串走 `DATABASE_URL`（默认 `postgresql://engram:engram@localhost:5433/engram`）。schema 改了重新生成迁移：`pnpm --filter @engram/core exec drizzle-kit generate`。
 
 ## 仓库布局 + Agent 运行时
 
