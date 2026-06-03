@@ -183,11 +183,12 @@ export function computeConfidence(
     confidence,
     confidenceRaw,
     factors: {
-      authority: f.authority,
-      humanReview: f.humanReview,
-      entailment: f.entailment,
-      indepSupport: f.indepSupport,
-      usageCorrect: f.usageCorrect,
+      // 快照存夹取后的值，与 computeBase 实际用的一致（replay 保真）
+      authority: clamp01(f.authority),
+      humanReview: clamp01(f.humanReview),
+      entailment: clamp01(f.entailment),
+      indepSupport: clamp01(f.indepSupport),
+      usageCorrect: clamp01(f.usageCorrect),
       ageDays: p.ageDays,
       activeContradicts: p.activeContradicts,
       staleDecay: staleDecay(p.ageDays, p.halfLifeDays),

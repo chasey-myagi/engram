@@ -152,6 +152,15 @@ describe('命门 — continuous 7-factor confidence (A.3)', () => {
     )
   })
 
+  it('raw is the EXACT product base · staleDecay · conflictDecay (multiplicative, not additive penalties)', () => {
+    const factors = f({ authority: 1, indepSupport: 1 })
+    const p = { ageDays: 730, halfLifeDays: 730, activeContradicts: 1 }
+    const expected = computeBase(factors) * staleDecay(730, 730) * conflictDecay(1)
+    expect(computeRaw(factors, p)).toBeCloseTo(expected, 12)
+    // multiplicative ⇒ penalties strictly shrink base (an additive `base - penalty` would diverge here)
+    expect(computeRaw(factors, p)).toBeLessThan(computeBase(factors))
+  })
+
   it('maps source kinds to A.3 half-lives (formal 730 / artifact 180 / conversation 90; external_feed shortest)', () => {
     expect(halfLifeDaysForKind('formal_document')).toBe(730)
     expect(halfLifeDaysForKind('structured_spec')).toBe(730)

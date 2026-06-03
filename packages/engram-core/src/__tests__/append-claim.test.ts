@@ -348,6 +348,43 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
     expect(cf2.factors.indepSupport).toBeCloseTo(0.75, 10) // 3 sources → 1 - 0.5^2
   })
 
+  it('confidence uses the dominant (highest-authority) source for f0 and its kind for half-life', async () => {
+    // strong formal_document (authority 0.9, half-life 730) + weak human_qa (authority 0.2, half-life 90)
+    const strong = await addSource(db, {
+      content: 's',
+      contentHash: randomUUID(),
+      kind: 'formal_document',
+      authorityScore: 0.9,
+    })
+    const weak = await addSource(db, {
+      content: 'w',
+      contentHash: randomUUID(),
+      kind: 'human_qa',
+      authorityScore: 0.2,
+    })
+    const oneYearAgo = new Date(Date.now() - 365 * 86_400_000)
+    const { claimId } = await appendClaim(db, { claimText: 'mixed', asOf: oneYearAgo }, [
+      { sourceId: strong.sourceId, locator: 'l' },
+      { sourceId: weak.sourceId, locator: 'l' },
+    ])
+    const row = (await db.select().from(claim).where(eq(claim.id, claimId)))[0]!
+    const cf = row.confidenceFactors as { factors: { authority: number; staleDecay: number } }
+    expect(cf.factors.authority).toBe(0.9) // the strongest source, not the first / weakest
+    // dominant kind = formal_document (730) → 0.5^(365/730), NOT human_qa (90) → 0.5^(365/90)
+    expect(cf.factors.staleDecay).toBeCloseTo(Math.pow(0.5, 365 / 730), 6)
+  })
+
+  it('indepSupport counts DISTINCT sources — citing one source twice does not inflate corroboration (命门 red line)', async () => {
+    const { sourceId } = await seedSource()
+    const { claimId } = await appendClaim(db, { claimText: 'dup' }, [
+      { sourceId, locator: 'p1' },
+      { sourceId, locator: 'p2' }, // same source, different locator
+    ])
+    const row = (await db.select().from(claim).where(eq(claim.id, claimId)))[0]!
+    const cf = row.confidenceFactors as { factors: { indepSupport: number } }
+    expect(cf.factors.indepSupport).toBe(0) // 1 distinct source → no independent corroboration, not 2
+  })
+
   it('all five enums match Appendix A.1 exactly', () => {
     expect(sourceKind.enumValues).toEqual([
       'formal_document',
