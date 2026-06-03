@@ -76,9 +76,8 @@ export interface RecallContext {
   /** 抬高消费门槛；只能 ≥ 内核 floor (0.4)，更低会被夹到 0.4，绝不放松内核底线。 */
   confidenceFloor?: number
   /**
-   * 返回上限（默认 50）；按 value 降序取前 N。注意：候选先按 raw 取前 N 再过 floor，故窗口内若有
-   * 低于 floor 的高 raw 候选被滤除，结果可能少于 N——不会从窗口外回填（窗口外 raw 必更低、必同样在 floor 下，
-   * 故 g 单调下不存在被错漏的可消费 claim）。
+   * 返回上限（默认 50）。S7 起召回用活动权重重算 value，故取全部 active 子串命中候选 → 重算 → 过门 →
+   * 按 value 降序(平手 id 升序)排序 → 最后 slice(limit)。所以结果是 min(过门数, N)，无"窗口/不回填"语义。
    */
   limit?: number
 }

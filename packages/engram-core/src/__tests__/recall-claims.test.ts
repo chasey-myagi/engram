@@ -45,7 +45,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await pool.query(
-    'TRUNCATE source, claim, claim_provenance, relation, claim_verification, page_claims CASCADE',
+    'TRUNCATE source, claim, claim_provenance, relation, claim_verification, page_claims, standards CASCADE',
   )
 })
 

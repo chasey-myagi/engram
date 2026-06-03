@@ -13,6 +13,7 @@ import {
   type FactorWeights,
 } from '../confidence/confidence.js'
 import { DEFAULT_STANDARDS, getActiveStandards, setStandards } from '../config/standards.js'
+import { applyAdapter } from '../spi/adapter.js'
 import { createDb, type DB } from '../db/client.js'
 import { addSource } from '../spi/append-claim.js'
 import { claim, claimProvenance, standards } from '../db/schema.js'
@@ -242,5 +243,28 @@ describe('S7 config-state Standards (A.2/A.3)', () => {
     await setStandards(db, { factorWeights: FULL, mustVerifyThreshold: 0.8 }) // raise the trust bar above 0.675
     const [after] = await recallClaims(db, 'engram verify demo')
     expect(after!.mustVerify).toBe(true) // 0.675 < 0.8 now ⇒ must verify
+  })
+
+  it('a config-raised mustVerify bar stays consistent with the adapter operator (no false adapter-relaxed)', async () => {
+    // config can only RAISE the trust bar (≥ kernel 0.6); a [0.6, bar) claim is flagged mustVerify=true,
+    // and since its value ≥ kernel 0.6, applyAdapter (hardcoded 0.6) requires nothing ⇒ no contradiction.
+    await setStandards(db, { factorWeights: FULL, mustVerifyThreshold: 0.8 })
+    await seedClaimWithFactors(
+      factors({
+        authority: 0.7,
+        humanReview: 0.7,
+        entailment: 0.7,
+        indepSupport: 0.7,
+        usageCorrect: 0.7,
+      }), // base = 0.7
+      'engram adapter seam',
+    )
+    const results = await recallClaims(db, 'engram adapter seam')
+    expect(results[0]!.confidence.value).toBeCloseTo(0.7, 6)
+    expect(results[0]!.mustVerify).toBe(true) // 0.7 < config 0.8
+
+    const out = applyAdapter(results, (rs) => rs.map((r) => ({ ...r }))) // identity adapter
+    expect(out).toHaveLength(1) // not rejected as 'adapter relaxed' (0.7 ≥ kernel 0.6)
+    expect(out[0]!.mustVerify).toBe(true)
   })
 })
