@@ -61,6 +61,11 @@ export const CONFLICT_ALPHA = 0.5
 /** g 的起步版本：identity（conf=raw）。 */
 export const CALIBRATION_IDENTITY = 'identity'
 
+/** 内核消费门下界（A.2）：value 低于此绝不进召回结果。consumer / 配置态只能抬高，绝不能降低。 */
+export const KERNEL_CONFIDENCE_FLOOR = 0.4
+/** 信任门：value < 此值的召回结果须带 mustVerify=true（可用但先核验）；≥此值可直接用。 */
+export const MUST_VERIFY_THRESHOLD = 0.6
+
 /**
  * 时效半衰期（天）按 source kind。A.3 只点名 formal=730 / artifact=180 / conversation=90；
  * 其余 7 个 kind 归入最贴近的桶：external_feed 是近实时/未核实外部流（设计稿 FIG 4a 最低 unverified 层），
@@ -87,11 +92,25 @@ function clamp01(x: number): number {
   return x < 0 ? 0 : x > 1 ? 1 : x
 }
 
-function assertWeights(w: FactorWeights): void {
-  const sum = w.authority + w.humanReview + w.entailment + w.indepSupport + w.usageCorrect
-  if (Math.abs(sum - 1) > 1e-9) {
-    throw new Error(`confidence: Σw must equal 1 (got ${sum})`)
+const WEIGHT_KEYS = [
+  'authority',
+  'humanReview',
+  'entailment',
+  'indepSupport',
+  'usageCorrect',
+] as const
+
+/**
+ * 权重不变量（A.3，配置态写时强制）：各权重 ≥0（顺带挡 NaN）、0 < Σw ≤ 1、authority(出处)权重 >0（护 D1）。
+ * S7 把 Σw=1 放松成 Σw≤1：主编可少分配（上限更保守，base 仍 ∈[0,1]）；Σw>1 仍拒。
+ */
+export function assertWeights(w: FactorWeights): void {
+  for (const k of WEIGHT_KEYS) {
+    if (!(w[k] >= 0)) throw new Error(`confidence: weight ${k} must be ≥ 0 (got ${w[k]})`)
   }
+  const sum = w.authority + w.humanReview + w.entailment + w.indepSupport + w.usageCorrect
+  if (sum > 1 + 1e-9) throw new Error(`confidence: Σw must be ≤ 1 (got ${sum})`)
+  if (!(sum > 0)) throw new Error(`confidence: Σw must be > 0 (got ${sum})`)
   // 护住 D1：authority（出处权威）权重不可为 0，否则"无出处也可信"的口子被打开。
   if (!(w.authority > 0)) {
     throw new Error('confidence: authority weight must be > 0 (protects D1)')
@@ -135,6 +154,17 @@ export function computeRaw(
   return (
     computeBase(f, w) * staleDecay(p.ageDays, p.halfLifeDays) * conflictDecay(p.activeContradicts)
   )
+}
+
+/**
+ * 用一组权重对**已存因子**重算 raw（S7 配置态：召回时用活动权重重算）。
+ * raw = base(加性因子, 权重) × 存档 staleDecay × conflictDecay —— 权重是策略态(活动)、衰减是证据态(存档)。
+ */
+export function rawFromStoredFactors(
+  factors: ConfidenceFactorBreakdown,
+  weights: FactorWeights,
+): number {
+  return computeBase(factors, weights) * factors.staleDecay * factors.conflictDecay
 }
 
 /** g 映射：起步 identity（conf=raw）。未来在此分派 temperature / isotonic（S27/S28），与 w 职责分离。 */

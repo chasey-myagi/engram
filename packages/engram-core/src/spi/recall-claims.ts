@@ -7,16 +7,22 @@
  *   - provenances[]（每个结果至少 1 条出处；无出处的 claim 绝不出现）
  *   - mustVerify（落在 [0.4,0.6) 的可用但须先核验）
  *
- * 内核消费门（硬判据）：value<0.4 永不出现；0.4≤value<0.6 带 mustVerify=true；value≥0.6 mustVerify=false。
- * ctx.confidenceFloor 只能**抬高**门槛（≥0.4），更低会被夹到 0.4 —— consumer 可更严，绝不能放松内核底线。
+ * 内核消费门（硬判据）：value 低于消费下界永不出现；落在 [floor, mustVerify) 带 mustVerify=true；≥mustVerify 直接可用。
+ * 门限来自配置态活动规范（S7）：consumeFloor≥内核 0.4、mustVerifyThreshold≥内核 0.6，且与请求态 ctx.confidenceFloor
+ * 取最严（max）—— consumer/config 都只能更严，绝不能放松内核底线。
  *
- * 关键设计：raw 写时存、g 召回时现算（value=applyG(raw, 版本)）。所以 S27/S28 换 g（identity↔isotonic）
- * 对所有召回即时生效，无需回写每条 claim。检索匹配 S3 用确定性子串（text/subject）；语义向量是 S9。
+ * 关键设计：raw 召回时用**活动权重**对存档因子现算（rawFromStoredFactors，S7 配置态变更即刻生效），
+ * 再 value=applyG(raw, 版本)（g 现算，S27/S28 换 g 即时生效）。存档的 confidence_raw 自 S7 起是写时审计快照、
+ * 召回不再读它。检索匹配 S3 用确定性子串（text/subject）；语义向量是 S9。
  */
-import { and, asc, desc, eq, ilike, inArray, or } from 'drizzle-orm'
+import { and, eq, ilike, inArray, or } from 'drizzle-orm'
 
+import { getActiveStandards } from '../config/standards.js'
 import {
+  KERNEL_CONFIDENCE_FLOOR,
+  MUST_VERIFY_THRESHOLD,
   applyG,
+  rawFromStoredFactors,
   type ConfidenceFactorBreakdown,
   type FactorWeights,
   type StoredConfidence,
@@ -24,10 +30,8 @@ import {
 import type { DB } from '../db/client.js'
 import { claim, claimProvenance, type ClaimStatus, type ProvRelevance } from '../db/schema.js'
 
-/** 内核消费门下界（A.2）：低于此的 claim 绝不进入召回结果。consumer 只能抬高，不能降低。 */
-export const KERNEL_CONFIDENCE_FLOOR = 0.4
-/** 信任门：value<此值的结果带 mustVerify=true（可用但须先核验）；≥此值可直接用。内核绝对语义，不随 floor 变。 */
-export const MUST_VERIFY_THRESHOLD = 0.6
+// 内核消费门常量定义在命门模块；这里 re-export 保持既有 import 路径（index / adapter / bidding）不变。
+export { KERNEL_CONFIDENCE_FLOOR, MUST_VERIFY_THRESHOLD }
 /** 默认召回上限：防无界返回。consumer 可经 ctx.limit 调整。 */
 export const DEFAULT_RECALL_LIMIT = 50
 
@@ -72,9 +76,8 @@ export interface RecallContext {
   /** 抬高消费门槛；只能 ≥ 内核 floor (0.4)，更低会被夹到 0.4，绝不放松内核底线。 */
   confidenceFloor?: number
   /**
-   * 返回上限（默认 50）；按 value 降序取前 N。注意：候选先按 raw 取前 N 再过 floor，故窗口内若有
-   * 低于 floor 的高 raw 候选被滤除，结果可能少于 N——不会从窗口外回填（窗口外 raw 必更低、必同样在 floor 下，
-   * 故 g 单调下不存在被错漏的可消费 claim）。
+   * 返回上限（默认 50）。S7 起召回用活动权重重算 value，故取全部 active 子串命中候选 → 重算 → 过门 →
+   * 按 value 降序(平手 id 升序)排序 → 最后 slice(limit)。所以结果是 min(过门数, N)，无"窗口/不回填"语义。
    */
   limit?: number
 }
@@ -106,16 +109,18 @@ export async function recallClaims(
 ): Promise<RecallResult[]> {
   if (typeof query !== 'string' || query.length === 0) return []
 
-  const floor = resolveFloor(ctx.confidenceFloor)
+  // 配置态：活动规范（权重 + 门限）。改后新请求即刻按它重算（S7）；表空则用内核内置默认。
+  const std = await getActiveStandards(db)
+  // 消费下界取最严：配置态 consumeFloor 与请求态 ctx.confidenceFloor 都 ≥ 内核 0.4，取二者较大。
+  const floor = Math.max(std.consumeFloor, resolveFloor(ctx.confidenceFloor))
   const limit = typeof ctx.limit === 'number' && ctx.limit > 0 ? ctx.limit : DEFAULT_RECALL_LIMIT
   const pattern = `%${escapeLike(query)}%`
 
-  // 消费门是两层。第一层 = 状态可消费：只放 status=active。draft=影子区(不召回)、quarantined=不可消费、
-  // superseded=已被取代、flagged=降权可见(降权机制 S17 产出前先一并硬排除) —— 依据 PRD A.4 状态表
-  // 「影子区不召回」与设计稿消费门「conf≥0.6 ∧ status=active」。注意：晋升路径(draft→active)是 S13，
-  // 在它到位前经 SPI 写入的 claim 都是 draft，召回为空是**正确**的（不召回未治理内容）。第二层 = conf band，在下面。
-  // 取法：按 raw 降序、平手 id 升序，DB 侧 LIMIT 兜住内存。g 单调非降（identity/isotonic），故 raw 序 = value 序，
-  // 这条有界 top-N 正确（高 conf 在前，floor 过滤掉的必是尾部）。
+  // 消费门第一层 = 状态可消费：只放 status=active（draft 影子区 / quarantined / superseded / flagged 全硬排除，
+  // PRD A.4 状态表 / 设计稿消费门；晋升 draft→active 是 S13，在它到位前 append 的 claim 都是 draft，召回为空是正确的）。
+  // ② 确定性子串命中 claim_text 或 subject。注意：召回用**活动权重重算** value（≠存档 confidence_raw），
+  // 故不能在 SQL 里按 confidence_raw 排序/截断——排序与 limit 在 JS 侧按重算后的 value 做
+  // （候选量由 query 子串匹配收敛；S9 向量召回会进一步收敛）。
   const candidates = await db
     .select({
       id: claim.id,
@@ -126,7 +131,6 @@ export async function recallClaims(
       status: claim.status,
       lineageId: claim.lineageId,
       asOf: claim.asOf,
-      confidenceRaw: claim.confidenceRaw,
       confidenceFactors: claim.confidenceFactors,
     })
     .from(claim)
@@ -136,18 +140,15 @@ export async function recallClaims(
         or(ilike(claim.claimText, pattern), ilike(claim.subject, pattern)),
       ),
     )
-    .orderBy(desc(claim.confidenceRaw), asc(claim.id))
-    .limit(limit)
 
-  // g 召回时现算 → 消费门过滤。整次 recall 共享同一 takenAt（"召回瞬间")。
+  // 召回瞬间：用活动权重对存档因子重算 raw（配置态变更即刻生效），再现算 g → value。整次 recall 共享 takenAt。
   const takenAt = new Date()
   const gated = candidates
     .map((c) => {
       // confidence_factors 是 jsonb；写路径是唯一写者且类型锁定（StoredConfidence），故此处盲转安全。
       const stored = c.confidenceFactors as StoredConfidence
-      const raw = c.confidenceRaw
-      // S3 只有 'identity' 一个 g。未知 calibrationVersion 会让 applyG 抛错、整次召回失败——
-      // 当 S27/S28 引入多 g 版本并支持回滚时，这里需改成按行隔离/退化（unknown→跳过或落 floor）；此切片不处理。
+      const raw = rawFromStoredFactors(stored.factors, std.factorWeights) // 活动权重重算
+      // S7 阶段 g 仍只有 'identity'（g 是统计态、S28 接管，与配置态 w 分离）。未知版本 applyG 会抛 → S27/S28 处理。
       const value = applyG(raw, stored.calibrationVersion)
       return { c, raw, value, stored }
     })
@@ -198,19 +199,16 @@ export async function recallClaims(
         value: g.value,
         raw: g.raw,
         factors: g.stored.factors,
-        weights: g.stored.weights,
+        weights: std.factorWeights, // 活动权重入快照——"为什么当时这么信"可重建（历史快照随它冻结）
         calibrationVersion: g.stored.calibrationVersion,
         takenAt,
       },
       provenances,
-      mustVerify: g.value < MUST_VERIFY_THRESHOLD,
+      mustVerify: g.value < std.mustVerifyThreshold, // 配置态信任门
     })
   }
 
-  // SQL 的 (raw 降序, id 升序) LIMIT 只负责**正确地选出候选集合**：g 单调非降 ⇒ top-N-by-raw 与
-  // top-N-by-value 是同一集合（floor 过滤掉的必是尾部）。最终**顺序**在此按 (value 降序, id 升序) 重排——
-  // 这样即便将来 g 非严格单调（S28 isotonic 的阶梯把不同 raw 映到同一 value），同 value 的平手仍按 id 升序，
-  // 文档化的确定性次序对所有 g 成立（不依赖 raw 当二级键）。results 已 ≤ limit，无需再 slice。
+  // 召回用活动权重重算了 value，故排序/截断都在 JS 侧按 value 做：value 降序、平手 id 升序，取前 limit。
   results.sort((a, b) =>
     b.confidence.value !== a.confidence.value
       ? b.confidence.value - a.confidence.value
@@ -218,5 +216,5 @@ export async function recallClaims(
         ? -1
         : 1,
   )
-  return results
+  return results.slice(0, limit)
 }
