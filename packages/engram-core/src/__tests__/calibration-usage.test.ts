@@ -171,6 +171,45 @@ describe('S5 P0 GATE — ECE from recall snapshots joined to usage_truth (A.3/A.
     expect(rep.bins[8]!.observed).toBeCloseTo(0.5) // 1 adopted of 2
   })
 
+  it('preserves the falsy-but-valid endpoints: confidenceAtRecall 0 and 1 round-trip (not coerced to null) and bin correctly', async () => {
+    const id = await seedActiveClaim('endpoints')
+    await reportUsage(db, id, 'refuted', { confidenceAtRecall: 0, byRole: 'r' })
+    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 1, byRole: 'r' })
+
+    const predicted = (await getUsageEvents(db, id))
+      .map((e) => e.predictedConfidence)
+      .sort((a, b) => (a ?? -1) - (b ?? -1))
+    expect(predicted).toEqual([0, 1]) // 0 preserved by `?? null` (a `|| null` typo would drop it)
+
+    const rep = await computeCalibrationFromUsage(db)
+    expect(rep.bins[0]!.count).toBe(1) // predicted 0 → first bin
+    expect(rep.bins[9]!.count).toBe(1) // predicted 1 → last bin
+  })
+
+  it('A3 by field: a usage_truth row whose verdict also carries winRate/elo is calibrated on outcome+predictedConfidence only — the extra fields are structurally ignored', async () => {
+    const id = await seedActiveClaim('a3 by field')
+    await db.insert(claimVerification).values({
+      id: randomUUID(),
+      claimId: id,
+      kind: 'usage_truth',
+      verdict: {
+        outcome: 'adopted',
+        taskId: null,
+        note: null,
+        predictedConfidence: 0.85,
+        calibrationVersion: 'identity',
+        winRate: 0.99, // injected ELO/win-rate signal — must NOT influence the computation
+        elo: 1800,
+      },
+      byRole: 'r',
+    })
+
+    const rep = await computeCalibrationFromUsage(db)
+    expect(rep.sampleCount).toBe(1) // admitted (valid usage_truth adopted + predictedConfidence)
+    expect(rep.bins[8]!.count).toBe(1) // 0.85 → bin 8
+    expect(rep.bins[8]!.observed).toBe(1) // adopted ⇒ 1; winRate/elo had zero effect
+  })
+
   it('empty usage history ⇒ ECE 0, non-NaN, all-zero bins (no divide-by-zero)', async () => {
     const rep = await computeCalibrationFromUsage(db)
     expect(rep.ece).toBe(0)

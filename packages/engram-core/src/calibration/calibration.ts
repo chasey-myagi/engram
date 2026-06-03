@@ -118,8 +118,11 @@ export async function computeCalibrationFromUsage(
 
   const samples: CalibrationSample[] = []
   for (const r of rows) {
+    // 只读 outcome + predictedConfidence 两个字段——verdict 里任何 winRate/elo 等都被结构性忽略（A3）。
     const v = r.verdict as { outcome?: unknown; predictedConfidence?: unknown }
+    // NaN 守卫纯防御：JSON 存不下 NaN（JSON.stringify(NaN)='null'）、reportUsage 写时也已挡 NaN。
     if (typeof v.predictedConfidence !== 'number' || Number.isNaN(v.predictedConfidence)) continue
+    // SQL 已把 outcome 限定在 {adopted, refuted}；活下来的非 adopted 必是 refuted ⇒ correct=false。
     samples.push({ predicted: v.predictedConfidence, correct: v.outcome === CORRECT_OUTCOME })
   }
   return computeReliability(samples, binCount)
