@@ -256,6 +256,23 @@ describe('S4 report_usage — append-only usage_truth events (A.2)', () => {
     expect(pool[0]!.claimId).toBe(id)
   })
 
+  it('read-side fail-loud: a usage_truth row with a missing/invalid outcome throws from getUsageEvents, and the failure pool filters it out', async () => {
+    const id = await seedActiveClaim('broken verdict')
+    // hand-insert a malformed usage_truth row (simulates a future bad writer / manual row) — verdict has no outcome
+    await db.insert(claimVerification).values({
+      id: randomUUID(),
+      claimId: id,
+      kind: 'usage_truth',
+      verdict: {},
+      byRole: 'rogue',
+    })
+    // getUsageEvents filters only by kind → reaches the bad row → fail-loud instead of emitting outcome:undefined
+    await expect(getUsageEvents(db, id)).rejects.toThrow(/invalid outcome/i)
+    // getFailurePool's SQL filter admits only corrected/refuted (always valid), so a malformed row is
+    // excluded before mapping — it never pollutes the pool and never reaches the guard.
+    expect(await getFailurePool(db)).toHaveLength(0)
+  })
+
   it('records by_role per report and is append-only — repeated reports never overwrite prior rows', async () => {
     const id = await seedActiveClaim('append only')
     await reportUsage(db, id, 'adopted', { byRole: 'agent:athlete' })

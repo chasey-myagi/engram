@@ -87,7 +87,7 @@ export async function reportUsage(
 ): Promise<{ verificationId: string }> {
   if (!isUsageOutcome(outcome)) {
     throw new Error(
-      `report_usage: invalid outcome "${outcome}" (expected one of ${USAGE_OUTCOMES.join(', ')})`,
+      `report_usage: invalid outcome ${JSON.stringify(outcome)} (expected one of ${USAGE_OUTCOMES.join(', ')})`,
     )
   }
   // 前置存在性检查：claimId 不存在直接拒、连 insert 都不发（claim_verification.claim_id 的 NOT NULL FK 是兜底）。
