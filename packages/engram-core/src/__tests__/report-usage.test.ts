@@ -194,16 +194,66 @@ describe('S4 report_usage — append-only usage_truth events (A.2)', () => {
     expect((await getFailurePool(db)).map((e) => e.note)).toEqual(['first', 'third']) // corrected+refuted, still ascending
   })
 
-  it('rejects a nonexistent claimId with no partial write', async () => {
+  it('rejects a nonexistent claimId with no partial write, leaving prior events intact', async () => {
+    const id = await seedActiveClaim('prior event')
+    await reportUsage(db, id, 'adopted', { byRole: 'r' })
+    expect(await countVerifications()).toBe(1)
+
     await expect(reportUsage(db, randomUUID(), 'adopted')).rejects.toThrow(/not found/i)
+    expect(await countVerifications()).toBe(1) // rejected report wrote nothing; the prior row is untouched
+  })
+
+  it('rejects an invalid outcome (off-contract string or non-string) with no write', async () => {
+    const id = await seedActiveClaim('bad outcome')
+    // @ts-expect-error — off-contract string exercises the membership guard
+    await expect(reportUsage(db, id, 'bogus')).rejects.toThrow(/invalid outcome/i)
+    // @ts-expect-error — non-string inputs exercise the typeof branch of the guard
+    await expect(reportUsage(db, id, null)).rejects.toThrow(/invalid outcome/i)
+    // @ts-expect-error
+    await expect(reportUsage(db, id, 7)).rejects.toThrow(/invalid outcome/i)
     expect(await countVerifications()).toBe(0)
   })
 
-  it('rejects an invalid outcome with no write', async () => {
-    const id = await seedActiveClaim('bad outcome')
-    // @ts-expect-error — exercising the runtime guard against an off-contract outcome
-    await expect(reportUsage(db, id, 'bogus')).rejects.toThrow(/invalid outcome/i)
-    expect(await countVerifications()).toBe(0)
+  it('getUsageEvents is scoped to its claimId — never leaks another claim’s events', async () => {
+    const a = await seedActiveClaim('iso events alpha')
+    const b = await seedActiveClaim('iso events beta')
+    await reportUsage(db, a, 'adopted', { byRole: 'r' })
+    await reportUsage(db, a, 'corrected', { byRole: 'r' })
+    await reportUsage(db, b, 'refuted', { byRole: 'r' })
+
+    const evA = await getUsageEvents(db, a)
+    expect(evA).toHaveLength(2)
+    expect(evA.every((e) => e.claimId === a)).toBe(true) // only A's events, no B leakage
+    const evB = await getUsageEvents(db, b)
+    expect(evB).toHaveLength(1)
+    expect(evB[0]!.claimId).toBe(b)
+  })
+
+  it('readers filter kind=usage_truth — patrol / reembed_marker rows never pollute usage or failure pool', async () => {
+    const id = await seedActiveClaim('kind filter')
+    await reportUsage(db, id, 'refuted', { byRole: 'r' }) // a genuine failure-pool event
+    // off-kind rows on the SAME claim (claim_verification is tri-purpose: patrol / usage_truth / reembed_marker)
+    await db.insert(claimVerification).values({
+      id: randomUUID(),
+      claimId: id,
+      kind: 'patrol',
+      verdict: { entailment: 'pass' },
+      byRole: 'verifier',
+    })
+    await db.insert(claimVerification).values({
+      id: randomUUID(),
+      claimId: id,
+      kind: 'reembed_marker',
+      verdict: { model: 'v2' },
+      byRole: 'system',
+    })
+
+    const events = await getUsageEvents(db, id)
+    expect(events).toHaveLength(1) // only the usage_truth row, not patrol/reembed
+    expect(events[0]!.outcome).toBe('refuted')
+    const pool = await getFailurePool(db)
+    expect(pool).toHaveLength(1)
+    expect(pool[0]!.claimId).toBe(id)
   })
 
   it('records by_role per report and is append-only — repeated reports never overwrite prior rows', async () => {

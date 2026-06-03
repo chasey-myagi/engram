@@ -56,7 +56,14 @@ function isUsageOutcome(x: unknown): x is UsageOutcome {
 }
 
 function toUsageEvent(row: typeof claimVerification.$inferSelect): UsageEvent {
-  const verdict = row.verdict as UsageVerdict
+  // verdict 的形状由 kind 保证（两读函数都 eq(kind,'usage_truth')、写路径是唯一写者且校验过 outcome）。
+  // 读侧再兜一道：万一未来有别的写者/手工行混入非法 outcome，这里 fail-loud，而不是吐出 outcome=undefined 的坏事件。
+  const verdict = row.verdict as Partial<UsageVerdict>
+  if (!isUsageOutcome(verdict.outcome)) {
+    throw new Error(
+      `report_usage: usage_truth row ${row.id} carries an invalid outcome ${JSON.stringify(verdict.outcome)}`,
+    )
+  }
   return {
     id: row.id,
     claimId: row.claimId,
