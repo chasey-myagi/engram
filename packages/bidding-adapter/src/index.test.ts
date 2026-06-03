@@ -96,6 +96,26 @@ describe('biddingAdapter — meta-driven tightening (pure)', () => {
     expect(out[0]!.confidence.value).toBeCloseTo(0.9)
     expect(out[1]!.confidence.value).toBeCloseTo(0.64) // 0.8 * 0.8 default discount, ≤ gConf
   })
+
+  it('a discount > 1 raises conf above kernel g — the kernel applyAdapter backstop throws (adapter cannot self-relax)', () => {
+    const types = new Map<string, string | undefined>([['s-forum', 'community_forum']])
+    const kernel = [makeResult('f', 0.8, 's-forum')]
+    expect(() => applyAdapter(kernel, biddingAdapter(types, { discount: 1.5 }))).toThrow(
+      /adapter relaxed/i,
+    )
+  })
+
+  it('drops results whose discounted conf falls below the kernel consume-floor 0.4 — never leaks the do-not-consume band', () => {
+    const types = new Map<string, string | undefined>([['s-forum', 'community_forum']])
+    const out = biddingAdapter(types, { discount: 0.8 })([makeResult('f', 0.45, 's-forum')]) // 0.45*0.8=0.36 < 0.4
+    expect(out).toEqual([])
+  })
+
+  it('a result with no provenances is treated as non-official (discounted)', () => {
+    const bare = { ...makeResult('np', 0.9, 's-x'), provenances: [] }
+    const out = biddingAdapter(new Map(), { discount: 0.5 })([bare])
+    expect(out[0]!.confidence.value).toBeCloseTo(0.45)
+  })
 })
 
 // ---- DB integration: read real source.meta, recall, tighten through the SPI ----
@@ -200,6 +220,19 @@ describe('bidding-adapter DB integration — business identity via source.meta (
     expect(types.get(off.sourceId)).toBe(OFFICIAL_DATASHEET)
     expect(types.get(forum.sourceId)).toBe('community_forum')
     expect(types.get(bare.sourceId)).toBeUndefined()
+  })
+
+  it('readSourceTypes: empty id list short-circuits to an empty map; duplicate ids dedupe', async () => {
+    expect(await readSourceTypes(db, [])).toEqual(new Map())
+    const off = await addSource(db, {
+      content: 'd',
+      contentHash: randomUUID(),
+      kind: 'formal_document',
+      meta: { source_type: OFFICIAL_DATASHEET },
+    })
+    const types = await readSourceTypes(db, [off.sourceId, off.sourceId, off.sourceId])
+    expect(types.size).toBe(1)
+    expect(types.get(off.sourceId)).toBe(OFFICIAL_DATASHEET)
   })
 
   it('end-to-end: recall → biddingTighten holds an official_datasheet-backed claim at g, discounts a forum-backed one, all ≤ kernel g', async () => {

@@ -10,6 +10,7 @@
 import { inArray } from 'drizzle-orm'
 
 import {
+  KERNEL_CONFIDENCE_FLOOR,
   MUST_VERIFY_THRESHOLD,
   applyAdapter,
   schema,
@@ -44,8 +45,12 @@ export async function readSourceTypes(
 }
 
 /**
- * 按 source_type 收紧的 bidding 适配器。official_datasheet 不打折(=gConf)、最受信；其余类型乘 discount(<1)。
- * 恒满足 adaptedConf ≤ gConf（单调收紧）；conf 降到信任门以下的结果重算 mustVerify，保持门一致。
+ * 按 source_type 收紧的 bidding 适配器。official_datasheet 不打折(=gConf)、最受信；其余类型乘 discount。
+ * 收紧细节：
+ *   - 最优源胜：一条 claim 只要**有一条**出处是 official_datasheet 即按官方对待（best-source-wins）。
+ *   - conf 降到信任门 0.6 以下的结果重算 mustVerify=true，保持消费门一致（否则会被内核 applyAdapter 拦）。
+ *   - 折后跌破内核消费下界 0.4 的结果直接丢弃——不把"不可消费"档泄露给下游（recall 本就不会吐 <0.4）。
+ * discount 默认 0.8、应 ≤1；若误传 >1 会抬高 conf，此时由内核 applyAdapter 抛 'adapter relaxed' 兜底（纵深防御）。
  */
 export function biddingAdapter(
   sourceTypeById: Map<string, string | undefined>,
@@ -53,18 +58,20 @@ export function biddingAdapter(
 ): RecallAdapter {
   const discount = opts.discount ?? DEFAULT_DISCOUNT
   return (results) =>
-    results.map((r) => {
-      const official = r.provenances.some(
-        (p) => sourceTypeById.get(p.sourceId) === OFFICIAL_DATASHEET,
-      )
-      const factor = official ? 1 : discount
-      const value = r.confidence.value * factor
-      return {
-        ...r,
-        confidence: { ...r.confidence, value },
-        mustVerify: value < MUST_VERIFY_THRESHOLD,
-      }
-    })
+    results
+      .map((r) => {
+        const official = r.provenances.some(
+          (p) => sourceTypeById.get(p.sourceId) === OFFICIAL_DATASHEET,
+        )
+        const factor = official ? 1 : discount
+        const value = r.confidence.value * factor
+        return {
+          ...r,
+          confidence: { ...r.confidence, value },
+          mustVerify: value < MUST_VERIFY_THRESHOLD,
+        }
+      })
+      .filter((r) => r.confidence.value >= KERNEL_CONFIDENCE_FLOOR) // 折到 floor 以下 → 丢，不泄露不可消费档
 }
 
 /**

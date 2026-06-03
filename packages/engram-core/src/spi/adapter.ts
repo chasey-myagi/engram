@@ -8,7 +8,7 @@
  * 内核对业务语义零认知：这个算子只比较 conf 数值与出处身份，绝不读任何业务 key（source_type 之类
  * 只在领域适配器包里解读）。这是 SPI 的最强收紧缝——评测、bidding 等所有 consumer 同走这道关。
  */
-import type { RecallResult } from './recall-claims.js'
+import { MUST_VERIFY_THRESHOLD, type RecallResult } from './recall-claims.js'
 
 /** 浮点容差：判据是 adaptedConf ≤ gConf + ε。 */
 export const DEFAULT_ADAPTER_EPSILON = 1e-9
@@ -16,6 +16,8 @@ export const DEFAULT_ADAPTER_EPSILON = 1e-9
 /** 领域适配器回调：吃内核召回结果，产出收紧后的结果（可降 conf、可丢结果，绝不可放松）。 */
 export type RecallAdapter = (kernelResults: readonly RecallResult[]) => RecallResult[]
 
+// 按位置比对（保守：连「重排出处」也判 rewrite）。recall 的出处扇出顺序是确定的、且 applyAdapter 拿的是
+// 同一 kernelResults 引用，故此切片下顺序天然一致；真出现合法重排需求时再改成 multiset 比对。
 function provenanceEqual(a: RecallResult['provenances'], b: RecallResult['provenances']): boolean {
   if (a.length !== b.length) return false
   for (let i = 0; i < a.length; i++) {
@@ -33,8 +35,10 @@ function provenanceEqual(a: RecallResult['provenances'], b: RecallResult['proven
  *   - 结果数 > 内核召回数（增召回）
  *   - 出现内核召回里没有的 claim（伪造结果）/ 同一 claim 重复（灌数）
  *   - adaptedConf > gConf + ε（放松信心）
+ *   - sub-0.6 结果被标 mustVerify=false（放松消费门：把"须先核验"谎报成"可直接用"）
  *   - 出处被改写（条数或任一 sourceId/locator/relevance 变化）
  * 合法收紧（降 conf / 丢结果 / 原样返回）放行，返回收紧后的结果（内核召回的子集）。
+ * 刻意只管 conf / count / provenance / mustVerify；claimText / status / raw 等属直通（不在收紧契约内）。
  */
 export function applyAdapter(
   kernelResults: RecallResult[],
@@ -65,6 +69,13 @@ export function applyAdapter(
     if (a.confidence.value > o.confidence.value + eps) {
       throw new Error(
         `adapter relaxed: raised confidence above kernel g (claim ${a.claim.id}: ${a.confidence.value} > ${o.confidence.value})`,
+      )
+    }
+    // mustVerify 也是内核消费门字段：value<0.6 必须 mustVerify=true。把 sub-0.6 结果标成「可直接用」
+    // 是在放松内核门（与抬 conf 同性质的放松）—— 拦住。≥0.6 仍标 true（过度谨慎）属收紧，放行。
+    if (a.confidence.value < MUST_VERIFY_THRESHOLD && a.mustVerify !== true) {
+      throw new Error(
+        `adapter relaxed: under-flagged mustVerify on a sub-${MUST_VERIFY_THRESHOLD} result (claim ${a.claim.id})`,
       )
     }
     if (!provenanceEqual(a.provenances, o.provenances)) {

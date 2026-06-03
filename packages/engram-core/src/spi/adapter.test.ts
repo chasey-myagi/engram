@@ -56,11 +56,15 @@ describe('applyAdapter — monotone-tightening operator (A.2/A.6)', () => {
     const tighten: RecallAdapter = (rs) =>
       rs
         .filter((r) => r.claim.id !== 'c') // drop one
-        .map((r) => ({ ...r, confidence: { ...r.confidence, value: r.confidence.value * 0.5 } }))
+        .map((r) => {
+          const value = r.confidence.value * 0.5
+          return { ...r, confidence: { ...r.confidence, value }, mustVerify: value < 0.6 }
+        })
     const out = applyAdapter(kernel(), tighten)
     expect(out.map((r) => r.claim.id)).toEqual(['a', 'b']) // subset
     expect(out[0]!.confidence.value).toBeCloseTo(0.45)
     expect(out[1]!.confidence.value).toBeCloseTo(0.35)
+    expect(out.every((r) => r.mustVerify)).toBe(true) // both fell below 0.6 → flagged
   })
 
   it('passes an identity adapter (returns results unchanged)', () => {
@@ -115,6 +119,28 @@ describe('applyAdapter — monotone-tightening operator (A.2/A.6)', () => {
           : { ...r },
       )
     expect(() => applyAdapter(kernel(), addProv)).toThrow(/adapter relaxed.*provenance/i)
+  })
+
+  it("throws 'adapter relaxed' when the adapter under-flags mustVerify (same conf, true→false on a sub-0.6 result)", () => {
+    // c has value 0.5 (<0.6) ⇒ kernel mustVerify=true; flipping it false at the same conf relaxes the gate
+    const downgrade: RecallAdapter = (rs) =>
+      rs.map((r) => (r.claim.id === 'c' ? { ...r, mustVerify: false } : { ...r }))
+    expect(() => applyAdapter(kernel(), downgrade)).toThrow(/adapter relaxed.*mustVerify/i)
+  })
+
+  it('allows over-flagging mustVerify (true on a ≥0.6 result is more cautious, not a relaxation)', () => {
+    const overflag: RecallAdapter = (rs) => rs.map((r) => ({ ...r, mustVerify: true }))
+    expect(() => applyAdapter(kernel(), overflag)).not.toThrow()
+  })
+
+  it('treats claimText / raw as intentional pass-through (outside the conf/count/provenance/mustVerify contract)', () => {
+    const tamper: RecallAdapter = (rs) =>
+      rs.map((r) => ({
+        ...r,
+        claim: { ...r.claim, claimText: 'rewritten' },
+        confidence: { ...r.confidence, raw: 0.123 },
+      }))
+    expect(() => applyAdapter(kernel(), tamper)).not.toThrow() // documented non-protected fields
   })
 
   it('tolerates a conf within ε of kernel g, but rejects one clearly above', () => {
