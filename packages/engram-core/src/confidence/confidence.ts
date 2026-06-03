@@ -158,13 +158,17 @@ export function computeRaw(
 
 /**
  * 用一组权重对**已存因子**重算 raw（S7 配置态：召回时用活动权重重算）。
- * raw = base(加性因子, 权重) × 存档 staleDecay × conflictDecay —— 权重是策略态(活动)、衰减是证据态(存档)。
+ * raw = base(加性因子, 权重) × 存档 staleDecay × conflictDecay。
+ * opts.conflictDecay 可覆盖存档值 —— S8 召回时按**实时** active contradicts 边数现算 conflictDecay，
+ * 让冲突双方实时各吃惩罚（存档的 conflictDecay 是写时 n=0 的快照，不反映后来才出现的矛盾）。
  */
 export function rawFromStoredFactors(
   factors: ConfidenceFactorBreakdown,
   weights: FactorWeights,
+  opts: { conflictDecay?: number } = {},
 ): number {
-  return computeBase(factors, weights) * factors.staleDecay * factors.conflictDecay
+  const cDecay = opts.conflictDecay ?? factors.conflictDecay
+  return computeBase(factors, weights) * factors.staleDecay * cDecay
 }
 
 /** g 映射：起步 identity（conf=raw）。未来在此分派 temperature / isotonic（S27/S28），与 w 职责分离。 */

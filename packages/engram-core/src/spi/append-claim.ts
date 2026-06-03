@@ -10,7 +10,7 @@
  */
 import { randomUUID } from 'node:crypto'
 
-import { eq, inArray } from 'drizzle-orm'
+import { and, eq, inArray, ne } from 'drizzle-orm'
 
 import {
   NEUTRAL_FACTORS,
@@ -146,6 +146,35 @@ async function insertProvenances(
   }
 }
 
+/**
+ * S8 矛盾检测（乐观、不阻塞）：起步判据是 A.5「object 反向→contradicts」的确定性子集——
+ * 同 subject ∧ 同 predicate ∧ object 不同 = 矛盾。完整 same_fact 判定（object_equiv / 单位归一 / 灰区 LLM）是 S14。
+ * 只在结构化 claim（S/P/O 齐全）上检测；命中则记一条 contradicts 边、**两条 claim 都留**（不合并、不改状态、不拒写）。
+ */
+async function recordContradictions(tx: Tx, newClaimId: string, draft: DraftClaim): Promise<void> {
+  if (draft.subject == null || draft.predicate == null || draft.object == null) return
+  const conflicting = await tx
+    .select({ id: claim.id })
+    .from(claim)
+    .where(
+      and(
+        ne(claim.id, newClaimId),
+        ne(claim.status, 'superseded'), // 已被取代的旧版不再参与矛盾
+        eq(claim.subject, draft.subject),
+        eq(claim.predicate, draft.predicate),
+        ne(claim.object, draft.object), // object 反向/不同；既有行 object IS NULL 时 SQL <> 判 NULL → 不算矛盾
+      ),
+    )
+  for (const c of conflicting) {
+    await tx.insert(relation).values({
+      id: randomUUID(),
+      fromClaim: newClaimId,
+      toClaim: c.id,
+      type: 'contradicts',
+    })
+  }
+}
+
 /** 幂等入原文：content_hash 撞号则复用既有行（不重复落库），单语句 ON CONFLICT 总返存活 id。meta 原样存。 */
 export async function addSource(db: DB, input: SourceInput): Promise<{ sourceId: string }> {
   const rows = await db
@@ -177,6 +206,7 @@ export async function appendClaim(
     const conf = await computeClaimConfidence(tx, draft, provenances)
     const claimId = await insertClaim(tx, draft, randomUUID(), conf)
     await insertProvenances(tx, claimId, provenances)
+    await recordContradictions(tx, claimId, draft) // 乐观：记矛盾边、保留双方、绝不因冲突拒写
     return { claimId }
   })
 }

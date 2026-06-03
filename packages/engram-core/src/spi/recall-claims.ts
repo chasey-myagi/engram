@@ -22,13 +22,20 @@ import {
   KERNEL_CONFIDENCE_FLOOR,
   MUST_VERIFY_THRESHOLD,
   applyG,
+  conflictDecay,
   rawFromStoredFactors,
   type ConfidenceFactorBreakdown,
   type FactorWeights,
   type StoredConfidence,
 } from '../confidence/confidence.js'
 import type { DB } from '../db/client.js'
-import { claim, claimProvenance, type ClaimStatus, type ProvRelevance } from '../db/schema.js'
+import {
+  claim,
+  claimProvenance,
+  relation,
+  type ClaimStatus,
+  type ProvRelevance,
+} from '../db/schema.js'
 
 // 内核消费门常量定义在命门模块；这里 re-export 保持既有 import 路径（index / adapter / bidding）不变。
 export { KERNEL_CONFIDENCE_FLOOR, MUST_VERIFY_THRESHOLD }
@@ -68,8 +75,13 @@ export interface RecallResult {
   }
   confidence: ConfidenceSnapshot
   provenances: RecalledProvenance[]
-  /** value 落在 [floor, 0.6) → true（可用但须先核验）；≥0.6 → false。 */
+  /** value 落在 [floor, mustVerifyThreshold) → true（可用但须先核验）；≥ 该门 → false。 */
   mustVerify: boolean
+  /**
+   * 与本 claim 存在 contradicts 边、且对方仍 active 的 claim id 列表（A.5「矛盾显式」：双返、不静默丢、不自动选）。
+   * 其长度（去重后的 active 对端数，非底层边数）即喂 conflictDecay 的活跃矛盾计数 —— 冲突双方实时各吃惩罚。
+   */
+  contradicts: string[]
 }
 
 export interface RecallContext {
@@ -141,16 +153,71 @@ export async function recallClaims(
       ),
     )
 
-  // 召回瞬间：用活动权重对存档因子重算 raw（配置态变更即刻生效），再现算 g → value。整次 recall 共享 takenAt。
+  // S8 矛盾显式：数每个候选的 active contradicts 边（对端仍 active 才算活跃矛盾），喂实时 conflictDecay。
+  const candidateIds = candidates.map((c) => c.id)
+  const candidateSet = new Set(candidateIds)
+  const edges = candidateIds.length
+    ? await db
+        .select({ from: relation.fromClaim, to: relation.toClaim })
+        .from(relation)
+        .where(
+          and(
+            eq(relation.type, 'contradicts'),
+            or(inArray(relation.fromClaim, candidateIds), inArray(relation.toClaim, candidateIds)),
+          ),
+        )
+    : []
+  // 候选都是 active；非候选对端的 status 需查一遍（矛盾边对端可能没命中 query 子串）。
+  const otherIds = [
+    ...new Set(
+      edges
+        .flatMap((e) => [e.from, e.to])
+        .filter((id): id is string => id != null && !candidateSet.has(id)),
+    ),
+  ]
+  const otherRows = otherIds.length
+    ? await db
+        .select({ id: claim.id, status: claim.status })
+        .from(claim)
+        .where(inArray(claim.id, otherIds))
+    : []
+  // 所有“仍 active”的相关 id（候选必 active；再并入非候选对端里 active 的）。只有 active 对端才算活跃矛盾。
+  const activeIds = new Set<string>(candidateIds)
+  for (const r of otherRows) if (r.status === 'active') activeIds.add(r.id)
+  const contradictsByClaim = new Map<string, Set<string>>()
+  const addContra = (a: string, b: string) => {
+    const s = contradictsByClaim.get(a) ?? new Set<string>()
+    s.add(b)
+    contradictsByClaim.set(a, s)
+  }
+  for (const e of edges) {
+    if (e.to == null) continue // relation.to_claim 可空：半边防御性跳过
+    if (e.from === e.to) continue // 防御：自指 contradicts 边不让 claim 与自己矛盾（写路径已挡，直插库兜底）
+    if (candidateSet.has(e.from) && activeIds.has(e.to)) addContra(e.from, e.to)
+    if (candidateSet.has(e.to) && activeIds.has(e.from)) addContra(e.to, e.from)
+  }
+
+  // 召回瞬间：用活动权重对存档因子重算 raw（配置态变更即刻生效）+ 实时 conflictDecay，再现算 g → value。
   const takenAt = new Date()
   const gated = candidates
     .map((c) => {
       // confidence_factors 是 jsonb；写路径是唯一写者且类型锁定（StoredConfidence），故此处盲转安全。
       const stored = c.confidenceFactors as StoredConfidence
-      const raw = rawFromStoredFactors(stored.factors, std.factorWeights) // 活动权重重算
+      const contra = contradictsByClaim.get(c.id)
+      const activeContradicts = contra ? contra.size : 0
+      const cDecay = conflictDecay(activeContradicts) // 实时矛盾边数 → 惩罚
+      const raw = rawFromStoredFactors(stored.factors, std.factorWeights, { conflictDecay: cDecay })
       // S7 阶段 g 仍只有 'identity'（g 是统计态、S28 接管，与配置态 w 分离）。未知版本 applyG 会抛 → S27/S28 处理。
       const value = applyG(raw, stored.calibrationVersion)
-      return { c, raw, value, stored }
+      return {
+        c,
+        raw,
+        value,
+        stored,
+        activeContradicts,
+        cDecay,
+        contradicts: contra ? [...contra] : [],
+      }
     })
     .filter((g) => g.value >= floor)
 
@@ -198,13 +265,19 @@ export async function recallClaims(
       confidence: {
         value: g.value,
         raw: g.raw,
-        factors: g.stored.factors,
+        // 快照里 activeContradicts / conflictDecay 反映**实时**矛盾边数（其余因子取存档值）。
+        factors: {
+          ...g.stored.factors,
+          activeContradicts: g.activeContradicts,
+          conflictDecay: g.cDecay,
+        },
         weights: std.factorWeights, // 活动权重入快照——"为什么当时这么信"可重建（历史快照随它冻结）
         calibrationVersion: g.stored.calibrationVersion,
         takenAt,
       },
       provenances,
       mustVerify: g.value < std.mustVerifyThreshold, // 配置态信任门
+      contradicts: g.contradicts,
     })
   }
 

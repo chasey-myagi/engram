@@ -15,7 +15,7 @@ import {
 } from '../confidence/confidence.js'
 import { createDb, type DB } from '../db/client.js'
 import { addSource, appendClaim } from '../spi/append-claim.js'
-import { claim, claimProvenance, type ClaimStatus } from '../db/schema.js'
+import { claim, claimProvenance, relation, type ClaimStatus } from '../db/schema.js'
 import { recallClaims } from '../spi/recall-claims.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
@@ -433,5 +433,149 @@ describe('S3 g mapping at recall (criterion 5)', () => {
       expect(v).toBeGreaterThanOrEqual(prev)
       prev = v
     }
+  })
+})
+
+describe('S8 contradicts — dual-return + real-time conflictDecay (A.3/A.5)', () => {
+  const contradict = (from: string, to: string) =>
+    db
+      .insert(relation)
+      .values({ id: randomUUID(), fromClaim: from, toClaim: to, type: 'contradicts' })
+
+  it('returns BOTH contradicting claims, each annotated with the contradicts edge — neither dropped nor auto-picked', async () => {
+    const a = await seedClaim({ raw: 0.8, text: 'sky color blue' })
+    const b = await seedClaim({ raw: 0.8, text: 'sky color green' })
+    await contradict(a, b)
+
+    const results = await recallClaims(db, 'sky color')
+    expect(results).toHaveLength(2)
+    const byId = new Map(results.map((r) => [r.claim.id, r]))
+    expect(byId.get(a)!.contradicts).toEqual([b]) // each tagged with its contradicts edge
+    expect(byId.get(b)!.contradicts).toEqual([a])
+  })
+
+  it('an active contradicts edge drives conflictDecay so BOTH sides drop vs no-conflict (real time)', async () => {
+    const a = await seedClaim({ raw: 0.8, text: 'engram conflict a' })
+    const b = await seedClaim({ raw: 0.8, text: 'engram conflict b' })
+
+    // before the edge: full confidence, conflictDecay = 1
+    const before = new Map((await recallClaims(db, 'engram conflict')).map((r) => [r.claim.id, r]))
+    expect(before.get(a)!.confidence.value).toBeCloseTo(0.8, 6)
+    expect(before.get(a)!.confidence.factors.conflictDecay).toBe(1)
+
+    await contradict(a, b) // one active contradiction each → conflictDecay(1) = 1/1.5
+
+    const after = new Map((await recallClaims(db, 'engram conflict')).map((r) => [r.claim.id, r]))
+    for (const id of [a, b]) {
+      expect(after.get(id)!.confidence.value).toBeCloseTo(0.8 / 1.5, 6) // measurably reduced, both sides
+      expect(after.get(id)!.confidence.factors.activeContradicts).toBe(1)
+      expect(after.get(id)!.confidence.factors.conflictDecay).toBeCloseTo(1 / 1.5, 6)
+    }
+  })
+
+  it('a claim with no contradictions is unaffected (conflictDecay = 1, contradicts = [])', async () => {
+    await seedClaim({ raw: 0.8, text: 'lonely fact' })
+    const [r] = await recallClaims(db, 'lonely fact')
+    expect(r!.confidence.value).toBeCloseTo(0.8, 6)
+    expect(r!.confidence.factors.conflictDecay).toBe(1)
+    expect(r!.confidence.factors.activeContradicts).toBe(0)
+    expect(r!.contradicts).toEqual([])
+  })
+
+  it.each(['draft', 'flagged', 'quarantined', 'superseded'] as const)(
+    'a contradiction whose opponent is %s is not an active conflict (only active opponents count)',
+    async (status) => {
+      const a = await seedClaim({ raw: 0.8, text: `nonactive opp ${status} head` })
+      const b = await seedClaim({ raw: 0.8, text: `opp ${status} other`, status })
+      await contradict(a, b)
+      const [r] = await recallClaims(db, `nonactive opp ${status} head`)
+      expect(r!.confidence.value).toBeCloseTo(0.8, 6) // opponent not active → no live conflict
+      expect(r!.confidence.factors.conflictDecay).toBe(1)
+      expect(r!.contradicts).toEqual([])
+    },
+  )
+
+  it('conflict can GATE, not just down-rank: enough active contradictions push value below the floor → absent', async () => {
+    const a = await seedClaim({ raw: 0.5, text: 'gated by conflict target' })
+    const b = await seedClaim({ raw: 0.5, text: 'gated rival one' })
+    const c = await seedClaim({ raw: 0.5, text: 'gated rival two' })
+    await contradict(b, a)
+    await contradict(c, a) // 2 active contradictions → conflictDecay(2) = 0.5
+    // 0.5 × 0.5 = 0.25 < 0.4 floor → the target disappears entirely (conflict gates, not merely annotates)
+    expect(await recallClaims(db, 'gated by conflict target')).toHaveLength(0)
+  })
+
+  it('append→recall seam: a contradiction recorded by append surfaces in recall.contradicts (one real edge, read both ways)', async () => {
+    // recordContradictions writes ONE real edge (from new → existing); recall is direction-agnostic
+    const s1 = await seedSource(0.9)
+    const s2 = await seedSource(0.9)
+    const prov = [
+      { sourceId: s1.sourceId, locator: 'l1' },
+      { sourceId: s2.sourceId, locator: 'l2' },
+    ]
+    const { claimId: a } = await appendClaim(
+      db,
+      { claimText: 'seam sku maxres 4k', subject: 'sku', predicate: 'maxres', object: '4k' },
+      prov,
+    )
+    const { claimId: b } = await appendClaim(
+      db,
+      { claimText: 'seam sku maxres 1080p', subject: 'sku', predicate: 'maxres', object: '1080p' },
+      prov,
+    )
+    // promote to active + lift factors above the floor (S8 append base is too low to clear floor under the penalty)
+    for (const id of [a, b]) {
+      await db
+        .update(claim)
+        .set({ status: 'active', confidenceFactors: factorsBlob(0.9) })
+        .where(eq(claim.id, id))
+    }
+    const byId = new Map((await recallClaims(db, 'seam sku maxres')).map((r) => [r.claim.id, r]))
+    expect(byId.get(a)!.contradicts).toEqual([b]) // the single append-written edge is read from both sides
+    expect(byId.get(b)!.contradicts).toEqual([a])
+    expect(byId.get(a)!.confidence.factors.activeContradicts).toBe(1)
+  })
+
+  it('multiple active contradictions stack: conflictDecay(2) = 1/(1+0.5·2) = 0.5', async () => {
+    const a = await seedClaim({ raw: 0.9, text: 'multi target' })
+    const b = await seedClaim({ raw: 0.9, text: 'multi rival one' })
+    const c = await seedClaim({ raw: 0.9, text: 'multi rival two' })
+    await contradict(b, a)
+    await contradict(c, a)
+    const [r] = await recallClaims(db, 'multi target')
+    expect(r!.confidence.factors.activeContradicts).toBe(2)
+    expect(r!.confidence.value).toBeCloseTo(0.9 * 0.5, 6) // conflictDecay(2) = 0.5
+    expect(new Set(r!.contradicts)).toEqual(new Set([b, c]))
+  })
+
+  it('a self-referential contradicts edge does not make a claim conflict with itself (defensive)', async () => {
+    const a = await seedClaim({ raw: 0.8, text: 'self edge claim' })
+    await contradict(a, a) // from == to (write path blocks this; direct insert bottoms it out)
+    const [r] = await recallClaims(db, 'self edge claim')
+    expect(r!.contradicts).toEqual([])
+    expect(r!.confidence.factors.conflictDecay).toBe(1)
+  })
+
+  it('all five relation types persist with correct from/to references', async () => {
+    const a = await seedClaim({ raw: 0.8, text: 'rel from' })
+    const b = await seedClaim({ raw: 0.8, text: 'rel to' })
+    for (const type of [
+      'supports',
+      'contradicts',
+      'refines',
+      'derived_from',
+      'supersedes',
+    ] as const) {
+      await db.insert(relation).values({ id: randomUUID(), fromClaim: a, toClaim: b, type })
+    }
+    const rows = await db.select().from(relation).where(eq(relation.fromClaim, a))
+    expect(rows.map((r) => r.type).sort()).toEqual([
+      'contradicts',
+      'derived_from',
+      'refines',
+      'supersedes',
+      'supports',
+    ])
+    expect(rows.every((r) => r.toClaim === b)).toBe(true)
   })
 })

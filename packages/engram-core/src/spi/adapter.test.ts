@@ -42,6 +42,7 @@ function makeResult(id: string, value: number, sourceId = `src-${id}`): RecallRe
     },
     provenances: [{ sourceId, locator: 'p1', relevance: 'exact' }],
     mustVerify: value < 0.6,
+    contradicts: [],
   }
 }
 
@@ -158,6 +159,25 @@ describe('applyAdapter — monotone-tightening operator (A.2/A.6)', () => {
 
   it('an empty adapter (drops everything) is valid tightening', () => {
     expect(applyAdapter(kernel(), () => [])).toEqual([])
+  })
+
+  it("throws 'adapter relaxed' when the adapter DROPS a contradicts annotation (矛盾显式 red line, enforced)", () => {
+    const withContra: RecallResult = { ...makeResult('x', 0.8), contradicts: ['rival-1'] }
+    // a compliant-looking adapter that hides the conflict must be rejected — not merely "happen to pass"
+    const hide: RecallAdapter = (rs) => rs.map((r) => ({ ...r, contradicts: [] }))
+    expect(() => applyAdapter([withContra], hide)).toThrow(/adapter relaxed.*contradicts/i)
+  })
+
+  it('allows a tightening adapter that preserves (or adds to) contradicts', () => {
+    const withContra: RecallResult = { ...makeResult('x', 0.8), contradicts: ['rival-1'] }
+    const keep = applyAdapter([withContra], (rs) =>
+      rs.map((r) => ({ ...r, confidence: { ...r.confidence, value: 0.7 } })),
+    )
+    expect(keep[0]!.contradicts).toEqual(['rival-1']) // preserved
+    const add = applyAdapter([withContra], (rs) =>
+      rs.map((r) => ({ ...r, contradicts: [...r.contradicts, 'rival-2'] })),
+    )
+    expect(add[0]!.contradicts).toEqual(['rival-1', 'rival-2']) // superset (more cautious) allowed
   })
 
   it("throws 'adapter relaxed' when the adapter reorders provenances (positional check, conservative-by-design)", () => {
