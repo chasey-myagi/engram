@@ -71,7 +71,11 @@ export interface RecallResult {
 export interface RecallContext {
   /** 抬高消费门槛；只能 ≥ 内核 floor (0.4)，更低会被夹到 0.4，绝不放松内核底线。 */
   confidenceFloor?: number
-  /** 返回上限（默认 50）；按 value 降序取前 N。 */
+  /**
+   * 返回上限（默认 50）；按 value 降序取前 N。注意：候选先按 raw 取前 N 再过 floor，故窗口内若有
+   * 低于 floor 的高 raw 候选被滤除，结果可能少于 N——不会从窗口外回填（窗口外 raw 必更低、必同样在 floor 下，
+   * 故 g 单调下不存在被错漏的可消费 claim）。
+   */
   limit?: number
 }
 
@@ -142,6 +146,8 @@ export async function recallClaims(
       // confidence_factors 是 jsonb；写路径是唯一写者且类型锁定（StoredConfidence），故此处盲转安全。
       const stored = c.confidenceFactors as StoredConfidence
       const raw = c.confidenceRaw
+      // S3 只有 'identity' 一个 g。未知 calibrationVersion 会让 applyG 抛错、整次召回失败——
+      // 当 S27/S28 引入多 g 版本并支持回滚时，这里需改成按行隔离/退化（unknown→跳过或落 floor）；此切片不处理。
       const value = applyG(raw, stored.calibrationVersion)
       return { c, raw, value, stored }
     })

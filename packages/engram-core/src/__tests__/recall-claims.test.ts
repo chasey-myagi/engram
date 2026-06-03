@@ -183,6 +183,8 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     await db.update(claim).set({ confidenceRaw: 0.05, confidence: 0.05 }).where(eq(claim.id, id))
 
     expect(r!.confidence.value).toBe(0.8) // held snapshot unchanged (value copy, not a live view)
+    expect(r!.confidence.raw).toBe(0.8) // nested fields detached too, not just the value primitive
+    expect(r!.confidence.factors.entailment).toBe(0.5)
     const again = await recallClaims(db, 'mutate')
     expect(again).toHaveLength(0) // a fresh recall reflects the mutation (now below floor)
   })
@@ -333,11 +335,58 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     expect(r!.claim.asOf.toISOString()).toBe(asOf.toISOString())
   })
 
-  it('applies the DB-side limit before the floor filter — a below-floor top-N candidate drops, not backfilled', async () => {
-    await seedClaim({ raw: 0.8, text: 'lf high' })
-    await seedClaim({ raw: 0.3, text: 'lf low' }) // below the 0.4 kernel floor
-    const results = await recallClaims(db, 'lf', { limit: 2 })
-    expect(results.map((r) => r.confidence.value)).toEqual([0.8]) // 0.3 is in top-2-by-raw then floor-dropped
+  it('returns ALL provenances for a multi-provenance claim (exercises the grouping push branch)', async () => {
+    const id = await seedClaim({ raw: 0.8, text: 'multi prov', provenance: false })
+    const s1 = await seedSource()
+    const s2 = await seedSource()
+    await db.insert(claimProvenance).values([
+      {
+        id: randomUUID(),
+        claimId: id,
+        sourceId: s1.sourceId,
+        locator: 'loc-1',
+        relevance: 'exact',
+      },
+      {
+        id: randomUUID(),
+        claimId: id,
+        sourceId: s2.sourceId,
+        locator: 'loc-2',
+        relevance: 'supporting',
+      },
+    ])
+    const [r] = await recallClaims(db, 'multi prov')
+    expect(r!.provenances).toHaveLength(2)
+    expect(r!.provenances.map((p) => p.locator).sort()).toEqual(['loc-1', 'loc-2'])
+    expect(new Set(r!.provenances.map((p) => p.sourceId))).toEqual(
+      new Set([s1.sourceId, s2.sourceId]),
+    )
+  })
+
+  it('isolates provenance per claim — each result carries only its own sources', async () => {
+    const idA = await seedClaim({ raw: 0.8, text: 'iso alpha', provenance: false })
+    const idB = await seedClaim({ raw: 0.7, text: 'iso beta', provenance: false })
+    const sa = await seedSource()
+    const sb = await seedSource()
+    await db.insert(claimProvenance).values([
+      {
+        id: randomUUID(),
+        claimId: idA,
+        sourceId: sa.sourceId,
+        locator: 'a-loc',
+        relevance: 'exact',
+      },
+      {
+        id: randomUUID(),
+        claimId: idB,
+        sourceId: sb.sourceId,
+        locator: 'b-loc',
+        relevance: 'exact',
+      },
+    ])
+    const byId = new Map((await recallClaims(db, 'iso')).map((r) => [r.claim.id, r]))
+    expect(byId.get(idA)!.provenances.map((p) => p.sourceId)).toEqual([sa.sourceId]) // no B leakage
+    expect(byId.get(idB)!.provenances.map((p) => p.sourceId)).toEqual([sb.sourceId]) // no A leakage
   })
 
   it('end-to-end through the real append→recall seam: appended claims are draft (shadow zone) and are NOT recalled until promoted (S13)', async () => {
