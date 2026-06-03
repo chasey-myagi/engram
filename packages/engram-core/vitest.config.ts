@@ -5,10 +5,9 @@ const DEFAULT_DB = 'postgresql://engram:engram@localhost:5433/engram'
 export default defineConfig({
   test: {
     include: ['src/**/*.test.ts'],
-    globalSetup: ['./src/__tests__/global-setup.ts'],
-    // 注入到 test worker（CI 的真实 DATABASE_URL 优先，本地回落到 compose 的 db）
+    // 注入到 test worker（CI 的真实 DATABASE_URL 优先，本地回落到 compose 的 db）。
+    // 每个 DB 测试文件在 beforeAll 里建自己的一次性数据库（见 append-claim.test.ts），并发的
+    // 多个测试进程互不踩，无需全局 setup。
     env: { DATABASE_URL: process.env.DATABASE_URL ?? DEFAULT_DB },
-    // DB 测试共用一个库 + 用 TRUNCATE 隔离；关掉文件级并行避免跨文件竞态
-    fileParallelism: false,
   },
 })

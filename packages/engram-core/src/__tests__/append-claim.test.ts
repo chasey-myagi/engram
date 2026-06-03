@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { eq } from 'drizzle-orm'
-import type pg from 'pg'
+import { migrate } from 'drizzle-orm/node-postgres/migrator'
+import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { createDb, createPool, type DB } from '../db/client.js'
+import { createDb, type DB } from '../db/client.js'
 import {
   claim,
   claimProvenance,
@@ -18,16 +21,34 @@ import {
 } from '../db/schema.js'
 import { addSource, appendClaim, supersedeClaim } from '../spi/append-claim.js'
 
-let pool: pg.Pool
-let db: DB
+const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
+const migrationsFolder = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'drizzle')
 
-beforeAll(() => {
-  pool = createPool()
+let admin: pg.Pool // connected to the base db; creates/drops the per-run db
+let pool: pg.Pool // connected to this run's throwaway db
+let db: DB
+let testDbName: string
+
+// 每次测试运行用一个独立的一次性数据库做隔离：并发的多个测试进程（含 review-gate 的多 agent 同跑）
+// 各自有库，TRUNCATE 不会跨进程互踩、不再死锁/FK 违例。run 结束 DROP 掉。
+beforeAll(async () => {
+  testDbName = `engram_test_${randomUUID().replace(/-/g, '')}`
+  admin = new pg.Pool({ connectionString: DATABASE_URL })
+  await admin.query(`CREATE DATABASE ${testDbName}`)
+
+  const url = new URL(DATABASE_URL)
+  url.pathname = `/${testDbName}`
+  pool = new pg.Pool({ connectionString: url.toString() })
   db = createDb(pool)
+  await migrate(db, { migrationsFolder })
 })
+
 afterAll(async () => {
   await pool.end()
+  await admin.query(`DROP DATABASE IF EXISTS ${testDbName} WITH (FORCE)`)
+  await admin.end()
 })
+
 beforeEach(async () => {
   await pool.query(
     'TRUNCATE source, claim, claim_provenance, relation, claim_verification, page_claims CASCADE',
@@ -110,6 +131,13 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
     expect(rows[0]!.meta).toEqual(meta)
   })
 
+  it('two distinct content_hashes create two distinct sources (the negative of dedupe)', async () => {
+    const a = await addSource(db, { content: 'x', contentHash: randomUUID(), kind: 'human_qa' })
+    const b = await addSource(db, { content: 'y', contentHash: randomUUID(), kind: 'human_qa' })
+    expect(b.sourceId).not.toBe(a.sourceId)
+    expect(await db.select().from(source)).toHaveLength(2)
+  })
+
   it('supersede appends a new claim under the SAME lineage_id, marks old superseded, no physical delete', async () => {
     const { sourceId } = await seedSource()
     const { claimId: oldId } = await appendClaim(db, { claimText: 'v1' }, [
@@ -155,7 +183,6 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
         { sourceId: randomUUID(), locator: 'bad' }, // nonexistent source → FK fails after prov #1 inserted
       ]),
     ).rejects.toThrow()
-    // the claim AND the already-inserted first provenance must both be gone
     expect(await db.select().from(claim)).toHaveLength(0)
     expect(await db.select().from(claimProvenance)).toHaveLength(0)
   })
@@ -168,6 +195,16 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
       .from(claimProvenance)
       .where(eq(claimProvenance.claimId, claimId))
     expect(provs[0]!.relevance).toBe('supporting')
+  })
+
+  it('append() stamps the S1 placeholder confidence triple + default createdBy (locks the S2 contract)', async () => {
+    const { sourceId } = await seedSource()
+    const { claimId } = await appendClaim(db, { claimText: 'c' }, [{ sourceId, locator: 'l' }])
+    const row = (await db.select().from(claim).where(eq(claim.id, claimId)))[0]!
+    expect(row.confidence).toBe(0)
+    expect(row.confidenceRaw).toBe(0)
+    expect(row.confidenceFactors).toEqual({})
+    expect(row.createdBy).toBe('agent:unknown')
   })
 
   it('keeps one stable lineage across a supersede chain (v1 -> v2 -> v3), append-only', async () => {
@@ -208,7 +245,7 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
     expect(await db.select().from(relation)).toHaveLength(0)
   })
 
-  it('supersedeClaim refuses to supersede an already-superseded claim (no lineage fork)', async () => {
+  it('supersedeClaim refuses to supersede an already-superseded claim (sequential no-fork)', async () => {
     const { sourceId } = await seedSource()
     const { claimId: v1 } = await appendClaim(db, { claimText: 'v1' }, [{ sourceId, locator: 'l' }])
     await supersedeClaim(db, v1, { claimText: 'v2' }, [{ sourceId, locator: 'l' }]) // v1 -> superseded
@@ -216,6 +253,20 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
       supersedeClaim(db, v1, { claimText: 'v2-fork' }, [{ sourceId, locator: 'l' }]),
     ).rejects.toThrow(/already superseded/i)
     expect(await db.select().from(claim)).toHaveLength(2) // v1, v2 only — no forked head
+  })
+
+  it('serializes concurrent supersedes of the same head — single-head invariant (SELECT FOR UPDATE)', async () => {
+    const { sourceId } = await seedSource()
+    const { claimId: v1 } = await appendClaim(db, { claimText: 'v1' }, [{ sourceId, locator: 'l' }])
+    const results = await Promise.allSettled([
+      supersedeClaim(db, v1, { claimText: 'A' }, [{ sourceId, locator: 'l' }]),
+      supersedeClaim(db, v1, { claimText: 'B' }, [{ sourceId, locator: 'l' }]),
+    ])
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1) // exactly one wins
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1) // the other is rejected
+    const claims = await db.select().from(claim)
+    expect(claims).toHaveLength(2) // v1 + the single winning version — no fork
+    expect(claims.filter((c) => c.status === 'draft')).toHaveLength(1) // single head under the lineage
   })
 
   it('D1 DB-layer backstop: a provenance with NULL source_id is physically rejected (NOT NULL)', async () => {

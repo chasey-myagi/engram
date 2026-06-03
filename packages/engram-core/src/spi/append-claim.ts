@@ -144,11 +144,11 @@ export async function supersedeClaim(
       .select({ lineageId: claim.lineageId, status: claim.status })
       .from(claim)
       .where(eq(claim.id, oldClaimId))
+      .for('update') // 锁住旧版行：并发取代同一 head 时序列化，第二个会看到 superseded → 拒，避免谱系分叉
     if (old.length === 0) {
       throw new Error(`supersede_claim: claim ${oldClaimId} not found`)
     }
     // 单 head 不变量：只取代当前 head；取代一个已 superseded 的旧版会让同 lineage 出现两个 head（谱系分叉）。
-    // （并发取代同一 head 的竞态需 SELECT ... FOR UPDATE / lineage 唯一 head 约束，待引入并发写时处理。）
     if (old[0]!.status === 'superseded') {
       throw new Error(
         `supersede_claim: claim ${oldClaimId} is already superseded (would fork its lineage); supersede the current head`,
