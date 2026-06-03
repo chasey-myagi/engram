@@ -1,5 +1,7 @@
 node_modules/
 dist/
+coverage/
+.claude/
 .env
 *.log
 .DS_Store

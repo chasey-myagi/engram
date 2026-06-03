@@ -1,0 +1,22 @@
+{
+  "name": "engram",
+  "private": true,
+  "version": "0.0.0",
+  "description": "agent 原生可生长知识库内核 — 一条 claim = 一个 engram",
+  "license": "UNLICENSED",
+  "type": "module",
+  "packageManager": "pnpm@10.15.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "prettier": "^3.4.2"
+  }
+}

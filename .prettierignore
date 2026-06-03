@@ -1,0 +1,12 @@
+# 既有产物不归 prettier 管：PRD / 设计稿 / 交接文档手工排版，勿自动重排。
+docs/
+README.md
+*.html
+CLAUDE.md
+.github/ISSUE_TEMPLATE/
+
+# 生成物
+dist/
+coverage/
+node_modules/
+pnpm-lock.yaml
