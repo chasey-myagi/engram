@@ -43,3 +43,4 @@ export {
   type ReliabilityBin,
   type ReliabilityReport,
 } from './calibration/calibration.js'
+export { applyAdapter, DEFAULT_ADAPTER_EPSILON, type RecallAdapter } from './spi/adapter.js'
