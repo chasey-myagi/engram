@@ -159,4 +159,17 @@ describe('applyAdapter — monotone-tightening operator (A.2/A.6)', () => {
   it('an empty adapter (drops everything) is valid tightening', () => {
     expect(applyAdapter(kernel(), () => [])).toEqual([])
   })
+
+  it("throws 'adapter relaxed' when the adapter reorders provenances (positional check, conservative-by-design)", () => {
+    const twoProv: RecallResult = {
+      ...makeResult('m', 0.9),
+      provenances: [
+        { sourceId: 's1', locator: 'l1', relevance: 'exact' },
+        { sourceId: 's2', locator: 'l2', relevance: 'supporting' },
+      ],
+    }
+    const reorder: RecallAdapter = (rs) =>
+      rs.map((r) => ({ ...r, provenances: [...r.provenances].reverse() }))
+    expect(() => applyAdapter([twoProv], reorder)).toThrow(/adapter relaxed.*provenance/i)
+  })
 })

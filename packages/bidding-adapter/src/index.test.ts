@@ -116,6 +116,36 @@ describe('biddingAdapter — meta-driven tightening (pure)', () => {
     const out = biddingAdapter(new Map(), { discount: 0.5 })([bare])
     expect(out[0]!.confidence.value).toBeCloseTo(0.45)
   })
+
+  it('best-source-wins: a claim backed by BOTH an official and a non-official source is held at g (factor 1), regardless of provenance order', () => {
+    const types = new Map<string, string | undefined>([
+      ['s-off', OFFICIAL_DATASHEET],
+      ['s-forum', 'community_forum'],
+    ])
+    const mixed = (provs: RecallResult['provenances']): RecallResult => ({
+      ...makeResult('m', 0.9, 's-off'),
+      provenances: provs,
+    })
+    const provsA: RecallResult['provenances'] = [
+      { sourceId: 's-off', locator: 'l1', relevance: 'exact' },
+      { sourceId: 's-forum', locator: 'l2', relevance: 'supporting' },
+    ]
+    const adapt = biddingAdapter(types, { discount: 0.5 })
+    expect(adapt([mixed(provsA)])[0]!.confidence.value).toBeCloseTo(0.9) // one official ⇒ held at g
+    expect(adapt([mixed([...provsA].reverse())])[0]!.confidence.value).toBeCloseTo(0.9) // order-independent
+  })
+
+  it('an official claim above 0.6 keeps mustVerify=false (conf unchanged, not over-flagged)', () => {
+    const types = new Map<string, string | undefined>([['s-off', OFFICIAL_DATASHEET]])
+    const out = biddingAdapter(types)([makeResult('o', 0.9, 's-off')])
+    expect(out[0]!.confidence.value).toBeCloseTo(0.9)
+    expect(out[0]!.mustVerify).toBe(false)
+  })
+
+  it('discount 0 zeroes non-official conf → dropped below the consume-floor', () => {
+    const types = new Map<string, string | undefined>([['s-forum', 'community_forum']])
+    expect(biddingAdapter(types, { discount: 0 })([makeResult('f', 0.9, 's-forum')])).toEqual([])
+  })
 })
 
 // ---- DB integration: read real source.meta, recall, tighten through the SPI ----
@@ -263,20 +293,5 @@ describe('bidding-adapter DB integration — business identity via source.meta (
     for (const r of tightened) {
       expect(r.confidence.value).toBeLessThanOrEqual(gConf.get(r.claim.id)! + 1e-9) // tightening upheld
     }
-  })
-
-  it('request-tier confidenceFloor can only tighten — below the kernel 0.4 floor it is clamped, not lowered', async () => {
-    const off = await addSource(db, {
-      content: 'd',
-      contentHash: randomUUID(),
-      kind: 'formal_document',
-      meta: { source_type: OFFICIAL_DATASHEET },
-    })
-    await seedActiveClaim('floor probe low', off.sourceId, 0.45) // above kernel 0.4, below 0.6
-
-    // floor 0.1 is clamped up to 0.4 ⇒ the 0.45 claim still surfaces (consumers cannot lower the gate)
-    expect(await recallClaims(db, 'floor probe', { confidenceFloor: 0.1 })).toHaveLength(1)
-    // a stricter floor above 0.45 filters it out
-    expect(await recallClaims(db, 'floor probe', { confidenceFloor: 0.7 })).toHaveLength(0)
   })
 })

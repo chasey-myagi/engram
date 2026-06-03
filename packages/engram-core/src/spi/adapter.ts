@@ -39,6 +39,8 @@ function provenanceEqual(a: RecallResult['provenances'], b: RecallResult['proven
  *   - 出处被改写（条数或任一 sourceId/locator/relevance 变化）
  * 合法收紧（降 conf / 丢结果 / 原样返回）放行，返回收紧后的结果（内核召回的子集）。
  * 刻意只管 conf / count / provenance / mustVerify；claimText / status / raw 等属直通（不在收紧契约内）。
+ * 内核消费下界 0.4 在 recall 时强制、**不**在本算子兜底：sub-floor 结果（更收紧）会被放行——
+ * 领域适配器若不想把"不可消费"档泄露给下游须自行丢弃（bidding-adapter 即如此）。
  */
 export function applyAdapter(
   kernelResults: RecallResult[],
@@ -53,6 +55,7 @@ export function applyAdapter(
       `adapter relaxed: cannot increase recall count (${kernelResults.length} → ${adapted.length})`,
     )
   }
+  // recall 保证同一次召回内 claim.id 唯一（按 claim 行去重），故这个 Map 不会塌缩两条同 id 结果。
   const original = new Map(kernelResults.map((r) => [r.claim.id, r]))
   const seen = new Set<string>()
   for (const a of adapted) {
