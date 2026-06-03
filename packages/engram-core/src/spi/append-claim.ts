@@ -1,16 +1,24 @@
 /**
- * 乐观写入路径（Consumer SPI 的写半边，附录 A.2）。S1 walking skeleton：
+ * 乐观写入路径（Consumer SPI 的写半边，附录 A.2）。
  *   - addSource：幂等入原文（content_hash UNIQUE 去重，单语句 ON CONFLICT 总返存活 id），meta 透传不解释。
- *   - appendClaim：默认 draft、强制 ≥1 provenance、单事务原子写入（D1 硬门）。
- *   - supersedeClaim：append-only 取代 —— 新版本沿用同 lineage_id + 一条 supersedes 边，旧版标
- *     superseded 而**不物理删**。
+ *   - appendClaim：默认 draft、强制 ≥1 provenance、单事务原子写入（D1 硬门），并算出连续 confidence（S2 命门）。
+ *   - supersedeClaim：append-only 取代 —— 新版本沿用同 lineage_id + 一条 supersedes 边，旧版标 superseded（不物理删）。
  *
- * confidence 三元（confidence / confidence_raw / confidence_factors）本切片填占位值；连续化是 S2（命门）。
+ * S2（命门）：写入时按附录 A.3 算连续 confidence（替换 0/0/{} 占位）。此切片 entailment/humanReview/
+ * usageCorrect 用中性值、activeContradicts=0、独立性≈不同 source id —— 余下因子来源在后续切片接入
+ * （S8 矛盾 / S14 独立判定 / S17 entailment / S19 usage）。g 起步 = identity。
  */
 import { randomUUID } from 'node:crypto'
 
-import { eq } from 'drizzle-orm'
+import { eq, inArray } from 'drizzle-orm'
 
+import {
+  NEUTRAL_FACTORS,
+  computeConfidence,
+  halfLifeDaysForKind,
+  independentSupportScore,
+  type ComputedConfidence,
+} from '../confidence/confidence.js'
 import type { DB, Tx } from '../db/client.js'
 import {
   claim,
@@ -20,6 +28,8 @@ import {
   type ProvRelevance,
   type SourceKind,
 } from '../db/schema.js'
+
+const MS_PER_DAY = 86_400_000
 
 export interface SourceInput {
   content: string
@@ -56,7 +66,44 @@ function requireProvenance(provenances: ProvenanceInput[]): void {
   }
 }
 
-async function insertClaim(tx: Tx, draft: DraftClaim, lineageId: string): Promise<string> {
+/**
+ * S2 命门：从 claim 的出处源算连续 confidence。authority 取最强源、indepSupport 数独立源
+ * （S2 阶段独立≈不同 source id；完整 A.6 独立判定是 S14）、stale 看 as_of、halfLife 看最强源的 kind。
+ */
+async function computeClaimConfidence(
+  tx: Tx,
+  draft: DraftClaim,
+  provenances: ProvenanceInput[],
+): Promise<ComputedConfidence> {
+  const sourceIds = [...new Set(provenances.map((p) => p.sourceId))]
+  const sources = sourceIds.length
+    ? await tx
+        .select({ authority: source.authorityScore, kind: source.kind })
+        .from(source)
+        .where(inArray(source.id, sourceIds))
+    : []
+  // 最强源（authority 最高）一遍扫出：它的 authority_score 作 f0、它的 kind 定半衰期。
+  const dominant = sources.reduce<(typeof sources)[number] | null>(
+    (best, s) => (best === null || s.authority > best.authority ? s : best),
+    null,
+  )
+  const authority = dominant?.authority ?? 0
+  const halfLifeDays = dominant ? halfLifeDaysForKind(dominant.kind) : 180
+  const indepSupport = independentSupportScore(sources.length) // 1 源→0（无独立印证），越多越高
+  const asOf = draft.asOf ?? new Date()
+  const ageDays = Math.max(0, (Date.now() - asOf.getTime()) / MS_PER_DAY)
+  return computeConfidence(
+    { ...NEUTRAL_FACTORS, authority, indepSupport },
+    { ageDays, halfLifeDays, activeContradicts: 0 },
+  )
+}
+
+async function insertClaim(
+  tx: Tx,
+  draft: DraftClaim,
+  lineageId: string,
+  conf: ComputedConfidence,
+): Promise<string> {
   const id = randomUUID()
   await tx.insert(claim).values({
     id,
@@ -65,10 +112,13 @@ async function insertClaim(tx: Tx, draft: DraftClaim, lineageId: string): Promis
     predicate: draft.predicate,
     object: draft.object,
     status: 'draft',
-    // 占位值：S2（命门）把 confidence 换成连续多因子 + g
-    confidence: 0,
-    confidenceRaw: 0,
-    confidenceFactors: {},
+    confidence: conf.confidence,
+    confidenceRaw: conf.confidenceRaw,
+    confidenceFactors: {
+      factors: conf.factors,
+      weights: conf.weights,
+      calibrationVersion: conf.calibrationVersion,
+    },
     lineageId,
     asOf: draft.asOf ?? new Date(),
     createdBy: draft.createdBy ?? 'agent:unknown',
@@ -93,11 +143,7 @@ async function insertProvenances(
   }
 }
 
-/**
- * 幂等入原文：content_hash 撞号则复用既有行（不重复落库），单语句 ON CONFLICT 总返存活 id。
- * DO UPDATE 只把 content_hash 写成自身（no-op），既触发 RETURNING 返回既有行、又不动既有 meta / content。
- * meta 原样存、内核不读业务键。
- */
+/** 幂等入原文：content_hash 撞号则复用既有行（不重复落库），单语句 ON CONFLICT 总返存活 id。meta 原样存。 */
 export async function addSource(db: DB, input: SourceInput): Promise<{ sourceId: string }> {
   const rows = await db
     .insert(source)
@@ -111,13 +157,13 @@ export async function addSource(db: DB, input: SourceInput): Promise<{ sourceId:
     })
     .onConflictDoUpdate({
       target: source.contentHash,
-      set: { contentHash: input.contentHash },
+      set: { contentHash: input.contentHash }, // no-op update：撞号也触发 RETURNING 返回既有行，且不动既有 meta/content
     })
     .returning({ id: source.id })
   return { sourceId: rows[0]!.id }
 }
 
-/** 乐观写入：默认 draft，强制 ≥1 出处，claim + 出处单事务原子写入。新 claim 起一个新 lineage。 */
+/** 乐观写入：默认 draft，强制 ≥1 出处，连续 confidence + claim + 出处单事务原子写入。新 claim 起一个新 lineage。 */
 export async function appendClaim(
   db: DB,
   draft: DraftClaim,
@@ -125,7 +171,8 @@ export async function appendClaim(
 ): Promise<{ claimId: string }> {
   requireProvenance(provenances)
   return db.transaction(async (tx) => {
-    const claimId = await insertClaim(tx, draft, randomUUID())
+    const conf = await computeClaimConfidence(tx, draft, provenances)
+    const claimId = await insertClaim(tx, draft, randomUUID(), conf)
     await insertProvenances(tx, claimId, provenances)
     return { claimId }
   })
@@ -154,7 +201,8 @@ export async function supersedeClaim(
         `supersede_claim: claim ${oldClaimId} is already superseded (would fork its lineage); supersede the current head`,
       )
     }
-    const claimId = await insertClaim(tx, draft, old[0]!.lineageId)
+    const conf = await computeClaimConfidence(tx, draft, provenances)
+    const claimId = await insertClaim(tx, draft, old[0]!.lineageId, conf)
     await insertProvenances(tx, claimId, provenances)
     await tx
       .insert(relation)

@@ -20,6 +20,7 @@ import {
   verificationKind,
 } from '../db/schema.js'
 import { addSource, appendClaim, supersedeClaim } from '../spi/append-claim.js'
+import { DEFAULT_WEIGHTS } from '../confidence/confidence.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
 const migrationsFolder = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'drizzle')
@@ -60,6 +61,7 @@ async function seedSource(meta: Record<string, unknown> = {}) {
     content: 'datasheet body',
     contentHash: randomUUID(),
     kind: 'structured_spec',
+    authorityScore: 0.5, // explicit so confidence-factor assertions don't ride the schema default
     meta,
   })
 }
@@ -197,13 +199,21 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
     expect(provs[0]!.relevance).toBe('supporting')
   })
 
-  it('append() stamps the S1 placeholder confidence triple + default createdBy (locks the S2 contract)', async () => {
+  it('append() stamps a continuous computed confidence + factor snapshot (命门 — replaces the 0/0/{} placeholder)', async () => {
     const { sourceId } = await seedSource()
     const { claimId } = await appendClaim(db, { claimText: 'c' }, [{ sourceId, locator: 'l' }])
     const row = (await db.select().from(claim).where(eq(claim.id, claimId)))[0]!
-    expect(row.confidence).toBe(0)
-    expect(row.confidenceRaw).toBe(0)
-    expect(row.confidenceFactors).toEqual({})
+    expect(row.confidence).toBeGreaterThan(0) // no longer the 0 placeholder
+    expect(row.confidence).toBeLessThanOrEqual(1)
+    expect(row.confidence).toBe(row.confidenceRaw) // g = identity
+    const cf = row.confidenceFactors as {
+      calibrationVersion: string
+      weights: typeof DEFAULT_WEIGHTS
+      factors: Record<string, number>
+    }
+    expect(cf.calibrationVersion).toBe('identity')
+    expect(cf.weights).toEqual(DEFAULT_WEIGHTS)
+    expect(cf.factors.authority).toBe(0.5) // seedSource default authority_score
     expect(row.createdBy).toBe('agent:unknown')
   })
 
@@ -279,6 +289,100 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
         [randomUUID(), claimId, 'x'],
       ),
     ).rejects.toThrow()
+  })
+
+  it('命门 end-to-end: 1 source vs 3 independent sources vs a stale source → three distinct continuous confidences', async () => {
+    const s1 = await seedSource()
+    const single = await appendClaim(db, { claimText: 'fact' }, [
+      { sourceId: s1.sourceId, locator: 'l' },
+    ])
+
+    const a = await seedSource()
+    const b = await seedSource()
+    const c = await seedSource()
+    const triple = await appendClaim(db, { claimText: 'fact' }, [
+      { sourceId: a.sourceId, locator: 'l' },
+      { sourceId: b.sourceId, locator: 'l' },
+      { sourceId: c.sourceId, locator: 'l' },
+    ])
+
+    const sStale = await seedSource()
+    const twoYearsAgo = new Date(Date.now() - 730 * 86_400_000) // one half-life for structured_spec
+    const stale = await appendClaim(db, { claimText: 'fact', asOf: twoYearsAgo }, [
+      { sourceId: sStale.sourceId, locator: 'l' },
+    ])
+
+    const confOf = async (id: string) =>
+      (await db.select().from(claim).where(eq(claim.id, id)))[0]!.confidence
+    const cSingle = await confOf(single.claimId)
+    const cTriple = await confOf(triple.claimId)
+    const cStale = await confOf(stale.claimId)
+
+    expect(cTriple).toBeGreaterThan(cSingle) // more independent corroboration → higher
+    expect(cStale).toBeLessThan(cSingle) // staleness decays it
+    for (const v of [cSingle, cTriple, cStale]) {
+      expect(v).toBeGreaterThan(0)
+      expect(v).toBeLessThan(1)
+    }
+    expect(new Set([cSingle, cTriple, cStale]).size).toBe(3) // three distinct, non-bucketed values
+  })
+
+  it('supersede recomputes confidence from the NEW version provenances (v1 single < v2 three independent)', async () => {
+    const s1 = await seedSource()
+    const v1 = await appendClaim(db, { claimText: 'fact' }, [
+      { sourceId: s1.sourceId, locator: 'l' },
+    ])
+    const a = await seedSource()
+    const b = await seedSource()
+    const c = await seedSource()
+    const v2 = await supersedeClaim(db, v1.claimId, { claimText: 'fact' }, [
+      { sourceId: a.sourceId, locator: 'l' },
+      { sourceId: b.sourceId, locator: 'l' },
+      { sourceId: c.sourceId, locator: 'l' },
+    ])
+    const rowOf = async (id: string) => (await db.select().from(claim).where(eq(claim.id, id)))[0]!
+    const r1 = await rowOf(v1.claimId)
+    const r2 = await rowOf(v2.claimId)
+    expect(r2.confidence).toBeGreaterThan(r1.confidence) // recomputed from 3 independent sources
+    const cf2 = r2.confidenceFactors as { factors: { indepSupport: number } }
+    expect(cf2.factors.indepSupport).toBeCloseTo(0.75, 10) // 3 sources → 1 - 0.5^2
+  })
+
+  it('confidence uses the dominant (highest-authority) source for f0 and its kind for half-life', async () => {
+    // strong formal_document (authority 0.9, half-life 730) + weak human_qa (authority 0.2, half-life 90)
+    const strong = await addSource(db, {
+      content: 's',
+      contentHash: randomUUID(),
+      kind: 'formal_document',
+      authorityScore: 0.9,
+    })
+    const weak = await addSource(db, {
+      content: 'w',
+      contentHash: randomUUID(),
+      kind: 'human_qa',
+      authorityScore: 0.2,
+    })
+    const oneYearAgo = new Date(Date.now() - 365 * 86_400_000)
+    const { claimId } = await appendClaim(db, { claimText: 'mixed', asOf: oneYearAgo }, [
+      { sourceId: strong.sourceId, locator: 'l' },
+      { sourceId: weak.sourceId, locator: 'l' },
+    ])
+    const row = (await db.select().from(claim).where(eq(claim.id, claimId)))[0]!
+    const cf = row.confidenceFactors as { factors: { authority: number; staleDecay: number } }
+    expect(cf.factors.authority).toBe(0.9) // the strongest source, not the first / weakest
+    // dominant kind = formal_document (730) → 0.5^(365/730), NOT human_qa (90) → 0.5^(365/90)
+    expect(cf.factors.staleDecay).toBeCloseTo(Math.pow(0.5, 365 / 730), 6)
+  })
+
+  it('indepSupport counts DISTINCT sources — citing one source twice does not inflate corroboration (命门 red line)', async () => {
+    const { sourceId } = await seedSource()
+    const { claimId } = await appendClaim(db, { claimText: 'dup' }, [
+      { sourceId, locator: 'p1' },
+      { sourceId, locator: 'p2' }, // same source, different locator
+    ])
+    const row = (await db.select().from(claim).where(eq(claim.id, claimId)))[0]!
+    const cf = row.confidenceFactors as { factors: { indepSupport: number } }
+    expect(cf.factors.indepSupport).toBe(0) // 1 distinct source → no independent corroboration, not 2
   })
 
   it('all five enums match Appendix A.1 exactly', () => {
