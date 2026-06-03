@@ -15,3 +15,13 @@ export {
   type DraftClaim,
   type ProvenanceInput,
 } from './spi/append-claim.js'
+export {
+  recallClaims,
+  KERNEL_CONFIDENCE_FLOOR,
+  MUST_VERIFY_THRESHOLD,
+  DEFAULT_RECALL_LIMIT,
+  type RecallResult,
+  type RecallContext,
+  type ConfidenceSnapshot,
+  type RecalledProvenance,
+} from './spi/recall-claims.js'

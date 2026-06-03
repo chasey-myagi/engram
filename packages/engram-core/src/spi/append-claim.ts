@@ -18,6 +18,7 @@ import {
   halfLifeDaysForKind,
   independentSupportScore,
   type ComputedConfidence,
+  type StoredConfidence,
 } from '../confidence/confidence.js'
 import type { DB, Tx } from '../db/client.js'
 import {
@@ -105,6 +106,12 @@ async function insertClaim(
   conf: ComputedConfidence,
 ): Promise<string> {
   const id = randomUUID()
+  // 存 raw + 因子/权重/校准版本（不存 value：召回时按当前 g 现算）。类型锁定读写两端一致。
+  const stored: StoredConfidence = {
+    factors: conf.factors,
+    weights: conf.weights,
+    calibrationVersion: conf.calibrationVersion,
+  }
   await tx.insert(claim).values({
     id,
     claimText: draft.claimText,
@@ -114,11 +121,7 @@ async function insertClaim(
     status: 'draft',
     confidence: conf.confidence,
     confidenceRaw: conf.confidenceRaw,
-    confidenceFactors: {
-      factors: conf.factors,
-      weights: conf.weights,
-      calibrationVersion: conf.calibrationVersion,
-    },
+    confidenceFactors: stored,
     lineageId,
     asOf: draft.asOf ?? new Date(),
     createdBy: draft.createdBy ?? 'agent:unknown',

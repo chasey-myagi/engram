@@ -169,6 +169,20 @@ export interface ComputedConfidence {
   calibrationVersion: string
 }
 
+/** 因子拆解（持久化进 claim.confidence_factors.factors，A.3 七因子 + 两个衰减结果）。 */
+export type ConfidenceFactorBreakdown = ComputedConfidence['factors']
+
+/**
+ * 持久化进 claim.confidence_factors 的 jsonb 形状。写路径（appendClaim）按此存，
+ * 读路径（recallClaims）按此读 —— 一个类型锁住两端，防漂移。注意只存 raw 与因子/权重/校准版本，
+ * **不存 value**：value=g(raw) 在召回时按当前 g 现算（S27/S28 换 g 即时生效，无需重写 claim）。
+ */
+export interface StoredConfidence {
+  factors: ConfidenceFactorBreakdown
+  weights: FactorWeights
+  calibrationVersion: string
+}
+
 /** 一站式：因子 + 惩罚 → 完整计算结果。"为什么信"（w）与"数值=真实概率"（g）分开记。 */
 export function computeConfidence(
   f: AdditiveFactors,
