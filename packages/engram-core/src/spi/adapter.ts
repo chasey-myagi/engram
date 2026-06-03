@@ -37,8 +37,9 @@ function provenanceEqual(a: RecallResult['provenances'], b: RecallResult['proven
  *   - adaptedConf > gConf + ε（放松信心）
  *   - sub-0.6 结果被标 mustVerify=false（放松消费门：把"须先核验"谎报成"可直接用"）
  *   - 出处被改写（条数或任一 sourceId/locator/relevance 变化）
+ *   - 丢弃 contradicts 标注（隐藏矛盾，放松"矛盾显式"红线；多标更谨慎放行）
  * 合法收紧（降 conf / 丢结果 / 原样返回）放行，返回收紧后的结果（内核召回的子集）。
- * 刻意只管 conf / count / provenance / mustVerify；claimText / status / raw 等属直通（不在收紧契约内）。
+ * 刻意只管 conf / count / provenance / mustVerify / contradicts；claimText / status / raw 等属直通。
  * 内核消费下界 0.4 在 recall 时强制、**不**在本算子兜底：sub-floor 结果（更收紧）会被放行——
  * 领域适配器若不想把"不可消费"档泄露给下游须自行丢弃（bidding-adapter 即如此）。
  */
@@ -83,6 +84,16 @@ export function applyAdapter(
     }
     if (!provenanceEqual(a.provenances, o.provenances)) {
       throw new Error(`adapter relaxed: rewrote provenance (claim ${a.claim.id})`)
+    }
+    // 矛盾显式（红线）：adapter 不得**隐藏**内核标出的矛盾——adapted.contradicts 必须 ⊇ 内核的。
+    // 多标（更谨慎）放行；少标（藏冲突）= 放松，拦住。
+    const adaptedContra = new Set(a.contradicts)
+    for (const cid of o.contradicts) {
+      if (!adaptedContra.has(cid)) {
+        throw new Error(
+          `adapter relaxed: dropped a contradicts annotation (claim ${a.claim.id} no longer flags conflict with ${cid})`,
+        )
+      }
     }
   }
   return adapted

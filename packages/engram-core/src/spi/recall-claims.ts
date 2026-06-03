@@ -79,7 +79,7 @@ export interface RecallResult {
   mustVerify: boolean
   /**
    * 与本 claim 存在 contradicts 边、且对方仍 active 的 claim id 列表（A.5「矛盾显式」：双返、不静默丢、不自动选）。
-   * 其长度即喂 conflictDecay 的 active 矛盾边数 —— 冲突双方实时各吃惩罚。
+   * 其长度（去重后的 active 对端数，非底层边数）即喂 conflictDecay 的活跃矛盾计数 —— 冲突双方实时各吃惩罚。
    */
   contradicts: string[]
 }

@@ -548,6 +548,14 @@ describe('S8 contradicts — dual-return + real-time conflictDecay (A.3/A.5)', (
     expect(new Set(r!.contradicts)).toEqual(new Set([b, c]))
   })
 
+  it('a self-referential contradicts edge does not make a claim conflict with itself (defensive)', async () => {
+    const a = await seedClaim({ raw: 0.8, text: 'self edge claim' })
+    await contradict(a, a) // from == to (write path blocks this; direct insert bottoms it out)
+    const [r] = await recallClaims(db, 'self edge claim')
+    expect(r!.contradicts).toEqual([])
+    expect(r!.confidence.factors.conflictDecay).toBe(1)
+  })
+
   it('all five relation types persist with correct from/to references', async () => {
     const a = await seedClaim({ raw: 0.8, text: 'rel from' })
     const b = await seedClaim({ raw: 0.8, text: 'rel to' })

@@ -474,6 +474,13 @@ describe('S8 contradiction detection (append, optimistic — record both, never 
     expect(await contradictsEdges()).toHaveLength(0)
   })
 
+  it('does not contradict a SUPERSEDED existing claim (only live versions participate)', async () => {
+    const { claimId: old } = await appendStructured('sku-z', 'res', '4k', 'old')
+    await db.update(claim).set({ status: 'superseded' }).where(eq(claim.id, old))
+    await appendStructured('sku-z', 'res', '1080p', 'new reversed') // old superseded → excluded
+    expect(await contradictsEdges()).toHaveLength(0)
+  })
+
   it('a third reversed-object fact contradicts BOTH prior versions (two edges)', async () => {
     await appendStructured('sku-9', 'maxres', '720p', 'v1')
     await appendStructured('sku-9', 'maxres', '1080p', 'v2')
