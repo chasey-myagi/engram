@@ -1,0 +1,1352 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engram · agent 自养知识库 · 设计稿</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500;600&family=Playfair+Display:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:        oklch(0.155 0.014 58);
+  --bg-1:      oklch(0.195 0.016 56);
+  --bg-2:      oklch(0.235 0.018 54);
+  --bg-3:      oklch(0.285 0.020 52);
+  --ink:       oklch(0.125 0.012 58);
+  --line:      oklch(0.45 0.02 55 / .5);
+  --line-soft: oklch(0.45 0.02 55 / .24);
+
+  --cream:     oklch(0.945 0.022 82);
+  --muted:     oklch(0.76 0.020 72);
+  --faint:     oklch(0.58 0.016 62);
+
+  --plum:      oklch(0.66 0.175 320);
+  --plum-hi:   oklch(0.77 0.150 320);
+  --plum-dim:  oklch(0.45 0.130 320);
+  --saffron:   oklch(0.81 0.130 86);
+  --emerald:   oklch(0.75 0.125 164);
+  --info:      oklch(0.72 0.115 235);
+  --terra:     oklch(0.65 0.170 33);
+
+  --serif:'Playfair Display',Georgia,serif;
+  --sans:'DM Sans',system-ui,sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  --maxw:1080px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--cream);font-family:var(--sans);
+  font-size:clamp(15px,.5vw+13.5px,16.5px);line-height:1.72;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+  background-image:linear-gradient(oklch(0.45 0.02 55 / .045) 1px,transparent 1px),linear-gradient(90deg,oklch(0.45 0.02 55 / .045) 1px,transparent 1px);
+  background-size:72px 72px;mask-image:radial-gradient(ellipse 130% 75% at 50% 0%,#000 25%,transparent 92%)}
+.wrap{position:relative;z-index:1;max-width:var(--maxw);margin:0 auto;padding:0 clamp(20px,4vw,52px)}
+
+h1,h2,h3,h4{font-family:var(--serif);font-weight:600;line-height:1.12;letter-spacing:-.012em}
+.mono{font-family:var(--mono)}
+
+/* ── 顶栏图框 ── */
+.frame{display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;
+  padding:18px 0;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:11.5px;letter-spacing:.12em;color:var(--faint);text-transform:uppercase}
+.frame .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--plum);box-shadow:0 0 11px var(--plum);margin-right:8px;vertical-align:middle}
+
+/* ── HERO ── */
+.hero{padding:clamp(54px,9vh,116px) 0 clamp(34px,5vh,64px)}
+.hero .kick{font-family:var(--mono);font-size:12.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--saffron);margin-bottom:24px}
+.hero h1{font-size:clamp(56px,12vw,150px);line-height:.92;letter-spacing:-.04em;margin-bottom:8px;font-weight:700}
+.hero h1 .g{color:var(--plum-hi);text-shadow:0 0 44px oklch(0.66 0.175 320 / .4)}
+.hero .tag{font-family:var(--mono);font-size:13px;color:var(--faint);letter-spacing:.04em;margin-bottom:30px}
+.hero .lede{font-size:clamp(19px,1.7vw,25px);color:var(--muted);max-width:50ch;line-height:1.5}
+.hero .lede s{color:var(--faint);text-decoration-color:var(--terra);text-decoration-thickness:2px}
+.hero .lede b{color:var(--cream);font-weight:600}
+.hero .lede .p{color:var(--plum-hi);font-weight:600}
+
+/* ── 章节导航 ── */
+.toc{margin-top:clamp(44px,6vh,72px);border:1px solid var(--line);border-radius:14px;background:var(--bg-1);overflow:hidden;
+  display:grid;grid-template-columns:repeat(3,1fr)}
+@media(max-width:760px){.toc{grid-template-columns:1fr 1fr}}
+.toc a{display:block;padding:16px 18px;border-right:1px solid var(--line-soft);border-bottom:1px solid var(--line-soft);
+  text-decoration:none;color:var(--muted);transition:background .4s cubic-bezier(.16,1,.3,1)}
+.toc a:hover{background:oklch(0.66 0.175 320 / .08);color:var(--cream)}
+.toc a .n{font-family:var(--mono);font-size:11px;color:var(--plum-hi);letter-spacing:.1em}
+.toc a .t{font-family:var(--serif);font-size:16px;margin-top:7px;display:block;color:var(--cream)}
+.toc a .d{font-size:12px;color:var(--faint);margin-top:3px}
+
+/* ── section ── */
+section{padding:clamp(58px,10vh,116px) 0;border-top:1px solid var(--line-soft)}
+.head{margin-bottom:clamp(30px,4.5vh,52px)}
+.head .no{font-family:var(--mono);font-size:13px;color:var(--plum-hi);letter-spacing:.14em}
+.head h2{font-size:clamp(32px,5vw,58px);margin:14px 0 0;letter-spacing:-.02em}
+.head p{color:var(--muted);margin-top:16px;max-width:62ch;font-size:clamp(15px,1.1vw,18px);line-height:1.65}
+.head p b{color:var(--cream)} .head p .p{color:var(--plum-hi)}
+
+/* ── figure(图表优先的核心容器)── */
+.fig{border:1px solid var(--line);border-radius:16px;background:var(--bg-1);
+  padding:clamp(20px,2.6vw,40px) clamp(18px,2.4vw,38px) clamp(16px,2vw,26px);margin:22px 0;position:relative;overflow:hidden}
+.fig.flush{background:linear-gradient(180deg,var(--bg-1),oklch(0.175 0.015 57))}
+.fig figcaption{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;color:var(--faint);
+  margin-top:18px;padding-top:14px;border-top:1px dashed var(--line-soft);display:flex;gap:8px;align-items:baseline}
+.fig figcaption b{color:var(--plum-hi);font-weight:500}
+svg{display:block;width:100%;height:auto;overflow:visible}
+.svg-t{font-family:var(--serif);font-weight:600}
+.svg-l{font-family:var(--mono)}
+
+/* ── 图例 ── */
+.legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:14px;font-family:var(--mono);font-size:11px;color:var(--faint)}
+.legend i{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px;vertical-align:middle}
+
+/* ── 对比矩阵 ── */
+.matrix{width:100%;border-collapse:collapse;font-size:13.5px;margin:4px 0}
+.matrix th{text-align:left;font-family:var(--mono);font-size:11px;letter-spacing:.05em;text-transform:uppercase;padding:11px 13px;border-bottom:1px solid var(--line);color:var(--muted);vertical-align:bottom}
+.matrix th.eg{color:var(--plum-hi)}
+.matrix td{padding:11px 13px;border-bottom:1px dashed var(--line-soft);color:var(--faint);vertical-align:top}
+.matrix td.k{font-family:var(--mono);font-size:11.5px;color:var(--muted);white-space:nowrap}
+.matrix td.eg{color:var(--cream)} .matrix td.eg b{color:var(--plum-hi)}
+.matrix tr.hot td{background:oklch(0.66 0.175 320 / .06)} .matrix tr.hot td.eg b{color:var(--saffron)}
+.matrix .x{color:var(--terra)} .matrix .ok{color:var(--emerald)}
+
+/* ── 通用表 ── */
+table.dd{width:100%;border-collapse:collapse;margin:18px 0;font-size:13px}
+table.dd th{text-align:left;font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--plum-hi);padding:9px 12px;border-bottom:1px solid var(--line)}
+table.dd td{padding:9px 12px;border-bottom:1px dashed var(--line-soft);color:var(--muted);vertical-align:top}
+table.dd td b{color:var(--cream)} table.dd code{font-family:var(--mono);font-size:11.5px;color:var(--saffron)}
+table.dd .ok{color:var(--emerald)} table.dd .no{color:var(--terra)} table.dd .mid{color:var(--saffron)}
+
+/* ── 旁注 / 折叠 schema ── */
+.note{margin:16px 0;padding:14px 17px;border:1px solid var(--line-soft);border-radius:11px;background:oklch(0.66 0.175 320 / .05);font-size:13px;color:var(--muted);line-height:1.6}
+.note.warn{border-color:oklch(0.81 0.130 86 / .3);background:oklch(0.81 0.130 86 / .055)}
+.note .lbl{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--plum-hi)}
+.note.warn .lbl{color:var(--saffron)} .note b{color:var(--cream)}
+details.schema{margin:14px 0;border:1px solid var(--line-soft);border-radius:10px;overflow:hidden;background:var(--ink)}
+details.schema summary{cursor:pointer;padding:11px 16px;font-family:var(--mono);font-size:12px;color:var(--plum-hi);letter-spacing:.04em;list-style:none}
+details.schema summary::-webkit-details-marker{display:none}
+details.schema summary::before{content:"▸ ";color:var(--faint)} details.schema[open] summary::before{content:"▾ "}
+details.schema pre{padding:4px 16px 16px;overflow-x:auto;font-family:var(--mono);font-size:11.5px;line-height:1.6;color:oklch(0.84 0.02 80)}
+details.schema .c{color:var(--faint)} details.schema .k{color:var(--plum-hi)} details.schema .s{color:var(--saffron)} details.schema .star{color:var(--terra)}
+
+.prose p{color:var(--muted);margin:11px 0;max-width:70ch;line-height:1.7}
+.prose p b{color:var(--cream)} .prose p .p{color:var(--plum-hi)} .prose code{font-family:var(--mono);font-size:12px;color:var(--saffron)}
+
+footer{border-top:1px solid var(--line);padding:38px 0 72px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px;
+  font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;color:var(--faint);text-transform:uppercase}
+footer b{color:var(--plum-hi);font-weight:500}
+
+.rv{opacity:0;transform:translateY(20px)}
+.rv.in{opacity:1;transform:none;transition:opacity .85s cubic-bezier(.16,1,.3,1),transform .85s cubic-bezier(.16,1,.3,1)}
+.pulse{animation:pulse 2.8s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}.rv,.rv.in{opacity:1;transform:none;transition:none}.pulse{animation:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="frame">
+    <div><span class="dot"></span>ENGRAM · agent 自养知识库</div>
+    <div>独立产品设计稿 · DRAFT</div>
+    <div>2026·06·02</div>
+  </div>
+
+  <header class="hero">
+    <div class="kick rv">agent-native knowledge · 一条 claim = 一个 engram</div>
+    <h1 class="rv">Engr<span class="g">a</span>m</h1>
+    <div class="tag rv">/ˈɛnˌɡræm/ · 记忆的物理痕迹 · 可生长 · 可校验 · 可回滚</div>
+    <p class="lede rv">一个独立、领域无关的 <b>agent 可生长记忆层</b>。<br>
+       不是 RAG 的<s>外挂硬盘</s>,是 agent 的<span class="p">第二大脑</span> —— 任何 agent 通过统一接口读它、写它,它在使用中自我生长、自我修正。</p>
+
+    <nav class="toc rv">
+      <a href="#s1"><span class="n">01</span><span class="t">是什么</span><span class="d">凭什么不是 RAG</span></a>
+      <a href="#s2"><span class="n">02</span><span class="t">三层模型</span><span class="d">raw → claim → view</span></a>
+      <a href="#s3"><span class="n">03</span><span class="t">一条事实的一生</span><span class="d">解剖 + 置信生命周期</span></a>
+      <a href="#s4"><span class="n">04</span><span class="t">知识怎么进来</span><span class="d">来源阶梯 + 蒸馏</span></a>
+      <a href="#s5"><span class="n">05</span><span class="t">agent 怎么用</span><span class="d">消费契约 + SPI</span></a>
+      <a href="#s6"><span class="n">06</span><span class="t">信任 + 免疫</span><span class="d">三道防线 + 状态机</span></a>
+      <a href="#s7"><span class="n">07</span><span class="t">人即主编</span><span class="d">策展产品</span></a>
+      <a href="#s8"><span class="n">08</span><span class="t">总装</span><span class="d">编队 + 架构 + 部署</span></a>
+      <a href="#s9"><span class="n">09</span><span class="t">编排与循环</span><span class="d">控制面 + agent loop</span></a>
+      <a href="#s10"><span class="n">10</span><span class="t">评测</span><span class="d">三层 benchmark</span></a>
+      <a href="#s11"><span class="n">11</span><span class="t">核心机制定义</span><span class="d">g / embedding / lineage / 独立源</span></a>
+      <a href="#s12"><span class="n">12</span><span class="t">推进路线</span><span class="d">从设计稿到北极星</span></a>
+      <a href="#s13"><span class="n">13</span><span class="t">未决与横切</span><span class="d">诚实清单</span></a>
+    </nav>
+  </header>
+
+  <!-- ════ §1 是什么 ════ -->
+  <section id="s1">
+    <div class="head rv">
+      <div class="no">01 / POSITIONING</div>
+      <h2>是什么 · 凭什么不是 RAG</h2>
+      <p>三个既有范式各缺一层:RAG 缺<b>蒸馏层</b>(召回的是原始切片,真假和出处要 agent 自己判)、Wiki 缺<b>原子化</b>(给人读的叙述,机器要重新解析)、知识图谱缺<b>出处与置信</b>(边是二元的有/无)。Engram 把缺的那层补成<span class="p">内核约束</span>。</p>
+    </div>
+
+    <figure class="fig flush rv">
+      <table class="matrix">
+        <thead><tr><th>维度</th><th>传统 RAG</th><th>传统 Wiki</th><th>知识图谱 KG</th><th class="eg">Engram</th></tr></thead>
+        <tbody>
+          <tr class="hot"><td class="k">召回单元</td><td>raw chunk(原始切片)</td><td>整页文档</td><td>三元组 (s,p,o)</td><td class="eg"><b>claim · 蒸馏事实原子</b></td></tr>
+          <tr><td class="k">强制出处</td><td class="x">否,chunk 即证据</td><td>弱,靠人自觉</td><td class="x">否,边无 provenance</td><td class="eg"><b class="ok">库层强制,缺出处即拒</b></td></tr>
+          <tr><td class="k">蒸馏层</td><td class="x">缺失(原罪)</td><td>叙述未原子化</td><td>schema 死板易脆</td><td class="eg">raw→claim→view 三层不塌缩</td></tr>
+          <tr><td class="k">主要作者</td><td>无(只读)</td><td>人逐条写</td><td>数据工程师 + 管线</td><td class="eg"><b>agent 写,人主编</b></td></tr>
+          <tr><td class="k">可信度</td><td>隐含=向量相似度</td><td>隐含="看着权威"</td><td>二元(有边/无边)</td><td class="eg">动态多因子,消费过门</td></tr>
+          <tr><td class="k">自我修正</td><td>重新 embedding</td><td>人手动改</td><td>重跑抽取</td><td class="eg">append + supersede,可回滚</td></tr>
+          <tr><td class="k">时效</td><td class="x">不感知,旧片照召回</td><td>看日期靠人判</td><td class="x">不感知</td><td class="eg">as_of + 衰减,过时自动降权</td></tr>
+        </tbody>
+      </table>
+      <figcaption><b>FIG 1</b> · RAG / Wiki / KG / Engram 范式对照 —— 高亮行是分水岭:召回的是 chunk 还是已蒸馏的 claim</figcaption>
+    </figure>
+
+    <div class="prose rv"><p>一句话:<b>RAG 是 agent 去图书馆借书</b>(每次重新找、读、判真伪,书架一成不变);<b class="p">Engram 是 agent 自己的第二大脑</b> —— 召回即是"主谓宾事实 + 强制出处 + 置信度"的原子,拿来即用、即可追溯,且边用边长、越用越准。</p></div>
+  </section>
+
+  <!-- ════ §2 三层模型 ════ -->
+  <section id="s2">
+    <div class="head rv">
+      <div class="no">02 / THREE LAYERS</div>
+      <h2>三层模型 · 绝不塌缩</h2>
+      <p>raw source(不可变证据)→ claim(蒸馏事实,机器消费)→ view/page(组织视图,人读)。RAG 的原罪正是把 raw chunk 直接当检索单元 —— 没有中间这层 claim。三层各有不可动摇的不变量。</p>
+    </div>
+
+    <figure class="fig rv">
+      <svg viewBox="0 0 720 396" role="img" aria-label="三层模型断面:view/page 在顶,claim 在中(召回单元),raw source 在底,claim 向下指回 source">
+        <defs>
+          <marker id="up2" markerWidth="9" markerHeight="9" refX="4.5" refY="1" orient="auto"><path d="M0 9 L4.5 0 L9 9 z" fill="var(--saffron)"/></marker>
+          <marker id="dn2" markerWidth="9" markerHeight="9" refX="4.5" refY="8" orient="auto"><path d="M0 0 L4.5 9 L9 0 z" fill="var(--faint)"/></marker>
+        </defs>
+        <!-- VIEW -->
+        <rect x="36" y="20" width="648" height="92" rx="12" fill="oklch(0.66 0.175 320 / .10)" stroke="oklch(0.45 0.130 320)"/>
+        <text x="62" y="50" class="svg-l" font-size="12" fill="var(--plum-hi)" letter-spacing="2">LAYER 3 · VIEW / PAGE</text>
+        <text x="62" y="78" class="svg-t" font-size="20" fill="var(--cream)">人读的叙述视图</text>
+        <text x="62" y="100" class="svg-l" font-size="12" fill="var(--muted)">由 claim 组装(page_claims) · 改 claim 即改 page,不漂移</text>
+        <text x="662" y="50" text-anchor="end" class="svg-l" font-size="11" fill="var(--plum-hi)">wiki 面 · 人读</text>
+        <text x="662" y="98" text-anchor="end" class="svg-l" font-size="10" fill="var(--faint)">不变量:纯组装,无独立事实</text>
+
+        <!-- seam -->
+        <text x="360" y="132" text-anchor="middle" class="svg-l" font-size="11" fill="var(--plum)">▲ page_claims · M:N 组装</text>
+
+        <!-- CLAIM -->
+        <rect x="36" y="146" width="648" height="100" rx="12" fill="oklch(0.81 0.130 86 / .10)" stroke="oklch(0.81 0.130 86 / .5)"/>
+        <text x="62" y="176" class="svg-l" font-size="12" fill="var(--saffron)" letter-spacing="2">LAYER 2 · CLAIM　★ 唯一召回单元</text>
+        <text x="62" y="204" class="svg-t" font-size="20" fill="var(--cream)">蒸馏的事实原子</text>
+        <text x="62" y="226" class="svg-l" font-size="12" fill="var(--muted)">主谓宾事实 · 强制出处 · 动态置信 · 状态机 · supersede 链</text>
+        <text x="662" y="176" text-anchor="end" class="svg-l" font-size="11" fill="var(--saffron)">KB 面 · 机器消费</text>
+        <text x="662" y="224" text-anchor="end" class="svg-l" font-size="10" fill="var(--faint)">不变量:append-only + supersede</text>
+
+        <text x="360" y="266" text-anchor="middle" class="svg-l" font-size="11" fill="var(--saffron)">▲ provenance · 库层 NOT NULL,缺出处即拒</text>
+
+        <!-- RAW -->
+        <rect x="36" y="280" width="648" height="96" rx="12" fill="var(--bg-3)" stroke="var(--line)"/>
+        <text x="62" y="310" class="svg-l" font-size="12" fill="var(--muted)" letter-spacing="2">LAYER 1 · RAW SOURCE</text>
+        <text x="62" y="338" class="svg-t" font-size="20" fill="var(--cream)">不可变证据</text>
+        <text x="62" y="360" class="svg-l" font-size="12" fill="var(--muted)">原文 + 定位锚点 · append-only · 永不改写</text>
+        <text x="662" y="310" text-anchor="end" class="svg-l" font-size="11" fill="var(--faint)">证据 · immutable</text>
+        <text x="662" y="358" text-anchor="end" class="svg-l" font-size="10" fill="var(--faint)">不变量:落库即冻结</text>
+
+        <!-- drill-down arrow: claim → raw -->
+        <path d="M150 246 L150 280" stroke="var(--faint)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#dn2)"/>
+        <text x="158" y="268" class="svg-l" font-size="10" fill="var(--faint)">下钻溯源</text>
+      </svg>
+      <figcaption><b>FIG 2</b> · 三层断面 —— claim 是中间蒸馏层,既向上组装成 page,又永远能向下钻回不可变原文</figcaption>
+    </figure>
+  </section>
+
+  <!-- ════ §3 一条事实的一生 ════ -->
+  <section id="s3">
+    <div class="head rv">
+      <div class="no">03 / THE LIFE OF A CLAIM</div>
+      <h2>一条事实的一生</h2>
+      <p>claim 是 Engram 的心脏,也是唯一召回单元。它把原文里一段话蒸馏成一条<b>自包含、可独立判真伪</b>的事实:带强制出处、带动态置信、带稳定逻辑身份(lineage)、带 supersede 链。它进库后并非一成不变 —— 被校验、被印证、被质疑、被时间侵蚀,直到被新版本取代。</p>
+    </div>
+
+    <figure class="fig rv">
+      <svg viewBox="0 0 720 340" role="img" aria-label="claim 解剖:身份/出处/置信/状态/时效/作者六组字段,出处向下指回 source">
+        <defs><marker id="a3" markerWidth="9" markerHeight="9" refX="4.5" refY="8" orient="auto"><path d="M0 0 L4.5 9 L9 0 z" fill="var(--terra)"/></marker></defs>
+        <!-- central claim -->
+        <rect x="190" y="16" width="340" height="104" rx="12" fill="var(--bg-2)" stroke="oklch(0.45 0.130 320)" stroke-width="1.6"/>
+        <text x="212" y="42" class="svg-l" font-size="11" fill="var(--plum-hi)" letter-spacing="1.5">CLAIM</text>
+        <text x="212" y="68" class="svg-t" font-size="16" fill="var(--cream)">"型号 X 支持 H.265 硬解至 4K@60"</text>
+        <text x="212" y="92" class="svg-l" font-size="11" fill="var(--muted)">subject · predicate · object · 单句可判真伪</text>
+        <text x="212" y="110" class="svg-l" font-size="11" fill="var(--muted)">statement(机器消费的事实体)</text>
+
+        <!-- ① identity -->
+        <rect x="20" y="150" width="206" height="76" rx="10" fill="oklch(0.66 0.175 320 / .08)" stroke="oklch(0.45 0.130 320 / .6)"/>
+        <text x="38" y="174" class="svg-l" font-size="11" fill="var(--plum-hi)">① 稳定身份 lineage</text>
+        <text x="38" y="194" class="svg-l" font-size="10" fill="var(--muted)">id 随 supersede 变</text>
+        <text x="38" y="211" class="svg-l" font-size="10" fill="var(--muted)">lineageId 跨版本不变 → 召回去重</text>
+
+        <!-- ② provenance -->
+        <rect x="246" y="150" width="228" height="76" rx="10" fill="oklch(0.65 0.170 33 / .09)" stroke="oklch(0.65 0.170 33 / .55)"/>
+        <text x="264" y="174" class="svg-l" font-size="11" fill="var(--terra)">② 强制出处 provenance ★</text>
+        <text x="264" y="194" class="svg-l" font-size="10" fill="var(--muted)">sourceId + locator + excerpt + 支撑强度</text>
+        <text x="264" y="211" class="svg-l" font-size="10" fill="var(--muted)">1:N 多源 → 喂印证因子 · 无则拒</text>
+
+        <!-- ③ confidence -->
+        <rect x="494" y="150" width="206" height="76" rx="10" fill="oklch(0.75 0.125 164 / .09)" stroke="oklch(0.75 0.125 164 / .5)"/>
+        <text x="512" y="174" class="svg-l" font-size="11" fill="var(--emerald)">③ 动态置信 confidence</text>
+        <text x="512" y="194" class="svg-l" font-size="10" fill="var(--muted)">七因子重算 · stage 生命周期</text>
+        <text x="512" y="211" class="svg-l" font-size="10" fill="var(--muted)">消费过门才采信</text>
+
+        <!-- ④⑤⑥ row -->
+        <rect x="20" y="248" width="218" height="74" rx="10" fill="var(--bg-1)" stroke="var(--line-soft)"/>
+        <text x="38" y="272" class="svg-l" font-size="11" fill="var(--saffron)">④ 状态机 status</text>
+        <text x="38" y="291" class="svg-l" font-size="10" fill="var(--muted)">draft·active·flagged·</text>
+        <text x="38" y="308" class="svg-l" font-size="10" fill="var(--muted)">quarantined·superseded</text>
+
+        <rect x="252" y="248" width="216" height="74" rx="10" fill="var(--bg-1)" stroke="var(--line-soft)"/>
+        <text x="270" y="272" class="svg-l" font-size="11" fill="var(--saffron)">⑤ 时效 as_of</text>
+        <text x="270" y="291" class="svg-l" font-size="10" fill="var(--muted)">钉到原文发布时点,非"现在"</text>
+        <text x="270" y="308" class="svg-l" font-size="10" fill="var(--muted)">+ 半衰期衰减</text>
+
+        <rect x="482" y="248" width="218" height="74" rx="10" fill="var(--bg-1)" stroke="var(--line-soft)"/>
+        <text x="500" y="272" class="svg-l" font-size="11" fill="var(--info)">⑥ 作者 created_by</text>
+        <text x="500" y="291" class="svg-l" font-size="10" fill="var(--muted)">哪个 agent · 哪个 run · turn</text>
+        <text x="500" y="308" class="svg-l" font-size="10" fill="var(--muted)">actor_kind: agent | human</text>
+
+        <!-- provenance down to source -->
+        <path d="M360 226 L360 248" stroke="var(--terra)" stroke-width="1.2" marker-end="url(#a3)" opacity="0"/>
+        <line x1="190" y1="68" x2="226" y2="180" stroke="var(--line-soft)" stroke-width="1" opacity="0"/>
+      </svg>
+      <figcaption><b>FIG 3a</b> · claim 解剖 —— 一条事实携带的六组属性,② 强制出处是库层硬门(无出处的 claim 根本进不来)</figcaption>
+    </figure>
+
+    <figure class="fig flush rv">
+      <svg viewBox="0 0 720 300" role="img" aria-label="confidence 生命周期:tentative→verified→trusted,stale/refuted,门槛线">
+        <defs><marker id="cl3" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--muted)"/></marker></defs>
+        <line x1="20" y1="236" x2="700" y2="236" stroke="oklch(0.65 0.170 33 / .35)" stroke-width="1" stroke-dasharray="3 4"/>
+        <text x="24" y="252" class="svg-l" font-size="10" fill="var(--terra)">conf &lt; 0.4 · 不进召回</text>
+        <line x1="20" y1="206" x2="700" y2="206" stroke="oklch(0.81 0.130 86 / .35)" stroke-width="1" stroke-dasharray="3 4"/>
+        <text x="560" y="200" class="svg-l" font-size="10" fill="var(--saffron)">conf &lt; 0.6 · 仅线索,须核验</text>
+        <circle cx="86" cy="124" r="46" fill="var(--bg-2)" stroke="var(--faint)"/>
+        <text x="86" y="120" text-anchor="middle" font-family="DM Sans" font-size="13" fill="var(--cream)">tentative</text>
+        <text x="86" y="138" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">暂定·单源未验</text>
+        <circle cx="278" cy="124" r="46" fill="oklch(0.72 0.115 235 / .18)" stroke="var(--info)"/>
+        <text x="278" y="120" text-anchor="middle" font-family="DM Sans" font-size="13" fill="var(--info)">verified</text>
+        <text x="278" y="138" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">entail / 多源印证</text>
+        <circle cx="470" cy="124" r="48" fill="oklch(0.75 0.125 164 / .18)" stroke="var(--emerald)"/>
+        <text x="470" y="120" text-anchor="middle" font-family="DM Sans" font-size="13" fill="var(--emerald)">trusted</text>
+        <text x="470" y="138" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">人背书 / 使用印证</text>
+        <circle cx="648" cy="58" r="38" fill="oklch(0.81 0.130 86 / .15)" stroke="var(--saffron)"/>
+        <text x="648" y="56" text-anchor="middle" font-family="DM Sans" font-size="12" fill="var(--saffron)">stale</text>
+        <text x="648" y="72" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">超时效</text>
+        <circle cx="648" cy="180" r="38" fill="oklch(0.65 0.170 33 / .15)" stroke="var(--terra)"/>
+        <text x="648" y="178" text-anchor="middle" font-family="DM Sans" font-size="12" fill="var(--terra)">refuted</text>
+        <text x="648" y="194" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">被推翻</text>
+        <circle cx="86" cy="44" r="4" fill="var(--saffron)"/>
+        <line x1="86" y1="48" x2="86" y2="76" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#cl3)"/>
+        <text x="94" y="40" class="svg-l" font-size="9" fill="var(--muted)">agent append</text>
+        <line x1="132" y1="124" x2="230" y2="124" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#cl3)"/>
+        <text x="181" y="116" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">校验通过</text>
+        <line x1="324" y1="124" x2="420" y2="124" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#cl3)"/>
+        <text x="372" y="116" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">人背书</text>
+        <path d="M504 92 C570 62 590 58 608 58" fill="none" stroke="oklch(0.81 0.130 86 / .7)" stroke-width="1.2" marker-end="url(#cl3)"/>
+        <path d="M506 154 C570 178 592 180 608 180" fill="none" stroke="oklch(0.65 0.170 33 / .7)" stroke-width="1.2" marker-end="url(#cl3)"/>
+        <text x="582" y="124" text-anchor="middle" class="svg-l" font-size="9" fill="var(--terra)">冲突/source撤回</text>
+        <path d="M610 180 C420 262 200 262 96 170" fill="none" stroke="var(--faint)" stroke-width="1.2" stroke-dasharray="4 4" marker-end="url(#cl3)"/>
+        <text x="356" y="276" text-anchor="middle" class="svg-l" font-size="9" fill="var(--faint)">append 新版本 · supersede 旧 claim · 旧版留存可回滚</text>
+      </svg>
+      <figcaption><b>FIG 3b</b> · 置信度生命周期 —— 连续 confidence 与离散 stage 耦合;过门才被采信,被推翻不删除而是 supersede</figcaption>
+    </figure>
+  </section>
+
+  <!-- ════ §4 知识怎么进来 ════ -->
+  <section id="s4">
+    <div class="head rv">
+      <div class="no">04 / INGESTION</div>
+      <h2>知识怎么进来</h2>
+      <p>raw 是<b>异构、多模态、持续涌入、互相矛盾</b>的证据池,不是一次性导入。来源按权威分级(连续、可被消费方覆盖),按形态分类(决定怎么读)。进来后<b>不做机械 chunk</b>,而是 distiller agent 读懂 → 蒸馏成带强制出处的 claim。<span class="p">矛盾是一等公民</span> —— 两条都留,落 contradicts 边,由置信度和时效裁决采信谁。</p>
+    </div>
+
+    <figure class="fig rv">
+      <svg viewBox="0 0 720 308" role="img" aria-label="来源权威阶梯:primary/secondary/derived/unverified 四级,各级摆放来源种类">
+        <!-- axis -->
+        <text x="22" y="26" class="svg-l" font-size="11" fill="var(--muted)">权威 authority ↓</text>
+        <text x="698" y="26" text-anchor="end" class="svg-l" font-size="11" fill="var(--faint)">矛盾倾向 ↑ · 信任度 ↓</text>
+        <!-- tier 1 primary -->
+        <rect x="22" y="38" width="676" height="56" rx="10" fill="oklch(0.75 0.125 164 / .12)" stroke="oklch(0.75 0.125 164 / .5)"/>
+        <text x="40" y="60" class="svg-l" font-size="12" fill="var(--emerald)">primary · 第一手权威</text>
+        <text x="40" y="82" class="svg-l" font-size="11" fill="var(--muted)">formal_document　structured_spec　human_qa(人背书最高)</text>
+        <!-- tier 2 secondary -->
+        <rect x="22" y="100" width="676" height="52" rx="10" fill="oklch(0.78 0.12 130 / .10)" stroke="oklch(0.70 0.10 130 / .45)"/>
+        <text x="40" y="121" class="svg-l" font-size="12" fill="oklch(0.80 0.11 130)">secondary · 二手整理</text>
+        <text x="40" y="142" class="svg-l" font-size="11" fill="var(--muted)">conversation_log(按 turn)　historical_artifact(快衰减)</text>
+        <!-- tier 3 derived -->
+        <rect x="22" y="158" width="676" height="50" rx="10" fill="oklch(0.81 0.130 86 / .10)" stroke="oklch(0.81 0.130 86 / .45)"/>
+        <text x="40" y="179" class="svg-l" font-size="12" fill="var(--saffron)">derived · 推导再加工</text>
+        <text x="40" y="199" class="svg-l" font-size="11" fill="var(--muted)">agent_synthesis(记 derived_from 边,继承上游出处)</text>
+        <!-- tier 4 unverified -->
+        <rect x="22" y="214" width="676" height="50" rx="10" fill="oklch(0.65 0.170 33 / .10)" stroke="oklch(0.65 0.170 33 / .45)"/>
+        <text x="40" y="235" class="svg-l" font-size="12" fill="var(--terra)">unverified · 未核实</text>
+        <text x="40" y="255" class="svg-l" font-size="11" fill="var(--muted)">external_feed(外部信息流,默认 draft,不计印证)</text>
+        <text x="22" y="288" class="svg-l" font-size="10" fill="var(--faint)">authorityClass(纵轴·多权威)与 sourceKind(怎么读)正交;authorityScore 是连续值,消费方可覆盖,不写死等级。</text>
+      </svg>
+      <figcaption><b>FIG 4a</b> · 来源权威阶梯 —— 全部领域无关枚举;业务身份由消费方通过 source.meta 注入,绝不进内核</figcaption>
+    </figure>
+
+    <figure class="fig flush rv">
+      <svg viewBox="0 0 720 246" role="img" aria-label="distiller 五阶段蒸馏管线:读懂/抽claim/去重/冲突探测/提交">
+        <defs><marker id="p4" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--plum)"/></marker></defs>
+        <text x="22" y="24" class="svg-l" font-size="11" fill="var(--faint)">异构 source 持续涌入 · contentHash 幂等去重　→　distiller agent 编队</text>
+        <!-- stages -->
+        <g font-family="DM Sans" font-size="11">
+          <rect x="14" y="44" width="124" height="58" rx="8" fill="var(--bg-2)" stroke="var(--line)"/>
+          <text x="76" y="68" text-anchor="middle" fill="var(--cream)">① 读懂</text>
+          <text x="76" y="86" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">read_source 按 kind</text>
+          <text x="76" y="98" text-anchor="middle" class="svg-l" font-size="9" fill="var(--faint)">layout/table/turns/VLM</text>
+
+          <rect x="158" y="44" width="124" height="58" rx="8" fill="oklch(0.65 0.170 33 / .12)" stroke="oklch(0.65 0.170 33 / .6)"/>
+          <text x="220" y="68" text-anchor="middle" fill="var(--terra)">② 抽 claim</text>
+          <text x="220" y="86" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">★ 强制 ≥1 出处</text>
+          <text x="220" y="98" text-anchor="middle" class="svg-l" font-size="9" fill="var(--faint)">无出处即拒</text>
+
+          <rect x="302" y="44" width="124" height="58" rx="8" fill="var(--bg-2)" stroke="var(--line)"/>
+          <text x="364" y="68" text-anchor="middle" fill="var(--cream)">③ 跨源去重</text>
+          <text x="364" y="86" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">等价→合并出处</text>
+          <text x="364" y="98" text-anchor="middle" class="svg-l" font-size="9" fill="var(--faint)">印证+1,不删</text>
+
+          <rect x="446" y="44" width="124" height="58" rx="8" fill="var(--bg-2)" stroke="var(--line)"/>
+          <text x="508" y="68" text-anchor="middle" fill="var(--cream)">④ 冲突探测</text>
+          <text x="508" y="86" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">矛盾→落 contradicts</text>
+          <text x="508" y="98" text-anchor="middle" class="svg-l" font-size="9" fill="var(--faint)">两条都留</text>
+
+          <rect x="590" y="44" width="116" height="58" rx="8" fill="oklch(0.66 0.175 320 / .12)" stroke="oklch(0.45 0.130 320)"/>
+          <text x="648" y="68" text-anchor="middle" fill="var(--plum-hi)">⑤ 提交</text>
+          <text x="648" y="86" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">commit_claim 单事务</text>
+          <text x="648" y="98" text-anchor="middle" class="svg-l" font-size="9" fill="var(--faint)">claim+出处+关系</text>
+        </g>
+        <line x1="138" y1="73" x2="156" y2="73" stroke="var(--plum)" stroke-width="1.2" marker-end="url(#p4)"/>
+        <line x1="282" y1="73" x2="300" y2="73" stroke="var(--plum)" stroke-width="1.2" marker-end="url(#p4)"/>
+        <line x1="426" y1="73" x2="444" y2="73" stroke="var(--plum)" stroke-width="1.2" marker-end="url(#p4)"/>
+        <line x1="570" y1="73" x2="588" y2="73" stroke="var(--plum)" stroke-width="1.2" marker-end="url(#p4)"/>
+        <!-- contradiction illustration -->
+        <rect x="380" y="128" width="150" height="44" rx="8" fill="var(--bg-1)" stroke="oklch(0.65 0.170 33 / .5)"/>
+        <text x="394" y="148" class="svg-l" font-size="10" fill="var(--muted)">claim A · 旧合同 asOf 2023</text>
+        <text x="394" y="164" class="svg-l" font-size="10" fill="var(--muted)">"最高 4K@60"</text>
+        <rect x="556" y="128" width="150" height="44" rx="8" fill="var(--bg-1)" stroke="oklch(0.65 0.170 33 / .5)"/>
+        <text x="570" y="148" class="svg-l" font-size="10" fill="var(--muted)">claim B · 新合同 asOf 2025</text>
+        <text x="570" y="164" class="svg-l" font-size="10" fill="var(--muted)">"最高 4K@120"</text>
+        <line x1="530" y1="150" x2="556" y2="150" stroke="var(--terra)" stroke-width="2"/>
+        <text x="543" y="142" text-anchor="middle" class="svg-l" font-size="9" fill="var(--terra)">contradicts</text>
+        <text x="22" y="150" class="svg-l" font-size="10" fill="var(--faint)">矛盾不阻塞写入。</text>
+        <text x="22" y="166" class="svg-l" font-size="10" fill="var(--faint)">采信交给置信+时效:</text>
+        <text x="22" y="182" class="svg-l" font-size="10" fill="var(--saffron)">旧合同自然降权。</text>
+        <!-- post-immune -->
+        <text x="22" y="222" class="svg-l" font-size="10" fill="var(--faint)">低置信/高冲突 claim → 事后推入 Verifier 编队 + 人审队列(不在管线内同步阻塞 → C5 事后免疫边界)</text>
+      </svg>
+      <figcaption><b>FIG 4b</b> · 蒸馏管线 —— agent 读懂后产出事实,不是切片器盲切;② 是唯一的事前硬门,矛盾在 ④ 显式落边而非被相似度盲选</figcaption>
+    </figure>
+  </section>
+
+  <!-- ════ §5 agent 怎么用它 ════ -->
+  <section id="s5">
+    <div class="head rv">
+      <div class="no">05 / CONSUMER CONTRACT</div>
+      <h2>agent 怎么用它</h2>
+      <p>任何外部 agent 通过统一的 Consumer SPI 接入,既<b>读</b>(检索 claim 完成任务)也<b>写</b>(把任务中提炼的新事实 append 回库)。两条铁律:<span class="p">乐观写入</span>(带齐出处即落,不阻塞 agent loop)、<span class="p">悲观消费</span>(过动态置信门才采信,否则只当线索回原文核验)。读写经 confidence 真正耦合成闭环 —— 被反复证明有用的事实自然升信。</p>
+    </div>
+
+    <figure class="fig rv">
+      <svg viewBox="0 0 720 416" role="img" aria-label="消费读写闭环:检索/悲观消费/乐观写回/confidence闭环四阶段">
+        <defs><marker id="s5a" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--muted)"/></marker></defs>
+        <!-- lanes -->
+        <text x="92" y="20" text-anchor="middle" class="svg-l" font-size="11" fill="var(--cream)">Consumer Agent</text>
+        <text x="300" y="20" text-anchor="middle" class="svg-l" font-size="11" fill="var(--plum-hi)">Gateway + Adapter</text>
+        <text x="500" y="20" text-anchor="middle" class="svg-l" font-size="11" fill="var(--cream)">Engram Kernel</text>
+        <text x="660" y="20" text-anchor="middle" class="svg-l" font-size="11" fill="var(--info)">Verifier 编队</text>
+        <line x1="92" y1="28" x2="92" y2="408" stroke="var(--line-soft)" stroke-dasharray="3 4"/>
+        <line x1="300" y1="28" x2="300" y2="408" stroke="var(--line-soft)" stroke-dasharray="3 4"/>
+        <line x1="500" y1="28" x2="500" y2="408" stroke="var(--line-soft)" stroke-dasharray="3 4"/>
+        <line x1="660" y1="28" x2="660" y2="408" stroke="var(--line-soft)" stroke-dasharray="3 4"/>
+        <!-- phase bands -->
+        <rect x="20" y="36" width="684" height="86" rx="8" fill="oklch(0.66 0.175 320 / .05)"/>
+        <text x="30" y="52" class="svg-l" font-size="10" fill="var(--plum-hi)">① 检索 · 召回单元=claim</text>
+        <rect x="20" y="128" width="684" height="86" rx="8" fill="oklch(0.81 0.130 86 / .05)"/>
+        <text x="30" y="144" class="svg-l" font-size="10" fill="var(--saffron)">② 悲观消费 · mustVerify 核验</text>
+        <rect x="20" y="220" width="684" height="100" rx="8" fill="oklch(0.75 0.125 164 / .05)"/>
+        <text x="30" y="236" class="svg-l" font-size="10" fill="var(--emerald)">③ 乐观写回 · 强制出处 · 即时落 vs 影子区</text>
+        <rect x="20" y="326" width="684" height="74" rx="8" fill="oklch(0.72 0.115 235 / .05)"/>
+        <text x="30" y="342" class="svg-l" font-size="10" fill="var(--info)">④ confidence 闭环 + 事后免疫(异步,不阻塞 loop)</text>
+        <!-- messages -->
+        <g class="svg-l" font-size="10" fill="var(--muted)">
+          <line x1="92" y1="70" x2="498" y2="70" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#s5a)"/>
+          <text x="150" y="64">recall_claims(query, facets, ctx)</text>
+          <line x1="500" y1="92" x2="94" y2="92" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#s5a)"/>
+          <text x="150" y="86">候选 claim(adapter 单调收紧 → 标 mustVerify;draft/quarantined 硬排除)</text>
+          <text x="150" y="112" fill="var(--emerald)">claim#A mustVerify=false → 直接采信</text>
+
+          <line x1="92" y1="162" x2="498" y2="162" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#s5a)"/>
+          <text x="150" y="156" fill="var(--saffron)">claim#B mustVerify=true → open_source 读不可变原文</text>
+          <line x1="500" y1="186" x2="94" y2="186" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#s5a)"/>
+          <text x="150" y="180">原文片段 → agent 自行核验后决定是否采信</text>
+          <text x="150" y="206" fill="var(--faint)">内核只给 confidence(尺子)+ mustVerify(够不够格),"信不信"由消费方风险偏好定</text>
+
+          <line x1="92" y1="262" x2="498" y2="262" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#s5a)"/>
+          <text x="150" y="256" fill="var(--emerald)">append_claim(新事实 + 强制出处)</text>
+          <text x="150" y="282">强源 + entailment 预检 → status=active 即时可召回</text>
+          <text x="150" y="300" fill="var(--saffron)">一般源 / 派生 / supersede → status=draft 进影子区待治理放行</text>
+
+          <line x1="92" y1="360" x2="498" y2="360" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#s5a)"/>
+          <text x="150" y="354">report_usage(helpful/harmful) → 事件驱动重算 confidence</text>
+          <line x1="500" y1="384" x2="658" y2="384" stroke="var(--info)" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#s5a)"/>
+          <text x="510" y="378" fill="var(--info)">影子区 draft 入校验队列(async)</text>
+        </g>
+      </svg>
+      <figcaption><b>FIG 5a</b> · 消费读写闭环 —— 检索(claim 即用)→ 悲观核验 → 乐观写回 → 使用反馈升降信,四阶段在 agent 单次 loop 内闭合</figcaption>
+    </figure>
+
+    <figure class="fig flush rv">
+      <svg viewBox="0 0 720 282" role="img" aria-label="Consumer SPI 四层与 C6 边界,adapter 单调收紧">
+        <!-- domain layers (above) -->
+        <rect x="22" y="20" width="676" height="52" rx="10" fill="oklch(0.72 0.115 235 / .08)" stroke="oklch(0.72 0.115 235 / .4)"/>
+        <text x="40" y="41" class="svg-l" font-size="11" fill="var(--info)">Consumer Agents · 领域有关</text>
+        <text x="40" y="61" class="svg-l" font-size="10" fill="var(--muted)">招投标 agent(示例)· 客服 agent · 研发 agent —— 对内核一视同仁,业务语义只在自己这层</text>
+        <rect x="22" y="80" width="676" height="64" rx="10" fill="oklch(0.65 0.170 33 / .08)" stroke="oklch(0.65 0.170 33 / .45)"/>
+        <text x="40" y="101" class="svg-l" font-size="11" fill="var(--terra)">Consumer Adapter · 领域有关 · 可插拔</text>
+        <text x="40" y="121" class="svg-l" font-size="10" fill="var(--muted)">请求态钩子:defaultGate / domainConfidenceMultiplier / project / rerank / resolveScope / validateWrite</text>
+        <text x="40" y="137" class="svg-l" font-size="10" fill="var(--saffron)">★ 单调收紧算子:只能更悲观(收门/降信/打标),不能放宽内核安全、不能写内核事实、不能召回 draft</text>
+        <!-- C6 boundary -->
+        <line x1="22" y1="158" x2="698" y2="158" stroke="var(--terra)" stroke-width="2" stroke-dasharray="7 4"/>
+        <text x="360" y="153" text-anchor="middle" class="svg-l" font-size="11" fill="var(--terra)">━ C6 边界 · 业务语义到此为止,绝不下穿 ━</text>
+        <!-- kernel layers (below) -->
+        <rect x="22" y="168" width="676" height="48" rx="10" fill="var(--bg-2)" stroke="var(--line)"/>
+        <text x="40" y="188" class="svg-l" font-size="11" fill="var(--cream)">Consumer Gateway · 领域无关契约执行</text>
+        <text x="40" y="207" class="svg-l" font-size="10" fill="var(--muted)">检索 + 悲观门 + 强制出处校验 + 即时落/影子区路由 + 回调 adapter(校验返回值确为收紧)</text>
+        <rect x="22" y="224" width="676" height="46" rx="10" fill="oklch(0.66 0.175 320 / .08)" stroke="oklch(0.45 0.130 320)"/>
+        <text x="40" y="244" class="svg-l" font-size="11" fill="var(--plum-hi)">Engram Kernel · 领域无关</text>
+        <text x="40" y="262" class="svg-l" font-size="10" fill="var(--muted)">只认 9 概念:source · claim · relation · provenance · confidence · staleness · conflict · retrieval · write-governance</text>
+      </svg>
+      <figcaption><b>FIG 5b</b> · Consumer SPI 分层 —— adapter 是单调收紧算子,这是外推模型的数学根基:无论挂多少领域 adapter,内核三条安全不变量永远成立</figcaption>
+    </figure>
+
+    <div class="note rv"><span class="lbl">一致性裁定 · adapter 的两层能力</span><br>
+      <b>配置态</b>(主编在策展产品的 Standards 页设权重 / 门限 / 半衰期)与<b>请求态</b>(adapter 在单次检索里只能单调收紧)是<b>两层、两类操作者</b>:前者是人定标准、影响"内核默认基线",后者是消费策略、只能在基线之上更保守。二者不冲突 —— 请求态永远不能放宽配置态定下的基线。</div>
+  </section>
+
+  <!-- ════ §6 信任 + 免疫 ════ -->
+  <section id="s6">
+    <div class="head rv">
+      <div class="no">06 / TRUST &amp; IMMUNITY</div>
+      <h2>信任模型 + 免疫系统</h2>
+      <p>激进写入安全的前提是<b>免疫力 ≥ 写入力</b>。治理沿"写入 → 消费"时间轴纵深布防:越往前越轻(库层约束),越往后越重(LLM 推理)。<span class="p">语义判断只在事后</span> —— 因为"可追溯"是客观廉价二值的,适合同步硬门;"对错"是主观昂贵且随时间变的,必须搬到事后巡查(Wikipedia 先发后审 / Git revert 不 rewrite)。</p>
+    </div>
+
+    <figure class="fig rv">
+      <svg viewBox="0 0 720 344" role="img" aria-label="三道防线:D1入口硬门/D2乐观分级/D3事后巡查,沿写入到消费轴">
+        <defs><marker id="d6" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--muted)"/></marker></defs>
+        <text x="22" y="18" class="svg-l" font-size="10" fill="var(--faint)">写入 ──────────────────────────────────────────────────────── 消费</text>
+        <!-- D1 -->
+        <rect x="16" y="32" width="200" height="290" rx="10" fill="oklch(0.65 0.170 33 / .06)" stroke="oklch(0.65 0.170 33 / .4)"/>
+        <text x="32" y="54" class="svg-l" font-size="11" fill="var(--terra)">D1 入口硬门禁</text>
+        <text x="32" y="71" class="svg-l" font-size="9" fill="var(--faint)">同步 · 极低成本 · 唯一事前门</text>
+        <path d="M116 92 L196 132 L116 172 L36 132 Z" fill="var(--bg-2)" stroke="oklch(0.65 0.170 33 / .6)"/>
+        <text x="116" y="126" text-anchor="middle" class="svg-l" font-size="10" fill="var(--cream)">可追溯?</text>
+        <text x="116" y="142" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">出处≥1·源存在·</text>
+        <text x="116" y="154" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">locator·actor</text>
+        <text x="116" y="196" text-anchor="middle" class="svg-l" font-size="9" fill="var(--terra)">✗ 不判对错 / 真伪 / 语义</text>
+        <text x="116" y="226" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">否 → REJECT 回滚</text>
+        <text x="116" y="250" text-anchor="middle" class="svg-l" font-size="9" fill="var(--emerald)">是 → 落库 status=draft</text>
+        <text x="116" y="300" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">应用层校验 / 事务原子 / 库层约束</text>
+        <!-- D2 -->
+        <rect x="232" y="32" width="200" height="290" rx="10" fill="oklch(0.81 0.130 86 / .06)" stroke="oklch(0.81 0.130 86 / .4)"/>
+        <text x="248" y="54" class="svg-l" font-size="11" fill="var(--saffron)">D2 乐观写入分级</text>
+        <text x="248" y="71" class="svg-l" font-size="9" fill="var(--faint)">同步 · 廉价信号 · 毫秒级</text>
+        <text x="332" y="100" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">强源 + 作者信誉 + 无冲突?</text>
+        <rect x="248" y="116" width="168" height="48" rx="8" fill="oklch(0.75 0.125 164 / .12)" stroke="oklch(0.75 0.125 164 / .5)"/>
+        <text x="332" y="136" text-anchor="middle" class="svg-l" font-size="10" fill="var(--emerald)">是 → status=active</text>
+        <text x="332" y="152" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">采信集 · 仍入常规巡查</text>
+        <rect x="248" y="174" width="168" height="48" rx="8" fill="oklch(0.81 0.130 86 / .12)" stroke="oklch(0.81 0.130 86 / .5)"/>
+        <text x="332" y="194" text-anchor="middle" class="svg-l" font-size="10" fill="var(--saffron)">否 → status=draft</text>
+        <text x="332" y="210" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">影子区 · 优先入巡查</text>
+        <text x="332" y="258" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">影子区 = 已落库·有出处·</text>
+        <text x="332" y="272" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">待巡查的待定事实,非垃圾桶</text>
+        <!-- D3 -->
+        <rect x="448" y="32" width="200" height="290" rx="10" fill="oklch(0.72 0.115 235 / .06)" stroke="oklch(0.72 0.115 235 / .4)"/>
+        <text x="464" y="54" class="svg-l" font-size="11" fill="var(--info)">D3 事后巡查</text>
+        <text x="464" y="71" class="svg-l" font-size="9" fill="var(--faint)">异步 · 高成本 · 持续(免疫细胞)</text>
+        <g class="svg-l" font-size="9" fill="var(--muted)">
+          <rect x="464" y="84" width="80" height="34" rx="6" fill="var(--bg-2)" stroke="var(--line-soft)"/><text x="504" y="104" text-anchor="middle">entail 抓幻觉</text>
+          <rect x="552" y="84" width="84" height="34" rx="6" fill="var(--bg-2)" stroke="var(--line-soft)"/><text x="594" y="104" text-anchor="middle">conflict 收敛</text>
+          <rect x="464" y="124" width="80" height="34" rx="6" fill="var(--bg-2)" stroke="var(--line-soft)"/><text x="504" y="144" text-anchor="middle">staleness</text>
+          <rect x="552" y="124" width="84" height="34" rx="6" fill="var(--bg-2)" stroke="var(--line-soft)"/><text x="594" y="144" text-anchor="middle">blast-radius</text>
+        </g>
+        <text x="548" y="184" text-anchor="middle" class="svg-l" font-size="9" fill="var(--info)">四种动作(严格度递增):</text>
+        <text x="548" y="202" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">降信 → flag → quarantine → rollback</text>
+        <path d="M548 214 C548 250 460 250 440 180" fill="none" stroke="var(--terra)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#d6)"/>
+        <text x="548" y="240" text-anchor="middle" class="svg-l" font-size="8" fill="var(--terra)">失衡 → 自动收紧 D2 闸门</text>
+        <!-- consume gate -->
+        <rect x="448" y="280" width="200" height="34" rx="8" fill="oklch(0.66 0.175 320 / .1)" stroke="oklch(0.45 0.130 320)"/>
+        <text x="548" y="301" text-anchor="middle" class="svg-l" font-size="9" fill="var(--plum-hi)">消费门:conf≥0.6 且 status=active</text>
+        <!-- flow arrows -->
+        <line x1="216" y1="132" x2="230" y2="140" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#d6)"/>
+        <line x1="432" y1="160" x2="446" y2="140" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#d6)"/>
+      </svg>
+      <figcaption><b>FIG 6a</b> · 三道防线 —— D1 库层只验可追溯(不判对错),D2 廉价分级,D3 LLM 巡查;失衡时自动收紧 D2,把乐观/悲观平衡点变成随健康度自调的活值</figcaption>
+    </figure>
+
+    <figure class="fig flush rv">
+      <svg viewBox="0 0 720 286" role="img" aria-label="claim 状态机:agent蓝边/仅人红边,收紧自由放松仅人">
+        <defs>
+          <marker id="sb" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--info)"/></marker>
+          <marker id="sr" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--terra)"/></marker>
+        </defs>
+        <g font-family="DM Sans">
+          <rect x="40" y="116" width="116" height="54" rx="10" fill="oklch(0.81 0.130 86 / .14)" stroke="var(--saffron)"/>
+          <text x="98" y="140" text-anchor="middle" font-size="13" fill="var(--saffron)">draft</text>
+          <text x="98" y="158" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">影子区·不召回</text>
+          <rect x="300" y="116" width="116" height="54" rx="10" fill="oklch(0.75 0.125 164 / .16)" stroke="var(--emerald)"/>
+          <text x="358" y="140" text-anchor="middle" font-size="13" fill="var(--emerald)">active</text>
+          <text x="358" y="158" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">采信集·可消费</text>
+          <rect x="300" y="22" width="116" height="50" rx="10" fill="oklch(0.81 0.130 86 / .1)" stroke="oklch(0.81 0.130 86 / .6)"/>
+          <text x="358" y="44" text-anchor="middle" font-size="13" fill="var(--saffron)">flagged</text>
+          <text x="358" y="61" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">存疑·降权可见</text>
+          <rect x="300" y="212" width="116" height="52" rx="10" fill="oklch(0.65 0.170 33 / .16)" stroke="var(--terra)"/>
+          <text x="358" y="235" text-anchor="middle" font-size="13" fill="var(--terra)">quarantined</text>
+          <text x="358" y="253" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">隔离·默认排除</text>
+          <rect x="560" y="116" width="120" height="54" rx="10" fill="var(--bg-2)" stroke="var(--faint)" stroke-dasharray="3 3"/>
+          <text x="620" y="140" text-anchor="middle" font-size="13" fill="var(--muted)">superseded</text>
+          <text x="620" y="158" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">历史·可回滚</text>
+        </g>
+        <circle cx="98" cy="80" r="4" fill="var(--saffron)"/>
+        <line x1="98" y1="84" x2="98" y2="114" stroke="var(--info)" stroke-width="1.2" marker-end="url(#sb)"/>
+        <text x="106" y="76" class="svg-l" font-size="9" fill="var(--faint)">D1 通过</text>
+        <!-- agent blue edges -->
+        <line x1="156" y1="143" x2="298" y2="143" stroke="var(--info)" stroke-width="1.2" marker-end="url(#sb)"/>
+        <text x="227" y="135" text-anchor="middle" class="svg-l" font-size="9" fill="var(--info)">D2高置信/校验pass</text>
+        <line x1="358" y1="116" x2="358" y2="74" stroke="var(--info)" stroke-width="1.2" marker-end="url(#sb)"/>
+        <text x="420" y="96" class="svg-l" font-size="9" fill="var(--info)">D3 flag/跌破门</text>
+        <line x1="358" y1="170" x2="358" y2="210" stroke="var(--info)" stroke-width="1.2" marker-end="url(#sb)"/>
+        <text x="420" y="194" class="svg-l" font-size="9" fill="var(--info)">强冲突/过期</text>
+        <line x1="156" y1="158" x2="300" y2="220" stroke="var(--info)" stroke-width="1.2" marker-end="url(#sb)"/>
+        <text x="200" y="200" class="svg-l" font-size="8" fill="var(--info)">entail fail=幻觉</text>
+        <line x1="416" y1="143" x2="558" y2="143" stroke="var(--info)" stroke-width="1.2" marker-end="url(#sb)"/>
+        <text x="487" y="135" text-anchor="middle" class="svg-l" font-size="9" fill="var(--info)">新版本 append</text>
+        <!-- human red edges -->
+        <path d="M328 212 C300 190 300 175 328 170" fill="none" stroke="var(--terra)" stroke-width="2" marker-end="url(#sr)"/>
+        <text x="270" y="196" text-anchor="end" class="svg-l" font-size="9" fill="var(--terra)">★仅人 赦免</text>
+        <path d="M560 150 C480 200 440 230 416 238" fill="none" stroke="var(--terra)" stroke-width="2" stroke-dasharray="1 0" marker-end="url(#sr)"/>
+        <text x="540" y="196" text-anchor="middle" class="svg-l" font-size="9" fill="var(--terra)">★仅人 回滚</text>
+      </svg>
+      <figcaption><b>FIG 6b</b> · claim 治理状态机 —— <span style="color:var(--info)">蓝=agent 可触发(收紧自由)</span>,<span style="color:var(--terra)">红=★仅人(放松/赦免/回滚)</span>。刻意不对称:宁可错杀好 claim,不放过坏 claim</figcaption>
+    </figure>
+
+    <div class="note rv"><span class="lbl">两条确定性规则</span><br>
+      <b>冲突收敛优先级</b>(确定性,可回归测试):人裁 &gt; 取代关系(supersede) &gt; 时效(as_of 新) &gt; 来源权威 &gt; 印证数。机判把握不足则升级人。
+      <b>自我调速</b>:GovernanceController 每分钟比对五指标(队列积压 / entailment 拒绝率 / 冲突待裁 / 免疫滞后中位数 / 误隔离率)——写入跑赢免疫就自动抬高 D2 门(更多沉影子区),免疫追上再滞回放松。人只在裁冲突 / 赦免 / 定标准三处介入。</div>
+  </section>
+
+  <!-- ════ §7 人即主编 ════ -->
+  <section id="s7">
+    <div class="head rv">
+      <div class="no">07 / CURATION</div>
+      <h2>人即主编</h2>
+      <p>agent 是主要作者也是主要读者,人退到<b>主编</b>位。Engram 自带一个独立 Web App(Studio),不依附任何业务前端。主编<b>不逐条写事实</b>,只做四件机器做不了的事:<span class="p">定标准 · 审异常 · 纠错 · 裁冲突</span>。一切写入走 append(永不覆盖),人的裁决以"最高单位权重因子"进入 confidence —— 人不直接写 status,只投因子,由门限决定落到哪个态。</p>
+    </div>
+
+    <figure class="fig rv">
+      <svg viewBox="0 0 720 268" role="img" aria-label="两类人:最终用户经消费agent间接受益,主编经Studio直接治理,被consumer agent隔开">
+        <defs><marker id="h7" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--muted)"/></marker></defs>
+        <!-- end user side -->
+        <rect x="20" y="40" width="150" height="56" rx="10" fill="oklch(0.72 0.115 235 / .1)" stroke="oklch(0.72 0.115 235 / .4)"/>
+        <text x="95" y="64" text-anchor="middle" class="svg-l" font-size="11" fill="var(--info)">最终用户</text>
+        <text x="95" y="82" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">销售/客服… · 人</text>
+        <rect x="20" y="150" width="150" height="56" rx="10" fill="var(--bg-2)" stroke="var(--line)"/>
+        <text x="95" y="174" text-anchor="middle" class="svg-l" font-size="10" fill="var(--cream)">消费方业务前端</text>
+        <text x="95" y="192" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">+ Consumer Agent</text>
+        <line x1="95" y1="96" x2="95" y2="148" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#h7)"/>
+        <text x="95" y="124" text-anchor="middle" class="svg-l" font-size="9" fill="var(--faint)">只用业务产品</text>
+        <text x="95" y="230" text-anchor="middle" class="svg-l" font-size="9" fill="var(--info)">零直接接触 · 间接受益</text>
+        <text x="95" y="246" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">"根本不需知道 KB 存在"</text>
+        <!-- separator -->
+        <line x1="250" y1="20" x2="250" y2="258" stroke="var(--line-soft)" stroke-width="1.6" stroke-dasharray="5 5"/>
+        <text x="250" y="14" text-anchor="middle" class="svg-l" font-size="9" fill="var(--faint)">被 Consumer Agent 隔开 · 互不见面</text>
+        <!-- engram core -->
+        <rect x="300" y="92" width="160" height="68" rx="10" fill="oklch(0.66 0.175 320 / .1)" stroke="oklch(0.45 0.130 320)"/>
+        <text x="380" y="120" text-anchor="middle" class="svg-t" font-size="16" fill="var(--plum-hi)">Engram 内核库</text>
+        <text x="380" y="142" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">五原语 + confidence</text>
+        <!-- editor side -->
+        <rect x="548" y="40" width="156" height="56" rx="10" fill="oklch(0.81 0.130 86 / .1)" stroke="oklch(0.81 0.130 86 / .5)"/>
+        <text x="626" y="60" text-anchor="middle" class="svg-l" font-size="11" fill="var(--saffron)">KB 策展人 / 主编</text>
+        <text x="626" y="78" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">总编 · 审校 · 观察者(RBAC)</text>
+        <rect x="548" y="150" width="156" height="56" rx="10" fill="var(--bg-2)" stroke="var(--line)"/>
+        <text x="626" y="174" text-anchor="middle" class="svg-l" font-size="10" fill="var(--cream)">Engram Studio</text>
+        <text x="626" y="192" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">独立 Web App · 自有登录</text>
+        <line x1="626" y1="96" x2="626" y2="148" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#h7)"/>
+        <line x1="548" y1="178" x2="462" y2="140" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#h7)"/>
+        <text x="626" y="230" text-anchor="middle" class="svg-l" font-size="9" fill="var(--saffron)">全接触 · 直接治理</text>
+        <text x="626" y="246" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">定标准/审异常/纠错/裁冲突</text>
+        <line x1="300" y1="126" x2="172" y2="178" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#h7)"/>
+        <text x="236" y="160" class="svg-l" font-size="8" fill="var(--faint)">agent 检索/写回</text>
+      </svg>
+      <figcaption><b>FIG 7a</b> · 两类人 —— 最终用户在消费方一侧零直接接触,主编在 Engram 一侧全接触;二者被 Consumer Agent 隔开,各自的产品入口不同</figcaption>
+    </figure>
+
+    <figure class="fig flush rv">
+      <svg viewBox="0 0 720 220" role="img" aria-label="审核流:agent乐观append到draft,主编三动作投因子,门限决定status">
+        <defs><marker id="r7" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--muted)"/></marker></defs>
+        <rect x="14" y="80" width="120" height="56" rx="8" fill="var(--bg-2)" stroke="var(--line)"/>
+        <text x="74" y="104" text-anchor="middle" class="svg-l" font-size="10" fill="var(--cream)">agent 乐观 append</text>
+        <text x="74" y="121" text-anchor="middle" class="svg-l" font-size="9" fill="var(--saffron)">→ draft / flagged</text>
+        <rect x="170" y="80" width="130" height="56" rx="8" fill="oklch(0.81 0.130 86 / .1)" stroke="oklch(0.81 0.130 86 / .5)"/>
+        <text x="235" y="100" text-anchor="middle" class="svg-l" font-size="10" fill="var(--saffron)">主编审核 inbox</text>
+        <text x="235" y="117" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">claim 粒度 · confidence 升序</text>
+        <text x="235" y="130" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">键盘流 j/k/a/e/r</text>
+        <!-- three actions -->
+        <rect x="336" y="22" width="160" height="40" rx="8" fill="oklch(0.75 0.125 164 / .12)" stroke="oklch(0.75 0.125 164 / .5)"/>
+        <text x="416" y="40" text-anchor="middle" class="svg-l" font-size="10" fill="var(--emerald)">Approve · endorse 1.0</text>
+        <text x="416" y="55" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">投 human_review 因子(拉满)</text>
+        <rect x="336" y="90" width="160" height="40" rx="8" fill="oklch(0.72 0.115 235 / .1)" stroke="oklch(0.72 0.115 235 / .5)"/>
+        <text x="416" y="108" text-anchor="middle" class="svg-l" font-size="10" fill="var(--info)">Edit-Approve</text>
+        <text x="416" y="123" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">先 append 新版本再 endorse</text>
+        <rect x="336" y="158" width="160" height="40" rx="8" fill="oklch(0.65 0.170 33 / .12)" stroke="oklch(0.65 0.170 33 / .5)"/>
+        <text x="416" y="176" text-anchor="middle" class="svg-l" font-size="10" fill="var(--terra)">Reject · 0.0</text>
+        <text x="416" y="191" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">→ quarantined(保留可审计)</text>
+        <!-- recompute -->
+        <rect x="532" y="80" width="100" height="56" rx="8" fill="oklch(0.66 0.175 320 / .1)" stroke="oklch(0.45 0.130 320)"/>
+        <text x="582" y="104" text-anchor="middle" class="svg-l" font-size="10" fill="var(--plum-hi)">confidence</text>
+        <text x="582" y="120" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">七因子重算</text>
+        <rect x="650" y="80" width="58" height="56" rx="8" fill="var(--bg-2)" stroke="var(--line)"/>
+        <text x="679" y="104" text-anchor="middle" class="svg-l" font-size="10" fill="var(--cream)">门限</text>
+        <text x="679" y="120" text-anchor="middle" class="svg-l" font-size="9" fill="var(--muted)">定 status</text>
+        <line x1="134" y1="108" x2="168" y2="108" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#r7)"/>
+        <line x1="300" y1="100" x2="334" y2="48" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#r7)"/>
+        <line x1="300" y1="108" x2="334" y2="110" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#r7)"/>
+        <line x1="300" y1="116" x2="334" y2="172" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#r7)"/>
+        <line x1="496" y1="108" x2="530" y2="108" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#r7)"/>
+        <line x1="632" y1="108" x2="648" y2="108" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#r7)"/>
+      </svg>
+      <figcaption><b>FIG 7b</b> · 审核流 —— 三个动作都只投 confidence 因子、不直接写 status;edit-approve 也走 append(不覆盖旧 draft)。界面纪律与库层不变量同构:没有"原地改事实"入口</figcaption>
+    </figure>
+
+    <table class="dd rv">
+      <thead><tr><th>Studio 页面</th><th>主编在这里做什么</th><th>关键纪律</th></tr></thead>
+      <tbody>
+        <tr><td><b>Search / Claims / Pages</b></td><td>双面浏览(claim 事实面 + page 叙述面)、危险升序排</td><td>page 只读组装,不能直接编辑文字</td></tr>
+        <tr><td><b>Claim Detail</b></td><td>provenance / relations / lineage 三视图 + confidence 七因子解释卡</td><td>locator 一点跳原文高亮</td></tr>
+        <tr><td><b>Review Inbox</b></td><td>claim 粒度 approve / edit-approve / reject</td><td>只投因子,门限定 status</td></tr>
+        <tr><td><b>Conflicts / Gaps Bench</b></td><td>inline 并排裁冲突(保留A/B/双错/时态并存)、巡知识空洞</td><td>裁决不删任何一方,败方进 quarantine</td></tr>
+        <tr><td><b>Dashboard</b></td><td>confidence 分布 / status 漏斗 / append 速率 vs 处理速率(人力告警)</td><td>纯只读观测</td></tr>
+        <tr><td><b>Standards</b></td><td>定权重 / 门限 / 半衰期(配置态)</td><td>改门限不重写历史,下次重算生效</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ════ §8 总装 ════ -->
+  <section id="s8">
+    <div class="head rv">
+      <div class="no">08 / ASSEMBLY</div>
+      <h2>总装 · 编队 · 架构</h2>
+      <p>Engram 自带一支<b>按职责切分的内部 agent 编队</b>,不是单个全能 agent —— 因为<span class="p">裁判必须独立于运动员</span>:写事实的 agent 会系统性相信自己刚写的东西(RAG 时代"幻觉自我印证"的根源)。校验与裁决在 session 上下文 + DB role 两层物理独立于蒸馏,否则悲观消费那道门形同虚设。</p>
+    </div>
+
+    <table class="dd rv">
+      <thead><tr><th>工种</th><th>职责</th><th>触发</th><th>写权限</th><th>隔离</th></tr></thead>
+      <tbody>
+        <tr><td><b>Distiller</b> 蒸馏<br><span style="color:var(--saffron);font-size:11px">运动员</span></td><td>raw source → claim + 出处</td><td>事件 source.ingested</td><td>INSERT claim(仅 draft)+ provenance</td><td>role: distiller · 无 UPDATE</td></tr>
+        <tr><td><b>Verifier</b> 校验<br><span style="color:var(--info);font-size:11px">裁判</span></td><td>entailment 校验 + 时效巡查</td><td>事件 + 每日 cron</td><td>INSERT verification + 列级改 status/confidence(改不了本体)</td><td>role: verifier · 与蒸馏完全隔离 session</td></tr>
+        <tr><td><b>Reconciler</b> 去重</td><td>找等价/精炼,合并 lineage</td><td>事件 batch_appended</td><td>INSERT relation(dup/refines)+ supersede</td><td>role: reconciler · 低档向量</td></tr>
+        <tr><td><b>Arbiter</b> 裁决<br><span style="color:var(--info);font-size:11px">裁判</span></td><td>contradicts 能机判则裁,不能则升级人</td><td>事件 conflict.detected</td><td>败方→quarantined + 推 review_queue</td><td>role: arbiter · 一次只裁一对</td></tr>
+        <tr><td><b>Harvester</b> 反馈</td><td>消费回写转 usage_feedback + 提炼缺口</td><td>事件 feedback + 每日</td><td>INSERT verification(usage)· 不改 status</td><td>role: harvester · 弱信号慢累积</td></tr>
+      </tbody>
+    </table>
+    <div class="note rv"><span class="lbl">为什么不用单个全能 agent</span> ① 裁判须独立于运动员;② 四种触发节律(事件蒸馏/写后裁决/周期巡查/反馈触发)塞不进一个 loop;③ 读写权限差异巨大,全能 agent 须握全部钥匙,一处注入波及全库;④ 模型该按职责分档(蒸馏要贵模型、entailment 用小 NLI、去重几乎不要 LLM)。<b>事实本体对全编队只读,修正只能靠 supersede。</b></div>
+
+    <figure class="fig rv">
+      <svg viewBox="0 0 720 384" role="img" aria-label="关系拓扑:最终用户/消费agent/Engram本体/内部编队/主编的数据流闭环">
+        <defs><marker id="t8" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--muted)"/></marker>
+          <marker id="t8p" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--plum)"/></marker></defs>
+        <!-- external left -->
+        <rect x="18" y="60" width="120" height="48" rx="8" fill="oklch(0.72 0.115 235 / .1)" stroke="oklch(0.72 0.115 235 / .4)"/>
+        <text x="78" y="80" text-anchor="middle" class="svg-l" font-size="10" fill="var(--info)">最终用户</text>
+        <text x="78" y="96" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">从不直接碰</text>
+        <rect x="18" y="150" width="120" height="56" rx="8" fill="var(--bg-2)" stroke="var(--line)"/>
+        <text x="78" y="172" text-anchor="middle" class="svg-l" font-size="10" fill="var(--cream)">Consumer Agent</text>
+        <text x="78" y="189" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">招投标/客服/研发</text>
+        <line x1="78" y1="108" x2="78" y2="148" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#t8)"/>
+        <!-- engram body -->
+        <rect x="178" y="36" width="376" height="312" rx="12" fill="oklch(0.175 0.015 57)" stroke="oklch(0.45 0.130 320 / .5)"/>
+        <text x="366" y="58" text-anchor="middle" class="svg-t" font-size="14" fill="var(--plum-hi)">ENGRAM 产品本体</text>
+        <rect x="198" y="74" width="140" height="44" rx="8" fill="var(--bg-2)" stroke="var(--line)"/>
+        <text x="268" y="92" text-anchor="middle" class="svg-l" font-size="9" fill="var(--cream)">API 网关</text>
+        <text x="268" y="107" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">检索/写回/反馈 Ports</text>
+        <rect x="198" y="150" width="140" height="74" rx="8" fill="oklch(0.66 0.175 320 / .08)" stroke="oklch(0.45 0.130 320)"/>
+        <text x="268" y="170" text-anchor="middle" class="svg-l" font-size="9" fill="var(--plum-hi)">内核库</text>
+        <text x="268" y="186" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">sources/claims/</text>
+        <text x="268" y="198" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">relations/provenance</text>
+        <text x="268" y="214" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">+ confidence</text>
+        <rect x="390" y="150" width="146" height="74" rx="8" fill="var(--bg-2)" stroke="var(--info)" stroke-opacity=".5"/>
+        <text x="463" y="168" text-anchor="middle" class="svg-l" font-size="9" fill="var(--info)">内部编队</text>
+        <text x="463" y="184" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">Distiller/Verifier/</text>
+        <text x="463" y="196" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">Reconciler/Arbiter/</text>
+        <text x="463" y="208" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">Harvester</text>
+        <rect x="390" y="252" width="146" height="40" rx="8" fill="var(--bg-2)" stroke="var(--line)"/>
+        <text x="463" y="276" text-anchor="middle" class="svg-l" font-size="9" fill="var(--saffron)">review_queue</text>
+        <rect x="198" y="252" width="140" height="40" rx="8" fill="var(--bg-2)" stroke="var(--line)"/>
+        <text x="268" y="276" text-anchor="middle" class="svg-l" font-size="9" fill="var(--cream)">Curation Studio</text>
+        <!-- internal edges -->
+        <line x1="268" y1="118" x2="268" y2="148" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#t8)"/>
+        <line x1="338" y1="187" x2="388" y2="187" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#t8)"/>
+        <text x="363" y="180" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">事件总线</text>
+        <line x1="463" y1="224" x2="463" y2="250" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#t8)"/>
+        <text x="478" y="242" class="svg-l" font-size="8" fill="var(--faint)">⑤ 推审</text>
+        <line x1="390" y1="272" x2="340" y2="272" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#t8)"/>
+        <line x1="268" y1="252" x2="268" y2="226" stroke="var(--terra)" stroke-width="1.2" marker-end="url(#t8)"/>
+        <text x="282" y="244" class="svg-l" font-size="8" fill="var(--terra)">⑥ 裁/背书</text>
+        <!-- external edges -->
+        <line x1="138" y1="170" x2="196" y2="150" stroke="var(--plum)" stroke-width="1.2" marker-end="url(#t8p)"/>
+        <text x="167" y="146" text-anchor="middle" class="svg-l" font-size="8" fill="var(--plum-hi)">① 检索</text>
+        <line x1="196" y1="186" x2="140" y2="200" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#t8)"/>
+        <text x="167" y="212" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">②+③ 答案/写回</text>
+        <!-- editor right -->
+        <rect x="594" y="150" width="108" height="56" rx="8" fill="oklch(0.81 0.130 86 / .1)" stroke="oklch(0.81 0.130 86 / .5)"/>
+        <text x="648" y="172" text-anchor="middle" class="svg-l" font-size="10" fill="var(--saffron)">主编</text>
+        <text x="648" y="189" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">退到主编位的人</text>
+        <line x1="594" y1="272" x2="540" y2="272" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#t8)" opacity="0"/>
+        <line x1="648" y1="206" x2="540" y2="262" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#t8)"/>
+        <text x="600" y="238" class="svg-l" font-size="8" fill="var(--faint)">操作 Studio</text>
+        <!-- flywheel -->
+        <path d="M338 96 C420 30 560 30 600 150" fill="none" stroke="var(--plum)" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#t8p)"/>
+        <text x="470" y="26" text-anchor="middle" class="svg-l pulse" font-size="9" fill="var(--plum-hi)">⑥ 主编裁决 → ① 检索更准 · 自我生长 + 自我修正飞轮</text>
+        <!-- separators note -->
+        <text x="78" y="240" text-anchor="middle" class="svg-l" font-size="8" fill="var(--info)">用户在消费侧</text>
+        <text x="648" y="226" text-anchor="middle" class="svg-l" font-size="8" fill="var(--saffron)">主编在 Engram 侧</text>
+      </svg>
+      <figcaption><b>FIG 8a</b> · 关系拓扑 —— 最终用户 / Consumer Agent / Engram 本体 / 内部编队 / 主编 的数据流闭环;⑥→① 的回流是"自我生长 + 自我修正"飞轮</figcaption>
+    </figure>
+
+    <figure class="fig flush rv">
+      <svg viewBox="0 0 720 308" role="img" aria-label="内核/适配分层 + SPI边界 + 部署组件">
+        <!-- adapter layer (domain) -->
+        <rect x="20" y="20" width="680" height="44" rx="8" fill="oklch(0.65 0.170 33 / .08)" stroke="oklch(0.65 0.170 33 / .4)"/>
+        <text x="38" y="40" class="svg-l" font-size="11" fill="var(--terra)">Consumer Adapter 层 · 领域相关 · 接入方注入</text>
+        <text x="38" y="57" class="svg-l" font-size="9" fill="var(--muted)">招投标/客服/研发 Adapter —— 授权策略 · 业务关系映射 · 客户隔离 · 领域分类(全在线上)</text>
+        <!-- SPI boundary -->
+        <line x1="20" y1="76" x2="700" y2="76" stroke="var(--terra)" stroke-width="2" stroke-dasharray="7 4"/>
+        <text x="360" y="71" text-anchor="middle" class="svg-l" font-size="10" fill="var(--terra)">━ SPI 边界 = C6 物理位置 · 线以下可被任意领域复用 ━</text>
+        <!-- kernel layers -->
+        <rect x="20" y="86" width="680" height="36" rx="8" fill="var(--bg-2)" stroke="var(--line)"/>
+        <text x="38" y="108" class="svg-l" font-size="10" fill="var(--cream)">Ports 层 · Retrieval / Write / Feedback / Governance / Curation</text>
+        <rect x="20" y="128" width="680" height="42" rx="8" fill="oklch(0.72 0.115 235 / .07)" stroke="oklch(0.72 0.115 235 / .4)"/>
+        <text x="38" y="148" class="svg-l" font-size="10" fill="var(--info)">治理层 · 内部 agent 编队五工种 + 事件总线 + review_queue + 调度器</text>
+        <text x="38" y="164" class="svg-l" font-size="9" fill="var(--muted)">事后免疫 = 写与治理解耦</text>
+        <rect x="20" y="176" width="680" height="62" rx="8" fill="oklch(0.66 0.175 320 / .07)" stroke="oklch(0.45 0.130 320)"/>
+        <text x="38" y="196" class="svg-l" font-size="10" fill="var(--plum-hi)">数据原语层(三层不塌缩)</text>
+        <text x="38" y="214" class="svg-l" font-size="9" fill="var(--muted)">Layer3 VIEW: page ─&lt; page_claims　·　Layer2 CLAIM: claim ─&lt; provenance/relations + confidence + verification</text>
+        <text x="38" y="230" class="svg-l" font-size="9" fill="var(--muted)">Layer1 RAW: source(immutable)+ blob store</text>
+        <!-- deployment row -->
+        <text x="20" y="262" class="svg-l" font-size="10" fill="var(--faint)">部署 · 计算无状态横向扩 / 存储有状态分离:</text>
+        <g class="svg-l" font-size="8" fill="var(--muted)">
+          <rect x="20" y="272" width="108" height="28" rx="6" fill="var(--bg-1)" stroke="var(--line-soft)"/><text x="74" y="290" text-anchor="middle">① Gateway(N副本)</text>
+          <rect x="136" y="272" width="120" height="28" rx="6" fill="var(--bg-1)" stroke="var(--line-soft)"/><text x="196" y="290" text-anchor="middle">② Crew Workers(分池)</text>
+          <rect x="264" y="272" width="96" height="28" rx="6" fill="var(--bg-1)" stroke="var(--line-soft)"/><text x="312" y="290" text-anchor="middle">③ Event Bus</text>
+          <rect x="368" y="272" width="150" height="28" rx="6" fill="var(--bg-1)" stroke="var(--line-soft)"/><text x="443" y="290" text-anchor="middle">④ Postgres + pgvector(主+读副本)</text>
+          <rect x="526" y="272" width="84" height="28" rx="6" fill="var(--bg-1)" stroke="var(--line-soft)"/><text x="568" y="290" text-anchor="middle">⑤ Blob Store</text>
+          <rect x="618" y="272" width="82" height="28" rx="6" fill="var(--bg-1)" stroke="var(--line-soft)"/><text x="659" y="290" text-anchor="middle">⑥ Studio</text>
+        </g>
+      </svg>
+      <figcaption><b>FIG 8b</b> · 内核/适配分层 + 部署 —— SPI 边界以下全部领域无关可复用;计算层(网关/编队)无状态任意加副本,检索走只读副本</figcaption>
+    </figure>
+  </section>
+
+  <!-- ════ §9 编排与循环 ════ -->
+  <section id="s9">
+    <div class="head rv">
+      <div class="no">09 / ORCHESTRATION &amp; LOOPS</div>
+      <h2>编排 · 每个 agent 的循环</h2>
+      <p>要不要一个 meta-agent 统管编队?<b>裁决:控制面主干保持确定性,LLM 推理降级为旁挂式 Advisor</b>。核心是<span class="p">能力与权力分离</span> —— Advisor 持推理能力但零写权限,只产建议;确定性的恒温器 + 验收门持决策权力但不推理。谁都不能既推理又拍板。失效则静音 Advisor、退回三层主干,零数据损坏。</p>
+    </div>
+
+    <figure class="fig rv">
+      <svg viewBox="0 0 720 432" role="img" aria-label="控制面拓扑:数据面choreography+恒温器+旁挂Advisor经验收门">
+        <defs>
+          <marker id="o9s" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--muted)"/></marker>
+          <marker id="o9p" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--emerald)"/></marker>
+          <marker id="o9d" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--plum)"/></marker>
+        </defs>
+        <!-- slow loop band -->
+        <text x="22" y="20" class="svg-l" font-size="10" fill="var(--plum-hi)">慢回路 · 离线 · 可旁路(虚线=建议,不可执行)</text>
+        <rect x="22" y="28" width="190" height="62" rx="10" fill="oklch(0.66 0.175 320 / .08)" stroke="oklch(0.45 0.130 320)" stroke-dasharray="5 4"/>
+        <text x="117" y="52" text-anchor="middle" class="svg-l" font-size="11" fill="var(--plum-hi)">Advisor(LLM)</text>
+        <text x="117" y="69" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">只读全局 · 零写权限</text>
+        <text x="117" y="82" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">唤醒:结构性失衡 / 无主 event</text>
+        <!-- acceptance gate diamond -->
+        <path d="M380 30 L452 64 L380 98 L308 64 Z" fill="var(--bg-2)" stroke="var(--terra)" stroke-width="1.6"/>
+        <text x="380" y="58" text-anchor="middle" class="svg-l" font-size="10" fill="var(--terra)">验收门</text>
+        <text x="380" y="72" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">纯规则·承重墙</text>
+        <text x="380" y="84" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">真实存在/无环/枚举/不冲突</text>
+        <path d="M212 60 L306 64" stroke="var(--plum)" stroke-width="1.2" stroke-dasharray="5 3" marker-end="url(#o9d)"/>
+        <text x="258" y="52" text-anchor="middle" class="svg-l" font-size="8" fill="var(--plum-hi)">advisory.*</text>
+        <rect x="486" y="40" width="120" height="44" rx="8" fill="var(--bg-1)" stroke="var(--line-soft)"/>
+        <text x="546" y="60" text-anchor="middle" class="svg-l" font-size="9" fill="var(--faint)">拒绝 → 丢弃</text>
+        <text x="546" y="74" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">记 provenance/audit</text>
+        <path d="M452 64 L484 62" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#o9s)"/>
+        <!-- control plane band -->
+        <text x="22" y="124" class="svg-l" font-size="10" fill="var(--info)">控制面快回路 · 确定性恒温器(纯函数,可单测可回放)</text>
+        <rect x="486" y="132" width="200" height="62" rx="10" fill="oklch(0.72 0.115 235 / .1)" stroke="oklch(0.72 0.115 235 / .5)"/>
+        <text x="586" y="156" text-anchor="middle" class="svg-l" font-size="10" fill="var(--info)">GovernanceController 恒温器</text>
+        <text x="586" y="173" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">每分钟 tick · 比五标量阈值</text>
+        <text x="586" y="186" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">动作[封闭枚举]:收紧闸门/限流/扩容</text>
+        <!-- data plane band -->
+        <text x="22" y="228" class="svg-l" font-size="10" fill="var(--emerald)">数据面快路径 · Choreography(本地决策,无全局视野)</text>
+        <g font-family="DM Sans" font-size="9">
+          <rect x="22" y="238" width="120" height="40" rx="8" fill="var(--bg-2)" stroke="var(--line)"/><text x="82" y="263" text-anchor="middle" fill="var(--cream)">Distiller</text>
+          <rect x="152" y="238" width="120" height="40" rx="8" fill="var(--bg-2)" stroke="var(--line)"/><text x="212" y="263" text-anchor="middle" fill="var(--cream)">Verifier</text>
+          <rect x="282" y="238" width="118" height="40" rx="8" fill="var(--bg-2)" stroke="var(--line)"/><text x="341" y="263" text-anchor="middle" fill="var(--cream)">Reconciler</text>
+          <rect x="410" y="238" width="118" height="40" rx="8" fill="var(--bg-2)" stroke="var(--line)"/><text x="469" y="263" text-anchor="middle" fill="var(--cream)">Arbiter</text>
+          <rect x="538" y="238" width="148" height="40" rx="8" fill="var(--bg-2)" stroke="var(--line)"/><text x="612" y="263" text-anchor="middle" fill="var(--cream)">Harvester</text>
+        </g>
+        <rect x="22" y="300" width="664" height="34" rx="8" fill="oklch(0.75 0.125 164 / .1)" stroke="oklch(0.75 0.125 164 / .5)"/>
+        <text x="354" y="321" text-anchor="middle" class="svg-l" font-size="11" fill="var(--emerald)">Event Bus · 事件驱动(source.ingested / batch_appended / conflict.detected / feedback)</text>
+        <!-- vertical connectors -->
+        <line x1="82" y1="278" x2="82" y2="298" stroke="var(--muted)" stroke-width="1" marker-end="url(#o9s)"/>
+        <line x1="212" y1="278" x2="212" y2="298" stroke="var(--muted)" stroke-width="1" marker-end="url(#o9s)"/>
+        <line x1="341" y1="278" x2="341" y2="298" stroke="var(--muted)" stroke-width="1" marker-end="url(#o9s)"/>
+        <line x1="469" y1="278" x2="469" y2="298" stroke="var(--muted)" stroke-width="1" marker-end="url(#o9s)"/>
+        <line x1="612" y1="278" x2="612" y2="298" stroke="var(--muted)" stroke-width="1" marker-end="url(#o9s)"/>
+        <!-- thermostat read metrics (dashed up) / write actions (solid down) -->
+        <path d="M640 300 L640 196" stroke="var(--info)" stroke-width="1.2" marker-end="url(#o9s)"/>
+        <text x="648" y="290" class="svg-l" font-size="8" fill="var(--info)">动作↓</text>
+        <path d="M540 196 L540 298" stroke="var(--info)" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#o9s)"/>
+        <text x="498" y="290" class="svg-l" font-size="8" fill="var(--info)">读五指标↑</text>
+        <!-- gate pass to bus (solid green executable) -->
+        <path d="M380 98 L380 298" stroke="var(--emerald)" stroke-width="1.2" marker-end="url(#o9p)"/>
+        <text x="388" y="170" class="svg-l" font-size="8" fill="var(--emerald)">通过 → 可执行 event(实线)</text>
+        <!-- advisor reads bus (dashed up) + woken by thermostat -->
+        <path d="M40 300 L40 92" stroke="var(--plum)" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#o9d)"/>
+        <text x="46" y="200" class="svg-l" font-size="8" fill="var(--plum-hi)">只读↑</text>
+        <path d="M486 150 C300 120 220 110 168 90" stroke="var(--plum)" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#o9d)"/>
+        <text x="300" y="108" text-anchor="middle" class="svg-l" font-size="8" fill="var(--plum-hi)">唤醒:失衡</text>
+        <!-- bottom annotation -->
+        <text x="354" y="356" text-anchor="middle" class="svg-l" font-size="10" fill="var(--saffron)">能力(Advisor 想)与 权力(恒温器 + 验收门 拍板)分离 · 冲突时恒温器永远赢</text>
+        <text x="354" y="376" text-anchor="middle" class="svg-l" font-size="9" fill="var(--faint)">Advisor ≈ 免疫系统的抗原呈递细胞(只识别+呈递,不杀伤)· 恒温器 ≈ 调节性 T 细胞(负反馈)</text>
+        <text x="354" y="408" text-anchor="middle" class="svg-l" font-size="9" fill="var(--terra)">分阶段上线:① Advisor 纯只读诊断给人看 N 周 → ② 才接验收门自动化 · 删 Advisor = flag 静音,5 分钟回退</text>
+      </svg>
+      <figcaption><b>FIG 9a</b> · 控制面拓扑 —— 三层确定性主干(数据面 choreography + 恒温器)+ 旁挂式 Advisor;Advisor 的建议必须过确定性验收门才能变成可执行 event。否决了"在线 meta-orchestrator",采纳"离线 Advisor"</figcaption>
+    </figure>
+
+    <table class="dd rv">
+      <thead><tr><th>维度</th><th>恒温器 GovernanceController</th><th>Advisor 建议器</th></tr></thead>
+      <tbody>
+        <tr><td>处理对象</td><td>量(五个标量指标)</td><td>质(claim/relation 语义内容)</td></tr>
+        <tr><td>决策性质</td><td>阈值比较,纯函数</td><td>开放式语义推理</td></tr>
+        <tr><td>写 store 权限</td><td class="mid">有(封闭枚举动作)</td><td class="ok">零(只读物 advisory.*)</td></tr>
+        <tr><td>落地路径</td><td>直接生效</td><td>必过确定性验收门</td></tr>
+        <tr><td>可复现</td><td class="ok">同输入同输出,可单测</td><td class="no">不可复现 → 故不进控制回路</td></tr>
+        <tr><td>失效降级</td><td>维持当前闸门(安全态)</td><td>静音 event,退回三层</td></tr>
+      </tbody>
+    </table>
+
+    <div class="prose rv"><p>至于这些 agent 是 <b>one-shot LLM 还是真 agent loop</b> —— 不是审美选择,是任务结构的函数。判据一句话:<b class="p">执行前状态空间是否已收敛</b>。单步可枚举的映射(抽取判定、分类、转换)是函数;只有"下一步做什么依赖这一步看到了什么、且分支无法预先穷举"时,才需要 perceive→reason→act→observe 的反馈环。第二道闸是成本:高频 + 低语义 → 必须确定性;低频 + 高语义 → 可负担有界 loop。</p></div>
+
+    <figure class="fig flush rv">
+      <svg viewBox="0 0 720 300" role="img" aria-label="五工种循环深度×成本档象限:Distiller/Arbiter真loop,其余非loop">
+        <!-- axes -->
+        <line x1="70" y1="40" x2="70" y2="250" stroke="var(--line)" stroke-width="1"/>
+        <line x1="70" y1="250" x2="690" y2="250" stroke="var(--line)" stroke-width="1"/>
+        <text x="70" y="30" text-anchor="middle" class="svg-l" font-size="10" fill="var(--faint)">↑ 低频·可负担 LLM</text>
+        <text x="690" y="270" text-anchor="end" class="svg-l" font-size="10" fill="var(--faint)">循环深度 →</text>
+        <text x="100" y="270" class="svg-l" font-size="9" fill="var(--faint)">确定性</text>
+        <text x="280" y="270" class="svg-l" font-size="9" fill="var(--faint)">+点状 LLM</text>
+        <text x="440" y="270" class="svg-l" font-size="9" fill="var(--faint)">one-shot 判定</text>
+        <text x="610" y="270" class="svg-l" font-size="9" fill="var(--faint)">有界 loop</text>
+        <!-- divider -->
+        <line x1="500" y1="40" x2="500" y2="250" stroke="var(--line-soft)" stroke-width="1.6" stroke-dasharray="5 5"/>
+        <text x="280" y="50" text-anchor="middle" class="svg-l" font-size="9" fill="var(--faint)">非 loop · 函数/统计(state 已收敛)</text>
+        <text x="610" y="50" text-anchor="middle" class="svg-l" font-size="9" fill="var(--plum-hi)">真 loop · 开放分解/取证</text>
+        <!-- nodes -->
+        <circle cx="610" cy="100" r="34" fill="oklch(0.66 0.175 320 / .16)" stroke="var(--plum)"/>
+        <text x="610" y="98" text-anchor="middle" font-family="DM Sans" font-size="11" fill="var(--plum-hi)">Arbiter</text>
+        <text x="610" y="113" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">裁冲突·≤6步</text>
+        <circle cx="600" cy="170" r="40" fill="oklch(0.66 0.175 320 / .16)" stroke="var(--plum)"/>
+        <text x="600" y="168" text-anchor="middle" font-family="DM Sans" font-size="11" fill="var(--plum-hi)">Distiller</text>
+        <text x="600" y="183" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">蒸馏·只写draft</text>
+        <circle cx="430" cy="180" r="28" fill="var(--bg-2)" stroke="var(--info)" stroke-opacity=".6"/>
+        <text x="430" y="178" text-anchor="middle" font-family="DM Sans" font-size="10" fill="var(--cream)">Verifier</text>
+        <text x="430" y="192" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">entailment</text>
+        <circle cx="300" cy="195" r="28" fill="var(--bg-2)" stroke="var(--line)"/>
+        <text x="300" y="193" text-anchor="middle" font-family="DM Sans" font-size="10" fill="var(--cream)">Reconciler</text>
+        <text x="300" y="207" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">去重</text>
+        <circle cx="140" cy="210" r="24" fill="var(--bg-2)" stroke="var(--line)"/>
+        <text x="140" y="208" text-anchor="middle" font-family="DM Sans" font-size="10" fill="var(--cream)">Harvester</text>
+        <text x="140" y="222" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">统计</text>
+      </svg>
+      <figcaption><b>FIG 9b</b> · 循环深度 × 成本档 —— 圆越大语义越复杂。<span style="color:var(--plum-hi)">Distiller / Arbiter = 真有界 loop</span>;Verifier / Reconciler / Harvester = 函数/统计 + 点状 one-shot LLM(内嵌一次 LLM ≠ agent loop)</figcaption>
+    </figure>
+
+    <figure class="fig flush rv">
+      <svg viewBox="0 0 720 260" role="img" aria-label="Distiller与Arbiter双loop:perceive-reason-act-observe+停机/升级">
+        <defs><marker id="l9" markerWidth="7" markerHeight="7" refX="5.5" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 z" fill="var(--plum)"/></marker>
+          <marker id="l9r" markerWidth="7" markerHeight="7" refX="5.5" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 z" fill="var(--terra)"/></marker></defs>
+        <!-- Distiller -->
+        <text x="170" y="20" text-anchor="middle" class="svg-l" font-size="11" fill="var(--plum-hi)">Distiller loop · source.ingested</text>
+        <g class="svg-l" font-size="9" fill="var(--muted)">
+          <rect x="60" y="36" width="100" height="34" rx="8" fill="var(--bg-2)" stroke="var(--line)"/><text x="110" y="57" text-anchor="middle" fill="var(--cream)">perceive read_source</text>
+          <rect x="190" y="36" width="100" height="34" rx="8" fill="var(--bg-2)" stroke="var(--line)"/><text x="240" y="57" text-anchor="middle" fill="var(--cream)">reason 规划边界</text>
+          <rect x="190" y="92" width="100" height="34" rx="8" fill="var(--bg-2)" stroke="var(--line)"/><text x="240" y="113" text-anchor="middle" fill="var(--cream)">act emit_draft</text>
+          <rect x="60" y="92" width="100" height="34" rx="8" fill="var(--bg-2)" stroke="var(--line)"/><text x="110" y="110" text-anchor="middle" fill="var(--cream)">observe 覆盖?</text>
+        </g>
+        <path d="M160 53 L188 53" stroke="var(--plum)" stroke-width="1.2" marker-end="url(#l9)"/>
+        <path d="M240 70 L240 90" stroke="var(--plum)" stroke-width="1.2" marker-end="url(#l9)"/>
+        <path d="M190 109 L162 109" stroke="var(--plum)" stroke-width="1.2" marker-end="url(#l9)"/>
+        <path d="M110 92 L110 72" stroke="var(--plum)" stroke-width="1.2" marker-end="url(#l9)"/>
+        <text x="110" y="84" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">未覆盖↺</text>
+        <text x="60" y="150" class="svg-l" font-size="8" fill="var(--emerald)">停机:全覆盖∧队列空∧收敛 → 发 batch_appended</text>
+        <text x="60" y="166" class="svg-l" font-size="8" fill="var(--terra)">超 maxSteps/预算 → partial 续抽 · 损坏 → undistillable</text>
+        <text x="60" y="182" class="svg-l" font-size="8" fill="var(--faint)">硬约束:永不写非 draft 状态</text>
+        <!-- divider -->
+        <line x1="370" y1="30" x2="370" y2="200" stroke="var(--line-soft)" stroke-dasharray="4 4"/>
+        <!-- Arbiter -->
+        <text x="540" y="20" text-anchor="middle" class="svg-l" font-size="11" fill="var(--plum-hi)">Arbiter loop · conflict.detected(一次一对)</text>
+        <g class="svg-l" font-size="9" fill="var(--muted)">
+          <rect x="430" y="36" width="100" height="34" rx="8" fill="var(--bg-2)" stroke="var(--line)"/><text x="480" y="53" text-anchor="middle" fill="var(--cream)">perceive 取双方</text>
+          <rect x="560" y="36" width="110" height="34" rx="8" fill="var(--bg-2)" stroke="var(--line)"/><text x="615" y="53" text-anchor="middle" fill="var(--cream)">reason 优先级链</text>
+          <rect x="560" y="92" width="110" height="34" rx="8" fill="var(--bg-2)" stroke="var(--line)"/><text x="615" y="109" text-anchor="middle" fill="var(--cream)">act 裁/取证/升级</text>
+          <rect x="430" y="92" width="100" height="34" rx="8" fill="var(--bg-2)" stroke="var(--line)"/><text x="480" y="113" text-anchor="middle" fill="var(--cream)">observe 够判?</text>
+        </g>
+        <path d="M530 53 L558 53" stroke="var(--plum)" stroke-width="1.2" marker-end="url(#l9)"/>
+        <path d="M615 70 L615 90" stroke="var(--plum)" stroke-width="1.2" marker-end="url(#l9)"/>
+        <path d="M560 109 L532 109" stroke="var(--plum)" stroke-width="1.2" marker-end="url(#l9)"/>
+        <path d="M480 92 L480 72" stroke="var(--plum)" stroke-width="1.2" marker-end="url(#l9)"/>
+        <text x="480" y="84" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">证据不足↺</text>
+        <text x="430" y="150" class="svg-l" font-size="8" fill="var(--muted)">优先级链:人 &gt; 取代 &gt; 时效 &gt; 权威 &gt; 印证</text>
+        <text x="430" y="166" class="svg-l" font-size="8" fill="var(--terra)">裁不动/超 ≤6 步 → escalate_to_human</text>
+        <text x="430" y="182" class="svg-l" font-size="8" fill="var(--faint)">硬约束:只动单对 status,不碰全局闸门</text>
+      </svg>
+      <figcaption><b>FIG 9c</b> · 两个真 loop 展开 —— 都是有界 loop(maxSteps + 独立预算池 + 明确升级路径);失败路径一律收敛到"安全降级"而非无限重试</figcaption>
+    </figure>
+
+    <div class="note rv"><span class="lbl">一句话</span> <b>能力下沉(loop 持语义能力)、权力收口(全局动作归恒温器 + 验收门)</b>。五工种都是数据面局部决策者,即便 Distiller/Arbiter 是真 loop,写权限也封闭在各自职责枚举内(Distiller 只写 draft、Arbiter 只动单对 status),没有任何一个持有全局闸门。</div>
+  </section>
+
+  <!-- ════ §10 评测 ════ -->
+  <section id="s10">
+    <div class="head rv">
+      <div class="no">10 / EVALUATION</div>
+      <h2>评测 · 怎么算够好</h2>
+      <p>对自养 KB,"够好"不是单个准确率。而且<b>端到端 benchmark 会掩盖是哪一环坏的</b> —— 所以是一个<span class="p">测试金字塔</span>:每个 agent 的组件级 benchmark(定位)+ 控制面仿真 + 系统级端到端。命门三件别人不测的事:<b>confidence 校准</b>(校准不了,悲观消费那道门就是假的)、<b>免疫效能</b>(红队注入测自纠错)、<b>纵向越用越好</b>(agentic memory 唯一卖点,测不出来就只是慢 RAG)。</p>
+    </div>
+
+    <table class="dd rv">
+      <thead><tr><th>层</th><th>测什么</th><th>形态</th></tr></thead>
+      <tbody>
+        <tr><td><b>L1 · 组件级</b>(每个 agent 一套 golden set)</td><td>单个 agent 在隔离 session 里的准确率 —— 定位是哪一环坏、换模型可快速回归</td><td>单元/准确率测试</td></tr>
+        <tr><td><b>L2 · 控制面</b>(恒温器)</td><td>灌入"写入突增/免疫滞后拉长"负载轨迹,看是否收敛、不振荡、不超调</td><td>控制系统仿真(非准确率)</td></tr>
+        <tr><td><b>L3 · 系统级</b>(端到端)</td><td>八维度 + 校准 + 纵向 + 下游 A/B,经同一套 Consumer SPI 接入</td><td>集成测试 / 元免疫层</td></tr>
+      </tbody>
+    </table>
+
+    <div class="prose rv"><div class="subh" style="font-family:var(--serif);font-size:18px;color:var(--cream);margin:26px 0 4px">L1 · 每个 agent 的组件 benchmark</div>
+      <p style="font-size:13.5px;color:var(--faint);margin:6px 0 0">每个 agent 的 benchmark 不看总 F1,而是盯住"那个会污染知识库的方向" —— 和免疫系统"宁可错杀不放过"的偏置一致。每张表与该 agent 的循环规格一一对应。</p></div>
+    <table class="dd rv">
+      <thead><tr><th>Agent</th><th>golden set</th><th>主指标</th><th>最危险的错(权重最高)</th></tr></thead>
+      <tbody>
+        <tr><td><b>Distiller</b></td><td>source → 期望 claims + provenance</td><td>抽取 P/R · provenance 定位准确率 · 抽出被引 span 蕴含</td><td class="no">幻觉抽取(无中生有)、漏抽关键事实</td></tr>
+        <tr><td><b>Verifier</b></td><td>(claim, 原文片段) 标 entailed/not/uncertain</td><td>NLI 的 P/R/F1</td><td class="no">漏判幻觉(not-entailed 当 entailed)= 假阴性让免疫失明</td></tr>
+        <tr><td><b>Reconciler</b></td><td>claim 对 标 等价/精炼/不同</td><td>去重 P/R</td><td class="no">过度合并(把不同事实并掉 = 丢信息不可逆)</td></tr>
+        <tr><td><b>Arbiter</b></td><td>矛盾对 + 金标裁决 / "应升级人"</td><td>裁决准确率 + 升级校准</td><td class="no">该升级却自信裁错 / 该裁却全升(无用)</td></tr>
+        <tr><td><b>Harvester</b></td><td>消费结果 → 期望 usage_feedback + 缺口</td><td>缺口检出 P/R · 归因准确</td><td class="no">把噪声当信号去压/抬 confidence</td></tr>
+      </tbody>
+    </table>
+
+    <figure class="fig rv">
+      <svg viewBox="0 0 720 326" role="img" aria-label="L3评测子系统:经Consumer SPI接入的元免疫层,八维度,红队,校准回灌">
+        <defs><marker id="e10" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--muted)"/></marker>
+          <marker id="e10e" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--emerald)"/></marker></defs>
+        <!-- eval subsystem -->
+        <rect x="20" y="34" width="190" height="180" rx="10" fill="oklch(0.72 0.115 235 / .08)" stroke="oklch(0.72 0.115 235 / .45)"/>
+        <text x="115" y="56" text-anchor="middle" class="svg-l" font-size="10" fill="var(--info)">评测子系统 · 元免疫层</text>
+        <text x="115" y="70" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">持诊断能力,不持决策权力</text>
+        <g class="svg-l" font-size="9" fill="var(--muted)">
+          <rect x="34" y="80" width="162" height="22" rx="6" fill="var(--bg-2)"/><text x="42" y="95">Offline Harness(同卷复考)</text>
+          <rect x="34" y="106" width="162" height="22" rx="6" fill="var(--bg-2)"/><text x="42" y="121">Metrics Calculator(八维)</text>
+          <rect x="34" y="132" width="162" height="22" rx="6" fill="var(--bg-2)"/><text x="42" y="147">Adversarial Injector(红队)</text>
+          <rect x="34" y="158" width="162" height="22" rx="6" fill="var(--bg-2)"/><text x="42" y="173">Recalibration Fitter(单调)</text>
+          <rect x="34" y="184" width="162" height="22" rx="6" fill="var(--bg-2)"/><text x="42" y="199">Trend Tracker(纵向趋势)</text>
+        </g>
+        <!-- SPI ports -->
+        <rect x="262" y="60" width="150" height="128" rx="10" fill="var(--bg-1)" stroke="oklch(0.45 0.130 320)"/>
+        <text x="337" y="80" text-anchor="middle" class="svg-l" font-size="10" fill="var(--plum-hi)">Consumer SPI</text>
+        <text x="337" y="92" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">唯一通道·无旁路</text>
+        <g class="svg-l" font-size="9" fill="var(--cream)">
+          <rect x="276" y="100" width="122" height="24" rx="6" fill="var(--bg-2)" stroke="var(--line-soft)"/><text x="284" y="116">recall_claims(评测题)</text>
+          <rect x="276" y="128" width="122" height="24" rx="6" fill="var(--bg-2)" stroke="var(--line-soft)"/><text x="284" y="144">append_claim(红队)</text>
+          <rect x="276" y="156" width="122" height="24" rx="6" fill="var(--bg-2)" stroke="var(--line-soft)"/><text x="284" y="172">report_usage(真值)</text>
+        </g>
+        <!-- engram core -->
+        <rect x="462" y="60" width="238" height="128" rx="10" fill="oklch(0.66 0.175 320 / .07)" stroke="oklch(0.45 0.130 320)"/>
+        <text x="581" y="80" text-anchor="middle" class="svg-l" font-size="10" fill="var(--plum-hi)">Engram Core(复用不改)</text>
+        <text x="581" y="100" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">五工种免疫流水线 · 三层 · 七因子</text>
+        <text x="581" y="116" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">confidence 聚合 → 校准映射 g → 消费门</text>
+        <text x="581" y="138" text-anchor="middle" class="svg-l" font-size="8" fill="var(--saffron)">红队 = 走真实免疫流水线</text>
+        <text x="581" y="154" text-anchor="middle" class="svg-l" font-size="8" fill="var(--faint)">golden 答案放独立 namespace,不被召回(防泄漏虚高)</text>
+        <line x1="210" y1="110" x2="260" y2="112" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#e10)"/>
+        <line x1="412" y1="124" x2="460" y2="124" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#e10)"/>
+        <!-- recalibration feedback through gate -->
+        <rect x="300" y="208" width="120" height="34" rx="8" fill="var(--bg-2)" stroke="var(--terra)"/>
+        <text x="360" y="228" text-anchor="middle" class="svg-l" font-size="9" fill="var(--terra)">验收门(确定性)</text>
+        <path d="M196 175 C240 220 270 224 298 225" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#e10)"/>
+        <text x="232" y="214" class="svg-l" font-size="8" fill="var(--faint)">候选 g'(advisory)</text>
+        <path d="M420 222 C500 215 540 200 560 190" stroke="var(--emerald)" stroke-width="1.2" marker-end="url(#e10e)"/>
+        <text x="500" y="234" text-anchor="middle" class="svg-l" font-size="8" fill="var(--emerald)">过门 → 回灌 g(实线)</text>
+        <!-- 8 dims -->
+        <text x="20" y="262" class="svg-l" font-size="9" fill="var(--faint)">八维度(★=命门):</text>
+        <g class="svg-l" font-size="8" fill="var(--muted)">
+          <rect x="20" y="270" width="78" height="20" rx="6" fill="var(--bg-1)" stroke="var(--line-soft)"/><text x="26" y="284">①P/R@k</text>
+          <rect x="102" y="270" width="86" height="20" rx="6" fill="var(--bg-1)" stroke="var(--line-soft)"/><text x="108" y="284">②grounding</text>
+          <rect x="192" y="270" width="94" height="20" rx="6" fill="oklch(0.81 0.130 86 / .14)" stroke="var(--saffron)"/><text x="198" y="284" fill="var(--saffron)">★③校准 ECE</text>
+          <rect x="290" y="270" width="74" height="20" rx="6" fill="var(--bg-1)" stroke="var(--line-soft)"/><text x="296" y="284">④覆盖</text>
+          <rect x="368" y="270" width="64" height="20" rx="6" fill="var(--bg-1)" stroke="var(--line-soft)"/><text x="374" y="284">⑤时效</text>
+          <rect x="436" y="270" width="98" height="20" rx="6" fill="oklch(0.81 0.130 86 / .14)" stroke="var(--saffron)"/><text x="442" y="284" fill="var(--saffron)">★⑥免疫红队</text>
+          <rect x="538" y="270" width="74" height="20" rx="6" fill="var(--bg-1)" stroke="var(--line-soft)"/><text x="544" y="284">⑦下游A/B</text>
+          <rect x="616" y="270" width="90" height="20" rx="6" fill="oklch(0.81 0.130 86 / .14)" stroke="var(--saffron)"/><text x="622" y="284" fill="var(--saffron)">★⑧纵向</text>
+        </g>
+        <text x="20" y="312" class="svg-l" font-size="9" fill="var(--faint)">评测=消费:零评测专用代码路径,与 prod 逐字节同构 —— 否则测的是影子系统。recalibration 只过验收门才生效(Advisor 想,确定性门拍板)。</text>
+      </svg>
+      <figcaption><b>FIG 10a</b> · L3 评测子系统(元免疫层)—— 经同一套 Consumer SPI 接入:评测题=recall、红队=append、真值=report_usage;校准回灌走确定性验收门</figcaption>
+    </figure>
+
+    <table class="dd rv">
+      <thead><tr><th>红队四类对抗样本</th><th>注入</th><th>期望免疫反应</th><th>负责工种</th></tr></thead>
+      <tbody>
+        <tr><td class="no">false</td><td>与高权威 source 矛盾的假 claim</td><td>entailment 拒 / 低 conf 不召回</td><td>Verifier</td></tr>
+        <tr><td class="no">contradiction</td><td>与已有 claim 直接矛盾</td><td>检出冲突并裁决(机判或升级人)</td><td>Arbiter</td></tr>
+        <tr><td class="no">stale</td><td>故意构造的过时 claim</td><td>时效巡查标 supersede</td><td>Verifier</td></tr>
+        <tr><td class="no">near-dup-poison</td><td>伪装成精炼的等价投毒</td><td>去重识别异常 lineage</td><td>Reconciler</td></tr>
+      </tbody>
+    </table>
+
+    <figure class="fig flush rv">
+      <svg viewBox="0 0 720 248" role="img" aria-label="校准回灌三环嵌套:实时消费/校准更新/纵向越用越好">
+        <defs><marker id="c10" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--muted)"/></marker></defs>
+        <!-- inner ring -->
+        <rect x="20" y="30" width="680" height="58" rx="10" fill="oklch(0.75 0.125 164 / .06)" stroke="oklch(0.75 0.125 164 / .35)"/>
+        <text x="34" y="50" class="svg-l" font-size="10" fill="var(--emerald)">内环 · 秒级实时消费</text>
+        <text x="34" y="70" class="svg-l" font-size="9" fill="var(--muted)">recall → 七因子聚合 → 校准映射 g → calibrated confidence → 消费门(&lt;0.4 不召回 / &lt;0.6 mustVerify)→ 返回 claim + conf 快照</text>
+        <text x="34" y="83" class="svg-l" font-size="8" fill="var(--faint)">每次 recall 用当前 g · conf 快照必须取召回当刻(事后查会漂)</text>
+        <!-- middle ring -->
+        <rect x="20" y="96" width="680" height="62" rx="10" fill="oklch(0.72 0.115 235 / .06)" stroke="oklch(0.72 0.115 235 / .35)"/>
+        <text x="34" y="116" class="svg-l" font-size="10" fill="var(--info)">中环 · 分/时级校准更新</text>
+        <text x="34" y="136" class="svg-l" font-size="9" fill="var(--muted)">三类真值(usage 采纳/纠正/驳回 · Verifier 巡查 · Arbiter 裁决)→ observed correctness → reliability/ECE → Fitter 产候选 g'</text>
+        <text x="34" y="151" class="svg-l" font-size="9" fill="var(--terra)">→ 验收门(单调? 值域? 门翻转受控? 不与恒温器冲突? 每桶样本足?)→ 过门:原子替换 g · 不过门:丢弃记 provenance</text>
+        <!-- outer ring -->
+        <rect x="20" y="166" width="680" height="60" rx="10" fill="oklch(0.66 0.175 320 / .06)" stroke="oklch(0.45 0.130 320 / .5)"/>
+        <text x="34" y="186" class="svg-l" font-size="10" fill="var(--plum-hi)">外环 · release/纵向 · 越用越好验证</text>
+        <text x="34" y="206" class="svg-l" font-size="9" fill="var(--muted)">同卷复考(frozen golden 在 T0/T1/T2 重放)→ 八维向量 append-only → ΔECE↓ · Δcoverage↑ · Δhallucination↓</text>
+        <text x="34" y="220" class="svg-l" font-size="9" fill="var(--faint)">★ "回灌即时修正" 与 "内生越用越准" 分开记,防拿修正冒充成长讲故事</text>
+        <text x="710" y="20" text-anchor="end" class="svg-l" font-size="8" fill="var(--faint)">g=identity 一个 flag 五分钟回退到裸 confidence</text>
+      </svg>
+      <figcaption><b>FIG 10b</b> · 校准回灌三环嵌套 —— 校准只动"聚合后的单调映射 g",不动七因子语义(语义归语义,统计归统计);LLM/统计的不确定性不进控制回路</figcaption>
+    </figure>
+
+    <div class="note warn rv"><span class="lbl">最易踩的三个坑</span><br>
+      ① <b>golden 隔离</b>:答案放独立 namespace 只判分、不被召回,否则 KB 泄漏导致虚高(被测库必须靠自养 claim 答题)。② <b>红队换毒株</b>:detection-rate 永远用系统没见过的 corpus 版本算,否则测的是记忆不是免疫。③ <b>纵向同卷复考</b>:固定 golden 版本重放 + 难度归一,区分"系统变好"和"题变易";一个会编的 memory 比空 memory 更危险(L5 缺口题测"该说不知道时说不知道")。</div>
+    <div class="prose rv"><div class="subh" style="font-family:var(--serif);font-size:20px;color:var(--cream);margin:32px 0 4px">北极星 · 红蓝对抗(future,非现在做)</div>
+      <p>评测的远期形态:把"元免疫层"从<b>静态金标</b>升级成<b>动态对抗</b> —— 红队 agent 造题、蓝队(就是 prod consumer agent 本体)答题、裁判 Arbiter 判分、<span class="p">失败按根因回流成增长 + 下一版更难的题</span>。它是北极星不是当前里程碑,但有两条铁律现在就得立死。</p></div>
+
+    <figure class="fig rv">
+      <svg viewBox="0 0 720 360" role="img" aria-label="红蓝对抗闭环:红队出题→题免疫验真→蓝队答→裁判→失败归因回流,ELO禁入g">
+        <defs><marker id="rb" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--muted)"/></marker>
+          <marker id="rbp" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--plum)"/></marker></defs>
+        <!-- top pipeline row (四节点等宽·标题统一 11·副标题精简到不溢出) -->
+        <rect x="20" y="44" width="140" height="48" rx="8" fill="oklch(0.66 0.175 320 / .12)" stroke="oklch(0.45 0.130 320)"/>
+        <text x="90" y="66" text-anchor="middle" class="svg-l" font-size="11" fill="var(--plum-hi)">红队 Adversary</text>
+        <text x="90" y="82" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">造题 (append_claim)</text>
+        <path d="M160 68 L194 68" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#rb)"/>
+        <rect x="196" y="44" width="140" height="48" rx="8" fill="var(--bg-2)" stroke="var(--terra)" stroke-width="1.2"/>
+        <text x="266" y="66" text-anchor="middle" class="svg-l" font-size="11" fill="var(--terra)">题免疫流水线 (A1)</text>
+        <text x="266" y="82" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">三工种验真 → 晋升 golden</text>
+        <path d="M336 68 L370 68" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#rb)"/>
+        <rect x="372" y="44" width="148" height="48" rx="8" fill="oklch(0.72 0.115 235 / .12)" stroke="oklch(0.72 0.115 235 / .5)"/>
+        <text x="446" y="66" text-anchor="middle" class="svg-l" font-size="11" fill="var(--info)">蓝队 = prod consumer</text>
+        <text x="446" y="82" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">recall + 答 + confidence</text>
+        <path d="M520 68 L550 68" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#rb)"/>
+        <rect x="552" y="44" width="148" height="48" rx="8" fill="var(--bg-2)" stroke="var(--line)"/>
+        <text x="626" y="66" text-anchor="middle" class="svg-l" font-size="11" fill="var(--cream)">裁判 Arbiter</text>
+        <text x="626" y="82" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">机判 + report_usage 真值</text>
+        <!-- down to attribution -->
+        <path d="M626 92 L626 130" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#rb)"/>
+        <!-- 失败按根因分流 = 派工单 -->
+        <rect x="20" y="134" width="680" height="76" rx="10" fill="oklch(0.75 0.125 164 / .05)" stroke="var(--line-soft)"/>
+        <text x="36" y="154" class="svg-l" font-size="10" fill="var(--emerald)">失败按根因分流(不只扣分,是派工单)</text>
+        <g class="svg-l" font-size="9" fill="var(--muted)">
+          <rect x="36" y="164" width="156" height="36" rx="6" fill="var(--bg-1)" stroke="var(--line-soft)"/><text x="44" y="180">缺知识 → ingestion 优先级</text><text x="44" y="194" fill="var(--faint)" font-size="8">(红队=缺口发现引擎)</text>
+          <rect x="200" y="164" width="150" height="36" rx="6" fill="var(--bg-1)" stroke="var(--line-soft)"/><text x="208" y="180">错知识 → 免疫信号</text><text x="208" y="194" fill="var(--faint)" font-size="8">(注入测试)</text>
+          <rect x="358" y="164" width="156" height="36" rx="6" fill="var(--bg-1)" stroke="var(--line-soft)"/><text x="366" y="180">召回了用错 → consumption</text>
+          <rect x="522" y="164" width="172" height="36" rx="6" fill="oklch(0.81 0.130 86 / .12)" stroke="var(--saffron)"/><text x="530" y="180" fill="var(--saffron)">自信却错 → 校准信号 → g</text><text x="530" y="194" fill="var(--faint)" font-size="8">(红队=g 的梯度来源)</text>
+        </g>
+        <!-- single flywheel return arc: 派工单 → 红队 -->
+        <path d="M20 178 C6 150 6 108 40 94" fill="none" stroke="var(--plum)" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#rbp)"/>
+        <text x="26" y="236" class="svg-l" font-size="9" fill="var(--plum-hi)">↺ 飞轮:失败 → 下一版更难的题(新毒株)</text>
+        <!-- A3 red line callout -->
+        <rect x="360" y="224" width="340" height="46" rx="8" fill="oklch(0.65 0.170 33 / .08)" stroke="oklch(0.65 0.170 33 / .5)"/>
+        <text x="376" y="244" class="svg-l" font-size="10" fill="var(--terra)">⊘ A3 红线:ELO / 胜负率 ✕→ 校准 g / 纵向趋势</text>
+        <text x="376" y="260" class="svg-l" font-size="8" fill="var(--muted)">看着像"越用越好",实则 Goodhart(学会让红队变弱而非更准)</text>
+        <!-- bottom footnotes -->
+        <text x="360" y="296" text-anchor="middle" class="svg-l" font-size="9" fill="var(--faint)">全程走 Consumer SPI · 评测=消费:出题=append · 答题=recall+report_usage · 零评测专用代码路径</text>
+        <text x="360" y="320" text-anchor="middle" class="svg-l" font-size="9" fill="var(--faint)">蓝队 ELO 对"冻结红队代际"的爬升斜率 = ⑧ 纵向"越用越好"的活体度量(AlphaGo 思路)</text>
+      </svg>
+      <figcaption><b>FIG 10c</b> · 红蓝对抗闭环(北极星)—— 失败按根因回流成增长 + 更难的题;ELO 永不污染校准 g 与纵向趋势</figcaption>
+    </figure>
+
+    <div class="note warn rv"><span class="lbl">现在就立的两条承重墙红线</span><br>
+      <b>① 考卷本身也要被验真</b>(题=毒株,不是真值):带 reward 的造题 agent 是最强真值污染源,红队的题必须先过"题的免疫流水线"才能晋升 golden。<b>② ELO/胜负率严禁进纵向趋势和校准 g</b>:看着像"越用越好"却与命门⑧(ECE↓)无因果,喂进飞轮 = Goodhart。</div>
+
+    <div class="note rv"><span class="lbl">近期两件事(&lt;1 周,真能过 Feature Gate,先做这个)</span><br>
+      <b>① 给 prod 消费埋 report_usage 埋点</b> —— 被动收"驳回/纠正/采纳",攒 2-4 周得到真实失败分布(红蓝最高保真题源的真实燃料,几乎零工程)。<b>② 人工写 10-20 道 L5 缺口题</b>(库里本无答案,正解=门后零召回+记缺口)—— 测零幻觉诚实性,当前单标量 benchmark 最大盲区。红蓝联赛/市场/自指全部 defer 到地基(confidence 变成可校准概率)跑通之后,顺序见 <a href="#s12" style="color:var(--plum-hi)">§12</a>。</div>
+  </section>
+
+  <!-- ════ §11 核心机制定义 ════ -->
+  <section id="s11">
+    <div class="head rv">
+      <div class="no">11 / KEY ALGORITHMS</div>
+      <h2>核心机制 · 把"待定义"补成可施工</h2>
+      <p>三审点名了四个"被反复引用却没定义"的硬阻塞算法。这里逐一补成能照着实现的定义。其中 <span class="p">confidence 归一映射 g</span> 是命门 —— 它一天不就位,§10 的校准、§6 的悲观消费门、整套"信得慢"全是空中楼阁(当前 prod 还是 <code>min(1, 来源数×0.3)</code> 五档离散,不是概率)。</p>
+    </div>
+
+    <figure class="fig rv">
+      <svg viewBox="0 0 720 236" role="img" aria-label="confidence 归一管线:七因子→raw→g→conf→门,校准回灌">
+        <defs><marker id="k11" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--muted)"/></marker>
+          <marker id="k11e" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--emerald)"/></marker></defs>
+        <rect x="20" y="40" width="118" height="108" rx="8" fill="var(--bg-2)" stroke="var(--line)"/>
+        <text x="79" y="58" text-anchor="middle" class="svg-l" font-size="10" fill="var(--muted)">七因子(语义证据)</text>
+        <text x="30" y="76" class="svg-l" font-size="8" fill="var(--faint)">来源权威 · 人审 · entail</text>
+        <text x="30" y="90" class="svg-l" font-size="8" fill="var(--faint)">多源印证 · 使用反馈</text>
+        <text x="30" y="104" class="svg-l" font-size="8" fill="var(--faint)">− 冲突 · − 时效</text>
+        <text x="30" y="126" class="svg-l" font-size="8" fill="var(--plum-hi)">权重 w = 配置态</text>
+        <text x="30" y="138" class="svg-l" font-size="8" fill="var(--faint)">(主编设·"为什么信")</text>
+        <path d="M138 94 L168 94" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#k11)"/>
+        <rect x="170" y="70" width="120" height="48" rx="8" fill="oklch(0.66 0.175 320 / .08)" stroke="oklch(0.45 0.130 320)"/>
+        <text x="230" y="90" text-anchor="middle" class="svg-l" font-size="10" fill="var(--plum-hi)">raw = Σ wᵢ·factorᵢ</text>
+        <text x="230" y="106" text-anchor="middle" class="svg-l" font-size="8" fill="var(--terra)">★ 必须连续(非 5 档)</text>
+        <path d="M290 94 L320 94" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#k11)"/>
+        <rect x="322" y="70" width="130" height="48" rx="8" fill="oklch(0.75 0.125 164 / .1)" stroke="oklch(0.75 0.125 164 / .5)"/>
+        <text x="387" y="88" text-anchor="middle" class="svg-l" font-size="10" fill="var(--emerald)">g 单调映射</text>
+        <text x="387" y="104" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">temperature → isotonic</text>
+        <path d="M452 94 L482 94" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#k11)"/>
+        <rect x="484" y="70" width="100" height="48" rx="8" fill="var(--bg-2)" stroke="var(--line)"/>
+        <text x="534" y="90" text-anchor="middle" class="svg-l" font-size="10" fill="var(--cream)">conf ∈ [0,1]</text>
+        <text x="534" y="106" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">校准后概率</text>
+        <path d="M584 94 L614 94" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#k11)"/>
+        <rect x="616" y="70" width="84" height="48" rx="8" fill="oklch(0.66 0.175 320 / .08)" stroke="oklch(0.45 0.130 320)"/>
+        <text x="658" y="90" text-anchor="middle" class="svg-l" font-size="9" fill="var(--plum-hi)">消费门</text>
+        <text x="658" y="106" text-anchor="middle" class="svg-l" font-size="8" fill="var(--muted)">0.6 / 0.4</text>
+        <!-- calibration feedback -->
+        <path d="M534 118 C534 175 420 178 387 178 L387 120" fill="none" stroke="var(--emerald)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#k11e)"/>
+        <text x="360" y="200" class="svg-l" font-size="9" fill="var(--emerald)">校准回灌:observed correctness → 拟合 g(§10 三环)· g≠w:w 是语义权重,g 是统计对齐,职责分离</text>
+      </svg>
+      <figcaption><b>FIG 11a</b> · confidence 归一 g —— 七因子合成连续 raw,再过单调映射 g 校准成概率;<b>raw 连续化是命门前置</b>(替换 min(1,来源数×0.3) 的 5 档离散)</figcaption>
+    </figure>
+
+    <table class="dd rv">
+      <thead><tr><th>机制</th><th>方法(起步 → 进阶)</th><th>输出</th><th>危险 / 风险</th></tr></thead>
+      <tbody>
+        <tr><td><b>confidence 归一 g</b></td><td>raw=Σwᵢ·factorᵢ → temperature σ(raw/T) → isotonic 非参单调</td><td>conf∈[0,1] 概率</td><td class="no">★ raw 须先连续化,否则 g 无意义</td></tr>
+        <tr><td><b>embedding</b></td><td>对 <b>claimText</b>(蒸馏事实,非 raw chunk)生成 ~768–1024 维,commit 时算,pgvector + HNSW</td><td>召回 + 去重底座</td><td class="no">模型升级→历史向量不可比,需全量重嵌入 + 版本锚</td></tr>
+        <tr><td><b>lineage 匹配</b></td><td>两阶段:① embedding 近邻 + subjectKey 召候选 ② 确定性规则 + 灰区 one-shot LLM</td><td>同一(共 lineageId)/ refines / contradicts / 无关</td><td class="no">object 语义等价边界(≥4K vs 至少4K)灰区必走 LLM + metamorphic 自检</td></tr>
+        <tr><td><b>独立来源判定</b></td><td>独立 ⟺ id≠ ∧ hash≠ ∧ 无 derived_from 血缘 ∧(可选)origin≠</td><td>印证只数独立 supports 源</td><td class="no">隐性同源(都抄自同一原始未记血缘)→ 近似哈希 + 偶尔人工</td></tr>
+      </tbody>
+    </table>
+
+    <details class="schema rv"><summary>核心公式(伪代码)</summary><pre><span class="c"># confidence 归一(g)—— 命门</span>
+raw  = Σ wᵢ·factorᵢ           <span class="c"># 七因子线性合成,w=配置态(主编设,可解释语义权重)</span>
+conf = g(raw)                <span class="c"># g 单调;起步 temperature: conf=σ(raw/T);进阶 isotonic 非参</span>
+<span class="c"># g 由 observed correctness 校准拟合(§10 三环),与 w 分离:w 答"为什么信",g 答"数值=真实概率"</span>
+
+<span class="c"># 独立来源判定(印证去重)</span>
+independent(s1,s2) = s1.id≠s2.id ∧ s1.hash≠s2.hash ∧ ¬derivedChain(s1,s2)
+corroboration = |{ 独立 supports source }|     <span class="c"># 不是 |provenance| —— 防同源刷印证</span>
+
+<span class="c"># lineage 同一事实判据</span>
+same_fact(a,b) ⟺ a.subject≡b.subject ∧ a.predicate≡b.predicate
+               ∧ object_equiv(a.object,b.object)   <span class="c"># 数值/单位归一 或 语义等价(灰区→LLM)</span></pre></details>
+  </section>
+
+  <!-- ════ §12 推进路线 ════ -->
+  <section id="s12">
+    <div class="head rv">
+      <div class="no">12 / ROADMAP</div>
+      <h2>推进路线 · 从设计稿到北极星</h2>
+      <p>三审最锋利的一句:<b>"最该先回答的不是红队怎么造题,而是 confidence 什么时候从来源计数器变成可校准的概率"</b>。在地基跑通前,所有八维度数字都是对不存在系统的幻觉。所以推进严格地基优先,每阶段有<span class="p">可观测验收</span>和<span class="p">解锁下一阶段的前置门</span> —— 没过门不许跳级。</p>
+    </div>
+
+    <figure class="fig rv">
+      <svg viewBox="0 0 720 300" role="img" aria-label="推进路线五阶段:地基→评测点火→内核组件→系统纵向→红蓝北极星">
+        <text x="20" y="20" class="svg-l" font-size="9" fill="var(--terra)">当前:设计稿 · 地基实现 ≈ 0(SPI/七因子/校准/五工种 多为 interface 无 impl)</text>
+        <!-- P0 -->
+        <rect x="20" y="30" width="680" height="44" rx="8" fill="oklch(0.65 0.170 33 / .08)" stroke="oklch(0.65 0.170 33 / .55)"/>
+        <text x="34" y="49" class="svg-l" font-size="11" fill="var(--terra)">Phase 0 · 地基(先回答"confidence 何时变可校准概率")</text>
+        <text x="34" y="65" class="svg-l" font-size="9" fill="var(--muted)">report_usage 埋点 · confidence→连续多因子+g · 最小 SPI 三动作　│ 验收:画出第一张 reliability diagram,ECE 可算且非平凡</text>
+        <text x="688" y="49" text-anchor="end" class="svg-l" font-size="8" fill="var(--saffron)">门:ECE 非平凡</text>
+        <!-- P1 -->
+        <rect x="20" y="82" width="680" height="44" rx="8" fill="oklch(0.75 0.125 164 / .08)" stroke="oklch(0.75 0.125 164 / .5)"/>
+        <text x="34" y="101" class="svg-l" font-size="11" fill="var(--emerald)">Phase 1 · 评测点火(&lt;1 周,过 Gate 的两件事)</text>
+        <text x="34" y="117" class="svg-l" font-size="9" fill="var(--muted)">10–20 道 L5 缺口题(零幻觉诚实性) · prod 失败回流进 hybrid-box 当回归　│ 验收:盲区有分 + 真实失败池非空</text>
+        <text x="688" y="101" text-anchor="end" class="svg-l" font-size="8" fill="var(--saffron)">门:失败池攒够</text>
+        <!-- P2 -->
+        <rect x="20" y="134" width="680" height="44" rx="8" fill="oklch(0.72 0.115 235 / .08)" stroke="oklch(0.72 0.115 235 / .5)"/>
+        <text x="34" y="153" class="svg-l" font-size="11" fill="var(--info)">Phase 2 · 内核闭环 + L1/L2 组件 benchmark</text>
+        <text x="34" y="169" class="svg-l" font-size="9" fill="var(--muted)">五工种真上线 · 每 agent 组件 golden(L1)· 恒温器收敛仿真(L2)　│ 验收:L1 各 agent P/R 绿 + L2 不振荡</text>
+        <text x="688" y="153" text-anchor="end" class="svg-l" font-size="8" fill="var(--saffron)">门:组件全绿</text>
+        <!-- P3 -->
+        <rect x="20" y="186" width="680" height="44" rx="8" fill="oklch(0.66 0.175 320 / .08)" stroke="oklch(0.45 0.130 320)"/>
+        <text x="34" y="205" class="svg-l" font-size="11" fill="var(--plum-hi)">Phase 3 · 系统八维 + 纵向</text>
+        <text x="34" y="221" class="svg-l" font-size="9" fill="var(--muted)">八维度落库 · 冻结红队代际 · 归因脊柱　│ 验收:③ECE↓ ④coverage↑ 可画曲线 + 失败可单环归因</text>
+        <text x="688" y="205" text-anchor="end" class="svg-l" font-size="8" fill="var(--saffron)">门:校准可信</text>
+        <!-- P4 -->
+        <rect x="20" y="238" width="680" height="48" rx="8" fill="oklch(0.66 0.175 320 / .05)" stroke="oklch(0.45 0.130 320)" stroke-dasharray="6 4"/>
+        <text x="34" y="257" class="svg-l" font-size="11" fill="var(--plum-hi)">Phase 4 · 红蓝北极星(future,过硬前置才解锁)</text>
+        <text x="34" y="273" class="svg-l" font-size="9" fill="var(--muted)">单红队 + 冻结代际 →(证明朴素不够用后)league / 市场 / 自指　│ 解锁前置:连续可校准 conf + 独立 judge + 真实 usage 锚 三者齐备</text>
+      </svg>
+      <figcaption><b>FIG 12a</b> · 推进路线 —— 地基优先,逐阶段过门;红蓝是 Phase 4 的 future,前置是 Engram 本身从"设计稿"长出"可校准的地基"</figcaption>
+    </figure>
+
+    <div class="note rv"><span class="lbl">一句话排序</span> 先把 <b>confidence 变成可校准的概率</b>(Phase 0)+ <b>埋 report_usage / 写 L5 缺口题</b>(Phase 1,&lt;1 周) —— 这是唯一同时过 Feature Gate 1(真实痛点)和 Gate 4(近零成本)的起步。红蓝联赛 / 市场 / 自指全部 defer,等地基跑通 + 证明朴素方案不够用再谈。</div>
+  </section>
+
+  <!-- ════ §13 未决与横切 ════ -->
+  <section id="s13">
+    <div class="head rv">
+      <div class="no">13 / OPEN &amp; CROSS-CUTTING</div>
+      <h2>未决与横切 · 诚实清单</h2>
+      <p>四个曾"被引用却未定义"的硬阻塞算法已在 <a href="#s11" style="color:var(--plum-hi)">§11</a> 补成可施工定义;红蓝对抗已收敛为 <a href="#s10" style="color:var(--plum-hi)">§10</a> 的北极星 + 近期两件事;推进顺序见 <a href="#s12" style="color:var(--plum-hi)">§12</a>。这里只留<b>真正还悬着的</b>:横切关注点 + 必须由人拍板的治理红线。</p>
+    </div>
+
+    <div class="note warn rv"><span class="lbl">治理红线(需拍板人书面背书,工程挡不住)</span><br>
+      <b>ELO / 红蓝胜负率严禁进对客报告</b>:它最好讲,却与命门⑧(ECE 单调降)无因果 —— 进了 leaderboard 就会反向逼团队"优化胜负率"(让红队变弱/题变偏),正是 Goodhart。对客只出 ③ECE + ④coverage + ⑥detection 三条命门曲线。类比项目既有红线"不新造分数体系"。另:单人维护负债、judge 调用的 token 成本(与省 token 纪律冲突)、append-only 历史表一旦积累不可逆 —— 这三项是三审点出但本稿未展开的真风险。</div>
+
+    <table class="dd rv">
+      <thead><tr><th>② 横切关注点(本稿尚未展开)</th><th>缺了会怎样</th></tr></thead>
+      <tbody>
+        <tr><td><b>认证 / 授权</b>(消费方鉴权、RBAC 之外)</td><td>谁能 append、谁能 open_source 原文</td></tr>
+        <tr><td><b>多租户隔离</b>(claim 层 namespace + raw source 层)</td><td>跨租户 open_source 可能泄漏机密原文</td></tr>
+        <tr><td><b>数据规模与成本</b>(分片、向量索引、巡查吞吐)</td><td>千万级 claim 时的检索/巡查可行性</td></tr>
+        <tr><td><b>迁移与 schema 演进</b></td><td>原语字段增改时既有 claim 怎么平滑过渡</td></tr>
+        <tr><td><b>失败与一致性边界</b>(写回半失败、事件丢失)</td><td>乐观写 + 异步治理下的最终一致性保证</td></tr>
+        <tr><td><b>可观测性 SLO</b></td><td>免疫滞后等指标的目标值与告警门</td></tr>
+      </tbody>
+    </table>
+
+    <div class="note warn rv"><span class="lbl">三审留下的待冻结契约</span><br>
+      还有几处跨节定义需在动工前冻结单一权威:<b>EnginePolicy</b> 字段集(两节略有出入)、各门限的<b>默认值</b>(多版本)、隔离的双轨职责(namespaces 与 filterVisible 重叠)。本稿已就地裁定三处冲突 —— 表名统一(<code>claim_provenance</code> / <code>claim_verification</code>)、status 用<b>因子驱动</b>单一机制(人投因子、门限定态)、adapter 分<b>配置态 / 请求态</b>两层 —— 其余留作实现前的冻结清单。</div>
+
+    <div class="prose rv"><p style="color:var(--faint);font-size:13.5px;max-width:74ch">本设计稿由 9 个 agent 在"忘掉任何既有实现、从第一性原理设计独立产品"的约束下并行产出,经<b style="color:var(--muted)">纯度 / 一致性 / 完整性</b>三重对抗审查。它是一个<b style="color:var(--muted)">方向与骨架</b>,不是施工蓝图;上面两张清单补齐后即达交付级。</p></div>
+  </section>
+
+  <footer>
+    <div>ENGRAM · 独立产品设计稿 · §01–13</div>
+    <div>4 轮 workflow(设计 / 编排评测 / 红蓝发散)· <b>纯度/一致性/完整性</b> 多轮对抗审查</div>
+    <div>DRAFT · 2026·06·03</div>
+  </footer>
+
+</div>
+<script>
+(function(){
+  var rm = window.matchMedia && window.matchMedia('(prefers-reduced-motion:reduce)').matches;
+  var els = [].slice.call(document.querySelectorAll('.rv'));
+  if(rm || !('IntersectionObserver' in window)){ els.forEach(function(e){e.classList.add('in')}); return; }
+  var io = new IntersectionObserver(function(ents){
+    ents.forEach(function(en){ if(en.isIntersecting){ en.target.classList.add('in'); io.unobserve(en.target); } });
+  },{threshold:.1, rootMargin:'0px 0px -7% 0px'});
+  els.forEach(function(e){ io.observe(e); });
+})();
+</script>
+</body>
+</html>
