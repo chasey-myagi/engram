@@ -142,7 +142,7 @@ describe('S4 report_usage — append-only usage_truth events (A.2)', () => {
     expect(e!.byRole).toBe('consumer:unknown')
   })
 
-  it('verdict JSONB carries exactly {outcome, taskId, note} — by_role stays a column, not in verdict', async () => {
+  it('verdict JSONB carries exactly {outcome, taskId, note, predictedConfidence, calibrationVersion} — by_role stays a column', async () => {
     const id = await seedActiveClaim('verdict keys')
     const { verificationId } = await reportUsage(db, id, 'adopted', {
       byRole: 'agent:x',
@@ -153,7 +153,13 @@ describe('S4 report_usage — append-only usage_truth events (A.2)', () => {
       .select()
       .from(claimVerification)
       .where(eq(claimVerification.id, verificationId))
-    expect(Object.keys(row!.verdict as object).sort()).toEqual(['note', 'outcome', 'taskId'])
+    expect(Object.keys(row!.verdict as object).sort()).toEqual([
+      'calibrationVersion',
+      'note',
+      'outcome',
+      'predictedConfidence',
+      'taskId',
+    ])
   })
 
   it('round-trips free-text note/taskId through verdict JSONB; empty string survives, omitted becomes null', async () => {
