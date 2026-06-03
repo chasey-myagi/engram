@@ -14,7 +14,7 @@ import {
   type StoredConfidence,
 } from '../confidence/confidence.js'
 import { createDb, type DB } from '../db/client.js'
-import { addSource, appendClaim, supersedeClaim } from '../spi/append-claim.js'
+import { addSource, appendClaim } from '../spi/append-claim.js'
 import { claim, claimProvenance, type ClaimStatus } from '../db/schema.js'
 import {
   KERNEL_CONFIDENCE_FLOOR,
@@ -253,46 +253,58 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     expect(await recallClaims(db, 'absent-token')).toEqual([])
   })
 
-  it('end-to-end through the real append→recall seam: corroborated claim surfaces (mustVerify), lone source stays below floor', async () => {
-    // single source (authority 0.9): base = 0.3·0.9 + 0.075 = 0.345 < 0.4 → below the consumption floor
-    const lone = await seedSource(0.9)
-    await appendClaim(db, { claimText: 'engram lone-source fact' }, [
-      { sourceId: lone.sourceId, locator: 'l' },
-    ])
-    // two INDEPENDENT sources (authority 0.9): + indepSupport(2)=0.5 ⇒ base = 0.42 → [0.4,0.6) mustVerify
+  it('never surfaces non-active claims — draft (shadow zone), quarantined, or flagged (status gate, layer ①)', async () => {
+    // High confidence is not enough: the consumption gate also requires a consumable status.
+    await seedClaim({ raw: 0.8, text: 'gate active', status: 'active' })
+    await seedClaim({ raw: 0.8, text: 'gate draft', status: 'draft' })
+    await seedClaim({ raw: 0.8, text: 'gate quarantined', status: 'quarantined' })
+    await seedClaim({ raw: 0.8, text: 'gate flagged', status: 'flagged' })
+
+    const results = await recallClaims(db, 'gate')
+    expect(results).toHaveLength(1)
+    expect(results[0]!.claim.status).toBe('active')
+    expect(results[0]!.claim.claimText).toBe('gate active')
+  })
+
+  it('matches case-insensitively (ilike)', async () => {
+    await seedClaim({ raw: 0.8, text: 'widget high band' })
+    const results = await recallClaims(db, 'WIDGET')
+    expect(results).toHaveLength(1)
+    expect(results[0]!.claim.claimText).toBe('widget high band')
+  })
+
+  it('treats a non-finite confidenceFloor (NaN / ±Infinity) as the kernel floor, not vacuously', async () => {
+    await seedClaim({ raw: 0.2, text: 'nf below' })
+    await seedClaim({ raw: 0.5, text: 'nf mid' })
+
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      const results = await recallClaims(db, 'nf', { confidenceFloor: bad })
+      expect(results.map((r) => r.confidence.value)).toEqual([0.5]) // kernel floor 0.4: 0.2 out, 0.5 in
+    }
+  })
+
+  it('breaks ties deterministically by claim id ascending at equal confidence', async () => {
+    const a = await seedClaim({ raw: 0.8, text: 'tie one' })
+    const b = await seedClaim({ raw: 0.8, text: 'tie two' })
+    const results = await recallClaims(db, 'tie')
+    expect(results.map((r) => r.claim.id)).toEqual([a, b].sort()) // id-ascending, not insertion order
+  })
+
+  it('end-to-end through the real append→recall seam: appended claims are draft (shadow zone) and are NOT recalled until promoted (S13)', async () => {
+    // appendClaim writes status=draft and no draft→active promotion path exists yet (S13).
+    // Even a well-corroborated claim sits in the shadow zone and must not be consumable.
     const s1 = await seedSource(0.9)
     const s2 = await seedSource(0.9)
     await appendClaim(db, { claimText: 'engram corroborated fact' }, [
       { sourceId: s1.sourceId, locator: 'l1' },
       { sourceId: s2.sourceId, locator: 'l2' },
     ])
-
-    const results = await recallClaims(db, 'engram')
-    expect(results).toHaveLength(1) // only the corroborated one clears the floor
-    expect(results[0]!.claim.claimText).toBe('engram corroborated fact')
-    expect(results[0]!.mustVerify).toBe(true)
-    expect(results[0]!.confidence.value).toBeCloseTo(0.42, 6)
-    expect(results[0]!.provenances).toHaveLength(2) // both independent sources cited
-  })
-
-  it('superseding replaces the head: only the new version is recalled, old is filtered', async () => {
-    const a = await seedSource(0.9)
-    const b = await seedSource(0.9)
-    const { claimId } = await appendClaim(db, { claimText: 'engram v1 corroborated' }, [
-      { sourceId: a.sourceId, locator: 'l1' },
-      { sourceId: b.sourceId, locator: 'l2' },
-    ])
-    const c = await seedSource(0.9)
-    const d = await seedSource(0.9)
-    await supersedeClaim(db, claimId, { claimText: 'engram v2 corroborated' }, [
-      { sourceId: c.sourceId, locator: 'l3' },
-      { sourceId: d.sourceId, locator: 'l4' },
+    const lone = await seedSource(0.9)
+    await appendClaim(db, { claimText: 'engram lone-source fact' }, [
+      { sourceId: lone.sourceId, locator: 'l' },
     ])
 
-    const results = await recallClaims(db, 'engram')
-    expect(results).toHaveLength(1)
-    expect(results[0]!.claim.claimText).toBe('engram v2 corroborated')
-    expect(results[0]!.claim.status).not.toBe('superseded')
+    expect(await recallClaims(db, 'engram')).toHaveLength(0) // both draft → shadow zone, not recalled
   })
 })
 

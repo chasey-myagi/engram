@@ -13,7 +13,7 @@
  * 关键设计：raw 写时存、g 召回时现算（value=applyG(raw, 版本)）。所以 S27/S28 换 g（identity↔isotonic）
  * 对所有召回即时生效，无需回写每条 claim。检索匹配 S3 用确定性子串（text/subject）；语义向量是 S9。
  */
-import { and, ilike, inArray, ne, or } from 'drizzle-orm'
+import { and, asc, desc, eq, ilike, inArray, or } from 'drizzle-orm'
 
 import {
   applyG,
@@ -75,7 +75,10 @@ export interface RecallContext {
   limit?: number
 }
 
-/** 把 LIKE 元字符（% _ \）转义成字面量，让 query 是确定性子串匹配而非通配。 */
+/**
+ * 把 LIKE 元字符（% _ \）转义成字面量，让 query 是确定性子串匹配而非通配。
+ * 用反斜杠转义 —— 对齐 Postgres LIKE/ILIKE 的默认 escape 字符（无需显式 ESCAPE 子句）。
+ */
 function escapeLike(s: string): string {
   return s.replace(/[\\%_]/g, (ch) => `\\${ch}`)
 }
@@ -103,7 +106,12 @@ export async function recallClaims(
   const limit = typeof ctx.limit === 'number' && ctx.limit > 0 ? ctx.limit : DEFAULT_RECALL_LIMIT
   const pattern = `%${escapeLike(query)}%`
 
-  // 候选：确定性子串命中 claim_text 或 subject，且不是被取代的旧版（单 head：只召回当前版本）。
+  // 消费门是两层。第一层 = 状态可消费：只放 status=active。draft=影子区(不召回)、quarantined=不可消费、
+  // superseded=已被取代、flagged=降权可见(降权机制 S17 产出前先一并硬排除) —— 依据 PRD A.4 状态表
+  // 「影子区不召回」与设计稿消费门「conf≥0.6 ∧ status=active」。注意：晋升路径(draft→active)是 S13，
+  // 在它到位前经 SPI 写入的 claim 都是 draft，召回为空是**正确**的（不召回未治理内容）。第二层 = conf band，在下面。
+  // 取法：按 raw 降序、平手 id 升序，DB 侧 LIMIT 兜住内存。g 单调非降（identity/isotonic），故 raw 序 = value 序，
+  // 这条有界 top-N 正确（高 conf 在前，floor 过滤掉的必是尾部）。
   const candidates = await db
     .select({
       id: claim.id,
@@ -120,15 +128,18 @@ export async function recallClaims(
     .from(claim)
     .where(
       and(
-        ne(claim.status, 'superseded'),
+        eq(claim.status, 'active'),
         or(ilike(claim.claimText, pattern), ilike(claim.subject, pattern)),
       ),
     )
+    .orderBy(desc(claim.confidenceRaw), asc(claim.id))
+    .limit(limit)
 
   // g 召回时现算 → 消费门过滤。整次 recall 共享同一 takenAt（"召回瞬间")。
   const takenAt = new Date()
   const gated = candidates
     .map((c) => {
+      // confidence_factors 是 jsonb；写路径是唯一写者且类型锁定（StoredConfidence），故此处盲转安全。
       const stored = c.confidenceFactors as StoredConfidence
       const raw = c.confidenceRaw
       const value = applyG(raw, stored.calibrationVersion)
@@ -190,13 +201,7 @@ export async function recallClaims(
     })
   }
 
-  // 确定性排序：value 降序，平手按 id 升序稳定。取前 limit。
-  results.sort((a, b) =>
-    b.confidence.value !== a.confidence.value
-      ? b.confidence.value - a.confidence.value
-      : a.claim.id < b.claim.id
-        ? -1
-        : 1,
-  )
-  return results.slice(0, limit)
+  // candidates 已按 (raw 降序, id 升序) 从 DB 取出，g 单调 ⇒ raw 序即 value 序；map/filter 保序，
+  // 故 results 已是最终确定性顺序，且 ≤ limit。无需再排或再 slice。
+  return results
 }
