@@ -201,7 +201,16 @@ export async function recallClaims(
     })
   }
 
-  // candidates 已按 (raw 降序, id 升序) 从 DB 取出，g 单调 ⇒ raw 序即 value 序；map/filter 保序，
-  // 故 results 已是最终确定性顺序，且 ≤ limit。无需再排或再 slice。
+  // SQL 的 (raw 降序, id 升序) LIMIT 只负责**正确地选出候选集合**：g 单调非降 ⇒ top-N-by-raw 与
+  // top-N-by-value 是同一集合（floor 过滤掉的必是尾部）。最终**顺序**在此按 (value 降序, id 升序) 重排——
+  // 这样即便将来 g 非严格单调（S28 isotonic 的阶梯把不同 raw 映到同一 value），同 value 的平手仍按 id 升序，
+  // 文档化的确定性次序对所有 g 成立（不依赖 raw 当二级键）。results 已 ≤ limit，无需再 slice。
+  results.sort((a, b) =>
+    b.confidence.value !== a.confidence.value
+      ? b.confidence.value - a.confidence.value
+      : a.claim.id < b.claim.id
+        ? -1
+        : 1,
+  )
   return results
 }

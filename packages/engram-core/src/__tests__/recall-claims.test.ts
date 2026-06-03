@@ -242,6 +242,12 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     expect(literal).toHaveLength(1) // % is literal, not a wildcard matching axxb
     expect(literal[0]!.claim.claimText).toBe('discount a%b literal')
 
+    await seedClaim({ raw: 0.8, text: 'code a_b underscore', subject: null })
+    await seedClaim({ raw: 0.8, text: 'code axb underscore', subject: null })
+    const underscore = await recallClaims(db, 'a_b')
+    expect(underscore).toHaveLength(1) // _ is literal, not a single-char wildcard matching axb
+    expect(underscore[0]!.claim.claimText).toBe('code a_b underscore')
+
     const bySubject = await recallClaims(db, 'SKU-42')
     expect(bySubject).toHaveLength(1)
     expect(bySubject[0]!.claim.subject).toBe('SKU-42')
@@ -288,6 +294,50 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     const b = await seedClaim({ raw: 0.8, text: 'tie two' })
     const results = await recallClaims(db, 'tie')
     expect(results.map((r) => r.claim.id)).toEqual([a, b].sort()) // id-ascending, not insertion order
+  })
+
+  it('echoes every claim passthrough column (id/subject/predicate/object/status/lineageId/asOf)', async () => {
+    // guard the pure-passthrough columns — a wrong-column typo in the mapping would slip past
+    // the band/snapshot tests, which only check id/subject/status.
+    const id = randomUUID()
+    const lineageId = randomUUID()
+    const asOf = new Date('2025-01-02T03:04:05.000Z')
+    await db.insert(claim).values({
+      id,
+      claimText: 'passthrough body',
+      subject: 'subj-x',
+      predicate: 'pred-y',
+      object: 'obj-z',
+      status: 'active',
+      confidence: 0.8,
+      confidenceRaw: 0.8,
+      confidenceFactors: factorsBlob(),
+      lineageId,
+      asOf,
+      createdBy: 'test',
+    })
+    const { sourceId } = await seedSource()
+    await db
+      .insert(claimProvenance)
+      .values({ id: randomUUID(), claimId: id, sourceId, locator: 'p1', relevance: 'exact' })
+
+    const [r] = await recallClaims(db, 'passthrough')
+    expect(r!.claim).toMatchObject({
+      id,
+      subject: 'subj-x',
+      predicate: 'pred-y',
+      object: 'obj-z',
+      status: 'active',
+      lineageId,
+    })
+    expect(r!.claim.asOf.toISOString()).toBe(asOf.toISOString())
+  })
+
+  it('applies the DB-side limit before the floor filter — a below-floor top-N candidate drops, not backfilled', async () => {
+    await seedClaim({ raw: 0.8, text: 'lf high' })
+    await seedClaim({ raw: 0.3, text: 'lf low' }) // below the 0.4 kernel floor
+    const results = await recallClaims(db, 'lf', { limit: 2 })
+    expect(results.map((r) => r.confidence.value)).toEqual([0.8]) // 0.3 is in top-2-by-raw then floor-dropped
   })
 
   it('end-to-end through the real append→recall seam: appended claims are draft (shadow zone) and are NOT recalled until promoted (S13)', async () => {
