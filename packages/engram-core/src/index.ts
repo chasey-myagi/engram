@@ -25,3 +25,13 @@ export {
   type ConfidenceSnapshot,
   type RecalledProvenance,
 } from './spi/recall-claims.js'
+export {
+  reportUsage,
+  getUsageEvents,
+  getFailurePool,
+  USAGE_OUTCOMES,
+  FAILURE_OUTCOMES,
+  type UsageOutcome,
+  type ReportUsageContext,
+  type UsageEvent,
+} from './spi/report-usage.js'
