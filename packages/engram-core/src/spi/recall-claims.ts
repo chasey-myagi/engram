@@ -181,8 +181,9 @@ export async function recallClaims(
         .from(claim)
         .where(inArray(claim.id, otherIds))
     : []
-  const activeOther = new Set<string>(candidateIds)
-  for (const r of otherRows) if (r.status === 'active') activeOther.add(r.id)
+  // 所有“仍 active”的相关 id（候选必 active；再并入非候选对端里 active 的）。只有 active 对端才算活跃矛盾。
+  const activeIds = new Set<string>(candidateIds)
+  for (const r of otherRows) if (r.status === 'active') activeIds.add(r.id)
   const contradictsByClaim = new Map<string, Set<string>>()
   const addContra = (a: string, b: string) => {
     const s = contradictsByClaim.get(a) ?? new Set<string>()
@@ -190,9 +191,10 @@ export async function recallClaims(
     contradictsByClaim.set(a, s)
   }
   for (const e of edges) {
-    if (e.to == null) continue // contradicts 边两端齐全；防御性跳过半边
-    if (candidateSet.has(e.from) && activeOther.has(e.to)) addContra(e.from, e.to)
-    if (candidateSet.has(e.to) && activeOther.has(e.from)) addContra(e.to, e.from)
+    if (e.to == null) continue // relation.to_claim 可空：半边防御性跳过
+    if (e.from === e.to) continue // 防御：自指 contradicts 边不让 claim 与自己矛盾（写路径已挡，直插库兜底）
+    if (candidateSet.has(e.from) && activeIds.has(e.to)) addContra(e.from, e.to)
+    if (candidateSet.has(e.to) && activeIds.has(e.from)) addContra(e.to, e.from)
   }
 
   // 召回瞬间：用活动权重对存档因子重算 raw（配置态变更即刻生效）+ 实时 conflictDecay，再现算 g → value。

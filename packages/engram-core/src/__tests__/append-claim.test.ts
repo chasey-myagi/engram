@@ -463,6 +463,17 @@ describe('S8 contradiction detection (append, optimistic — record both, never 
     expect(await contradictsEdges()).toHaveLength(0)
   })
 
+  it('records no contradiction when the new claim lacks an object, or when the existing object is null', async () => {
+    const s = await seedSource()
+    // new claim partially structured (object null) → recordContradictions early-returns, no detection
+    await appendClaim(db, { claimText: 'partial', subject: 'sku-x', predicate: 'p' }, [
+      { sourceId: s.sourceId, locator: 'l' },
+    ])
+    // now a fully-structured claim on the same subject+predicate: the existing null-object row is NOT a contradiction
+    await appendStructured('sku-x', 'p', '4k', 'full now')
+    expect(await contradictsEdges()).toHaveLength(0)
+  })
+
   it('a third reversed-object fact contradicts BOTH prior versions (two edges)', async () => {
     await appendStructured('sku-9', 'maxres', '720p', 'v1')
     await appendStructured('sku-9', 'maxres', '1080p', 'v2')

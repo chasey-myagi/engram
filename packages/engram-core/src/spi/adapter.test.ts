@@ -161,6 +161,14 @@ describe('applyAdapter — monotone-tightening operator (A.2/A.6)', () => {
     expect(applyAdapter(kernel(), () => [])).toEqual([])
   })
 
+  it('preserves the contradicts annotation through tightening (矛盾显式 must not be stripped)', () => {
+    const withContra: RecallResult = { ...makeResult('x', 0.8), contradicts: ['rival-1'] }
+    const out = applyAdapter([withContra], (rs) =>
+      rs.map((r) => ({ ...r, confidence: { ...r.confidence, value: 0.7 } })),
+    )
+    expect(out[0]!.contradicts).toEqual(['rival-1']) // kernel-safety signal survives the adapter
+  })
+
   it("throws 'adapter relaxed' when the adapter reorders provenances (positional check, conservative-by-design)", () => {
     const twoProv: RecallResult = {
       ...makeResult('m', 0.9),

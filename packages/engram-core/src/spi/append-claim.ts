@@ -162,7 +162,7 @@ async function recordContradictions(tx: Tx, newClaimId: string, draft: DraftClai
         ne(claim.status, 'superseded'), // 已被取代的旧版不再参与矛盾
         eq(claim.subject, draft.subject),
         eq(claim.predicate, draft.predicate),
-        ne(claim.object, draft.object), // object 反向/不同（null object 经 SQL <> 判 NULL → 不算矛盾）
+        ne(claim.object, draft.object), // object 反向/不同；既有行 object IS NULL 时 SQL <> 判 NULL → 不算矛盾
       ),
     )
   for (const c of conflicting) {

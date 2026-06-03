@@ -482,13 +482,58 @@ describe('S8 contradicts — dual-return + real-time conflictDecay (A.3/A.5)', (
     expect(r!.contradicts).toEqual([])
   })
 
-  it('a contradiction whose other side is superseded is not counted (resolved → conflictDecay back to 1)', async () => {
-    const a = await seedClaim({ raw: 0.8, text: 'resolved conflict head' })
-    const b = await seedClaim({ raw: 0.8, text: 'resolved conflict old', status: 'superseded' })
-    await contradict(a, b)
-    const [r] = await recallClaims(db, 'resolved conflict head')
-    expect(r!.confidence.value).toBeCloseTo(0.8, 6) // b superseded → not an active contradiction
-    expect(r!.contradicts).toEqual([])
+  it.each(['draft', 'flagged', 'quarantined', 'superseded'] as const)(
+    'a contradiction whose opponent is %s is not an active conflict (only active opponents count)',
+    async (status) => {
+      const a = await seedClaim({ raw: 0.8, text: `nonactive opp ${status} head` })
+      const b = await seedClaim({ raw: 0.8, text: `opp ${status} other`, status })
+      await contradict(a, b)
+      const [r] = await recallClaims(db, `nonactive opp ${status} head`)
+      expect(r!.confidence.value).toBeCloseTo(0.8, 6) // opponent not active → no live conflict
+      expect(r!.confidence.factors.conflictDecay).toBe(1)
+      expect(r!.contradicts).toEqual([])
+    },
+  )
+
+  it('conflict can GATE, not just down-rank: enough active contradictions push value below the floor → absent', async () => {
+    const a = await seedClaim({ raw: 0.5, text: 'gated by conflict target' })
+    const b = await seedClaim({ raw: 0.5, text: 'gated rival one' })
+    const c = await seedClaim({ raw: 0.5, text: 'gated rival two' })
+    await contradict(b, a)
+    await contradict(c, a) // 2 active contradictions → conflictDecay(2) = 0.5
+    // 0.5 × 0.5 = 0.25 < 0.4 floor → the target disappears entirely (conflict gates, not merely annotates)
+    expect(await recallClaims(db, 'gated by conflict target')).toHaveLength(0)
+  })
+
+  it('append→recall seam: a contradiction recorded by append surfaces in recall.contradicts (one real edge, read both ways)', async () => {
+    // recordContradictions writes ONE real edge (from new → existing); recall is direction-agnostic
+    const s1 = await seedSource(0.9)
+    const s2 = await seedSource(0.9)
+    const prov = [
+      { sourceId: s1.sourceId, locator: 'l1' },
+      { sourceId: s2.sourceId, locator: 'l2' },
+    ]
+    const { claimId: a } = await appendClaim(
+      db,
+      { claimText: 'seam sku maxres 4k', subject: 'sku', predicate: 'maxres', object: '4k' },
+      prov,
+    )
+    const { claimId: b } = await appendClaim(
+      db,
+      { claimText: 'seam sku maxres 1080p', subject: 'sku', predicate: 'maxres', object: '1080p' },
+      prov,
+    )
+    // promote to active + lift factors above the floor (S8 append base is too low to clear floor under the penalty)
+    for (const id of [a, b]) {
+      await db
+        .update(claim)
+        .set({ status: 'active', confidenceFactors: factorsBlob(0.9) })
+        .where(eq(claim.id, id))
+    }
+    const byId = new Map((await recallClaims(db, 'seam sku maxres')).map((r) => [r.claim.id, r]))
+    expect(byId.get(a)!.contradicts).toEqual([b]) // the single append-written edge is read from both sides
+    expect(byId.get(b)!.contradicts).toEqual([a])
+    expect(byId.get(a)!.confidence.factors.activeContradicts).toBe(1)
   })
 
   it('multiple active contradictions stack: conflictDecay(2) = 1/(1+0.5·2) = 0.5', async () => {
