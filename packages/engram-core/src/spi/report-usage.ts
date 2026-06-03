@@ -2,9 +2,10 @@
  * 用量回报（Consumer SPI 第三个动作，附录 A.2）—— 消费侧产出校准燃料。
  *
  * report_usage(db, claimId, outcome, ctx?) 追加**恰好一条** claim_verification(kind='usage_truth')：
- *   - verdict JSONB = { outcome, taskId, note }
+ *   - verdict JSONB = { outcome, taskId, note, predictedConfidence, calibrationVersion }
  *   - by_role = 上报方身份（judge≠athlete 归因，红线）
  * 这是 append-only 的真值事件流，后续喂 f4（observed_correctness）与失败池。
+ * predictedConfidence = 消费时所见的召回快照 conf.value（S5 校准燃料：预测概率与观测结局配对持久化，ECE 算它）。
  *
  * 刻意只**记事件**，绝不在此重算/改动 claim.confidence —— 升信/降信与回报解耦：
  * 真正把 usage_truth 统计成 f4 并重算的是 Harvester（S19），且须独立用户门控（防 Goodhart）。
@@ -31,6 +32,13 @@ export interface ReportUsageContext {
   taskId?: string
   /** 自由文本备注。 */
   note?: string
+  /**
+   * 消费时所见的 ConfidenceSnapshot.value（召回瞬间的预测概率，∈[0,1]）—— 校准燃料（S5）。
+   * 把它和观测结局配对持久化，ECE 才能在「评测=消费」下从落地数据算出（绝不查询时重算 confidence）。
+   */
+  confidenceAtRecall?: number
+  /** 产生该预测值的 g 版本（快照的 calibrationVersion）；用于将来按 g 版本分段校准（S28）。 */
+  calibrationVersion?: string
 }
 
 /** usage_truth 事件的读出形状（verdict JSONB 展平 + 列字段）。 */
@@ -41,6 +49,10 @@ export interface UsageEvent {
   byRole: string
   taskId: string | null
   note: string | null
+  /** 召回瞬间预测概率（无则 null）。 */
+  predictedConfidence: number | null
+  /** 该预测值的 g 版本（无则 null）。 */
+  calibrationVersion: string | null
   createdAt: Date
 }
 
@@ -49,6 +61,8 @@ interface UsageVerdict {
   outcome: UsageOutcome
   taskId: string | null
   note: string | null
+  predictedConfidence: number | null
+  calibrationVersion: string | null
 }
 
 function isUsageOutcome(x: unknown): x is UsageOutcome {
@@ -71,6 +85,11 @@ function toUsageEvent(row: typeof claimVerification.$inferSelect): UsageEvent {
     byRole: row.byRole,
     taskId: verdict.taskId ?? null,
     note: verdict.note ?? null,
+    // 旧行/未带预测的行 → null（防御性读取，不假设字段存在）。
+    predictedConfidence:
+      typeof verdict.predictedConfidence === 'number' ? verdict.predictedConfidence : null,
+    calibrationVersion:
+      typeof verdict.calibrationVersion === 'string' ? verdict.calibrationVersion : null,
     createdAt: row.createdAt,
   }
 }
@@ -90,6 +109,15 @@ export async function reportUsage(
       `report_usage: invalid outcome ${JSON.stringify(outcome)} (expected one of ${USAGE_OUTCOMES.join(', ')})`,
     )
   }
+  // confidenceAtRecall 是概率，给了就必须在 [0,1]（顺带挡 NaN：NaN>=0 为 false）。
+  if (
+    ctx.confidenceAtRecall !== undefined &&
+    !(ctx.confidenceAtRecall >= 0 && ctx.confidenceAtRecall <= 1)
+  ) {
+    throw new Error(
+      `report_usage: confidenceAtRecall must be in [0,1] (got ${JSON.stringify(ctx.confidenceAtRecall)})`,
+    )
+  }
   // 前置存在性检查：claimId 不存在直接拒、连 insert 都不发（claim_verification.claim_id 的 NOT NULL FK 是兜底）。
   const exists = await db.select({ id: claim.id }).from(claim).where(eq(claim.id, claimId)).limit(1)
   if (exists.length === 0) {
@@ -100,6 +128,8 @@ export async function reportUsage(
     outcome,
     taskId: ctx.taskId ?? null,
     note: ctx.note ?? null,
+    predictedConfidence: ctx.confidenceAtRecall ?? null,
+    calibrationVersion: ctx.calibrationVersion ?? null,
   }
   await db.insert(claimVerification).values({
     id,

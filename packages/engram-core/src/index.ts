@@ -35,3 +35,11 @@ export {
   type ReportUsageContext,
   type UsageEvent,
 } from './spi/report-usage.js'
+export {
+  computeReliability,
+  computeCalibrationFromUsage,
+  DEFAULT_BIN_COUNT,
+  type CalibrationSample,
+  type ReliabilityBin,
+  type ReliabilityReport,
+} from './calibration/calibration.js'

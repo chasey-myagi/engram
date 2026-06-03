@@ -153,7 +153,13 @@ describe('S4 report_usage — append-only usage_truth events (A.2)', () => {
       .select()
       .from(claimVerification)
       .where(eq(claimVerification.id, verificationId))
-    expect(Object.keys(row!.verdict as object).sort()).toEqual(['note', 'outcome', 'taskId'])
+    expect(Object.keys(row!.verdict as object).sort()).toEqual([
+      'calibrationVersion',
+      'note',
+      'outcome',
+      'predictedConfidence',
+      'taskId',
+    ])
   })
 
   it('round-trips free-text note/taskId through verdict JSONB; empty string survives, omitted becomes null', async () => {
