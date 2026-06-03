@@ -135,6 +135,65 @@ describe('S4 report_usage — append-only usage_truth events (A.2)', () => {
     expect(row!.verdict).toMatchObject({ outcome: 'corrected', taskId: null, note: null })
   })
 
+  it('defaults by_role to consumer:unknown when ctx omits it (NOT NULL attribution column)', async () => {
+    const id = await seedActiveClaim('default role')
+    await reportUsage(db, id, 'adopted') // no ctx at all → default branch executes on a real write
+    const [e] = await getUsageEvents(db, id)
+    expect(e!.byRole).toBe('consumer:unknown')
+  })
+
+  it('verdict JSONB carries exactly {outcome, taskId, note} — by_role stays a column, not in verdict', async () => {
+    const id = await seedActiveClaim('verdict keys')
+    const { verificationId } = await reportUsage(db, id, 'adopted', {
+      byRole: 'agent:x',
+      taskId: 't',
+      note: 'n',
+    })
+    const [row] = await db
+      .select()
+      .from(claimVerification)
+      .where(eq(claimVerification.id, verificationId))
+    expect(Object.keys(row!.verdict as object).sort()).toEqual(['note', 'outcome', 'taskId'])
+  })
+
+  it('round-trips free-text note/taskId through verdict JSONB; empty string survives, omitted becomes null', async () => {
+    const tricky = 'q"uote \\back/slash 中文 😀 {"json":true}'
+    const id = await seedActiveClaim('boundary text')
+    await reportUsage(db, id, 'partial', { byRole: 'r', taskId: tricky, note: tricky })
+    const [e1] = await getUsageEvents(db, id)
+    expect(e1!.taskId).toBe(tricky) // quotes / backslash / unicode / json-special all intact
+    expect(e1!.note).toBe(tricky)
+
+    const empties = await seedActiveClaim('boundary empty')
+    await reportUsage(db, empties, 'partial', { byRole: 'r', note: '' }) // taskId omitted, note ''
+    const [e2] = await getUsageEvents(db, empties)
+    expect(e2!.note).toBe('') // empty string preserved, distinct from omitted
+    expect(e2!.taskId).toBeNull() // omitted → null
+  })
+
+  it('getUsageEvents / getFailurePool return events in created_at-ascending order, not insertion order', async () => {
+    const id = await seedActiveClaim('ordered events')
+    // insert OUT of time order with explicit, staggered created_at — proves the orderBy actually orders
+    const rows = [
+      { createdAt: new Date('2025-03-03T00:00:00Z'), outcome: 'refuted', note: 'third' },
+      { createdAt: new Date('2025-01-01T00:00:00Z'), outcome: 'corrected', note: 'first' },
+      { createdAt: new Date('2025-02-02T00:00:00Z'), outcome: 'adopted', note: 'second' },
+    ]
+    for (const r of rows) {
+      await db.insert(claimVerification).values({
+        id: randomUUID(),
+        claimId: id,
+        kind: 'usage_truth',
+        verdict: { outcome: r.outcome, taskId: null, note: r.note },
+        byRole: 'r',
+        createdAt: r.createdAt,
+      })
+    }
+    // NO .sort() here — the order under test is the function's own
+    expect((await getUsageEvents(db, id)).map((e) => e.note)).toEqual(['first', 'second', 'third'])
+    expect((await getFailurePool(db)).map((e) => e.note)).toEqual(['first', 'third']) // corrected+refuted, still ascending
+  })
+
   it('rejects a nonexistent claimId with no partial write', async () => {
     await expect(reportUsage(db, randomUUID(), 'adopted')).rejects.toThrow(/not found/i)
     expect(await countVerifications()).toBe(0)

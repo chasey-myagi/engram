@@ -104,7 +104,11 @@ export async function reportUsage(
   return { verificationId: id }
 }
 
-/** 枚举一条 claim 的全部 usage_truth 事件（append-only，按时间升序）。 */
+/**
+ * 枚举一条 claim 的全部 usage_truth 事件（append-only，按 created_at 升序）。
+ * created_at 是微秒级事务时间，每次 reportUsage 一次独立事务 ⇒ 实践中互不相同；次级 id 升序
+ * 只是同一瞬间（极罕见）平手时的确定性兜底，并非严格插入序（若 S11/S19 需严格插入序，再加单调 ordinal 列）。
+ */
 export async function getUsageEvents(db: DB, claimId: string): Promise<UsageEvent[]> {
   const rows = await db
     .select()
@@ -125,8 +129,11 @@ export async function getFailurePool(db: DB): Promise<UsageEvent[]> {
     .where(
       and(
         eq(claimVerification.kind, 'usage_truth'),
-        // verdict->>'outcome' ∈ 失败结局；常量内联无注入风险。
-        sql`(${claimVerification.verdict} ->> 'outcome') in ('corrected', 'refuted')`,
+        // verdict->>'outcome' ∈ 失败结局；IN 列表从 FAILURE_OUTCOMES 单一真相源参数化生成（不漂移、无注入）。
+        sql`(${claimVerification.verdict} ->> 'outcome') in (${sql.join(
+          FAILURE_OUTCOMES.map((o) => sql`${o}`),
+          sql`, `,
+        )})`,
       ),
     )
     .orderBy(asc(claimVerification.createdAt), asc(claimVerification.id))
