@@ -20,6 +20,7 @@ import {
   verificationKind,
 } from '../db/schema.js'
 import { addSource, appendClaim, supersedeClaim } from '../spi/append-claim.js'
+import { DEFAULT_WEIGHTS } from '../confidence/confidence.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
 const migrationsFolder = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'drizzle')
@@ -197,13 +198,21 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
     expect(provs[0]!.relevance).toBe('supporting')
   })
 
-  it('append() stamps the S1 placeholder confidence triple + default createdBy (locks the S2 contract)', async () => {
+  it('append() stamps a continuous computed confidence + factor snapshot (命门 — replaces the 0/0/{} placeholder)', async () => {
     const { sourceId } = await seedSource()
     const { claimId } = await appendClaim(db, { claimText: 'c' }, [{ sourceId, locator: 'l' }])
     const row = (await db.select().from(claim).where(eq(claim.id, claimId)))[0]!
-    expect(row.confidence).toBe(0)
-    expect(row.confidenceRaw).toBe(0)
-    expect(row.confidenceFactors).toEqual({})
+    expect(row.confidence).toBeGreaterThan(0) // no longer the 0 placeholder
+    expect(row.confidence).toBeLessThanOrEqual(1)
+    expect(row.confidence).toBe(row.confidenceRaw) // g = identity
+    const cf = row.confidenceFactors as {
+      calibrationVersion: string
+      weights: typeof DEFAULT_WEIGHTS
+      factors: Record<string, number>
+    }
+    expect(cf.calibrationVersion).toBe('identity')
+    expect(cf.weights).toEqual(DEFAULT_WEIGHTS)
+    expect(cf.factors.authority).toBe(0.5) // seedSource default authority_score
     expect(row.createdBy).toBe('agent:unknown')
   })
 
@@ -279,6 +288,42 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
         [randomUUID(), claimId, 'x'],
       ),
     ).rejects.toThrow()
+  })
+
+  it('命门 end-to-end: 1 source vs 3 independent sources vs a stale source → three distinct continuous confidences', async () => {
+    const s1 = await seedSource()
+    const single = await appendClaim(db, { claimText: 'fact' }, [
+      { sourceId: s1.sourceId, locator: 'l' },
+    ])
+
+    const a = await seedSource()
+    const b = await seedSource()
+    const c = await seedSource()
+    const triple = await appendClaim(db, { claimText: 'fact' }, [
+      { sourceId: a.sourceId, locator: 'l' },
+      { sourceId: b.sourceId, locator: 'l' },
+      { sourceId: c.sourceId, locator: 'l' },
+    ])
+
+    const sStale = await seedSource()
+    const twoYearsAgo = new Date(Date.now() - 730 * 86_400_000) // one half-life for structured_spec
+    const stale = await appendClaim(db, { claimText: 'fact', asOf: twoYearsAgo }, [
+      { sourceId: sStale.sourceId, locator: 'l' },
+    ])
+
+    const confOf = async (id: string) =>
+      (await db.select().from(claim).where(eq(claim.id, id)))[0]!.confidence
+    const cSingle = await confOf(single.claimId)
+    const cTriple = await confOf(triple.claimId)
+    const cStale = await confOf(stale.claimId)
+
+    expect(cTriple).toBeGreaterThan(cSingle) // more independent corroboration → higher
+    expect(cStale).toBeLessThan(cSingle) // staleness decays it
+    for (const v of [cSingle, cTriple, cStale]) {
+      expect(v).toBeGreaterThan(0)
+      expect(v).toBeLessThan(1)
+    }
+    expect(new Set([cSingle, cTriple, cStale]).size).toBe(3) // three distinct, non-bucketed values
   })
 
   it('all five enums match Appendix A.1 exactly', () => {
