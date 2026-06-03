@@ -72,9 +72,9 @@ describe('命门 — continuous 7-factor confidence (A.3)', () => {
     expect(raw).toBeGreaterThan(0.3)
   })
 
-  it('throws when Σw ≠ 1 or the authority (provenance) weight is 0 (protects D1 + normalization)', () => {
-    const badSum: FactorWeights = { ...DEFAULT_WEIGHTS, authority: 0.5 } // Σ = 1.2
-    expect(() => computeBase(f({ authority: 1 }), badSum)).toThrow(/Σw|sum/i)
+  it('enforces weight invariants — Σw ≤ 1, authority > 0 (D1), each ≥ 0 — but ALLOWS Σw < 1 (S7)', () => {
+    const overSum: FactorWeights = { ...DEFAULT_WEIGHTS, authority: 0.5 } // Σ = 1.2 > 1
+    expect(() => computeBase(f({ authority: 1 }), overSum)).toThrow(/Σw|≤ 1/i)
     const zeroAuthority: FactorWeights = {
       authority: 0,
       humanReview: 0.4,
@@ -83,6 +83,31 @@ describe('命门 — continuous 7-factor confidence (A.3)', () => {
       usageCorrect: 0.1,
     }
     expect(() => computeBase(f({ authority: 1 }), zeroAuthority)).toThrow(/authority|D1/i)
+    const negative: FactorWeights = {
+      authority: 0.3,
+      humanReview: -0.1,
+      entailment: 0.15,
+      indepSupport: 0.15,
+      usageCorrect: 0.1,
+    }
+    expect(() => computeBase(f({ authority: 1 }), negative)).toThrow(/≥ 0|must be/i)
+    // Σw < 1 is allowed: 主编 under-allocates ⇒ a more conservative ceiling, base still ∈[0,1].
+    const under: FactorWeights = {
+      authority: 0.3,
+      humanReview: 0.2,
+      entailment: 0.1,
+      indepSupport: 0.1,
+      usageCorrect: 0.1,
+    } // Σ = 0.8
+    const allOnes = f({
+      authority: 1,
+      humanReview: 1,
+      entailment: 1,
+      indepSupport: 1,
+      usageCorrect: 1,
+    })
+    expect(() => computeBase(allOnes, under)).not.toThrow()
+    expect(computeBase(allOnes, under)).toBeCloseTo(0.8, 10) // base = Σw·1 = 0.8 ≤ 1
   })
 
   it('g = identity ⇒ confidence === raw, and the snapshot records 7 factors + weights + calibration version', () => {

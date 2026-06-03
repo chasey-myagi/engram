@@ -195,13 +195,15 @@ async function seedActiveClaim(text: string, sourceId: string, raw = 0.9): Promi
     status: 'active',
     confidence: raw,
     confidenceRaw: raw,
+    // recall (S7) recomputes value from factors × active weights; set all 5 factors = raw so that
+    // base = Σwᵢ·raw = raw under DEFAULT_WEIGHTS (Σw=1) ⇒ recalled value == raw.
     confidenceFactors: {
       factors: {
-        authority: 0.5,
-        humanReview: 0,
-        entailment: 0.5,
-        indepSupport: 0,
-        usageCorrect: 0,
+        authority: raw,
+        humanReview: raw,
+        entailment: raw,
+        indepSupport: raw,
+        usageCorrect: raw,
         ageDays: 0,
         activeContradicts: 0,
         staleDecay: 1,

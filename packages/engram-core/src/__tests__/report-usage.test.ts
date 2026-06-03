@@ -55,13 +55,15 @@ beforeEach(async () => {
   )
 })
 
+// 召回(S7 起用 DEFAULT_WEIGHTS 重算)后 value 须 ≥0.4 才可召回：把 4 个非 usage 因子置 0.9、usageCorrect 留 0
+// (f4 中性，Harvester S19 才喂)。base = (0.3+0.3+0.15+0.15)·0.9 + 0.1·0 = 0.81 ⇒ 可召回，且 f4 仍为 0。
 function factorsBlob(): StoredConfidence {
   return {
     factors: {
-      authority: 0.5,
-      humanReview: 0,
-      entailment: 0.5,
-      indepSupport: 0,
+      authority: 0.9,
+      humanReview: 0.9,
+      entailment: 0.9,
+      indepSupport: 0.9,
       usageCorrect: 0, // f4 neutral — Harvester (S19) is the only producer
       ageDays: 0,
       activeContradicts: 0,

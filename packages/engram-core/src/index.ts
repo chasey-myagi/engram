@@ -44,3 +44,11 @@ export {
   type ReliabilityReport,
 } from './calibration/calibration.js'
 export { applyAdapter, DEFAULT_ADAPTER_EPSILON, type RecallAdapter } from './spi/adapter.js'
+export {
+  setStandards,
+  getActiveStandards,
+  DEFAULT_STANDARDS,
+  type Standards,
+  type StandardsRow,
+  type StandardsInput,
+} from './config/standards.js'

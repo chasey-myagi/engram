@@ -141,6 +141,25 @@ export const claimVerification = pgTable(
   (t) => [index('idx_claim_verification_claim').on(t.claimId)],
 )
 
+/**
+ * standards：配置态规范表（A.2/A.3，主编设）。append-only —— 每次 setStandards 落一行新版本，
+ * 「活动」= createdAt 最新一行。改后**新召回请求**用活动权重/门限即刻重算，历史快照（已返回的值拷贝）冻结。
+ * 写时护不变量：authority 权重 >0（护 D1）、Σw ≤1、各权重 ≥0；consume_floor ≥ 内核 0.4 且 ≤ must_verify ≤1。
+ */
+export const standards = pgTable(
+  'standards',
+  {
+    id: uuid('id').primaryKey(),
+    factorWeights: jsonb('factor_weights').notNull(), // FactorWeights
+    consumeFloor: doublePrecision('consume_floor').notNull(),
+    mustVerifyThreshold: doublePrecision('must_verify_threshold').notNull(),
+    createdBy: text('created_by').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // 活动版本按 created_at 倒序取第一行 —— 建索引。
+  (t) => [index('idx_standards_created').on(t.createdAt)],
+)
+
 /** page_claims：page = claim 的 M:N 组装（A.1 未声明 FK，照此实现）。 */
 export const pageClaims = pgTable(
   'page_claims',
