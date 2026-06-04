@@ -98,3 +98,13 @@ export {
   type ReplayVerdict,
   type ReplayReport,
 } from './spi/reflux.js'
+export {
+  promoteCandidate,
+  getGoldenQuestions,
+  getPromotionAudit,
+  type ImmunityResult,
+  type PromoteOptions,
+  type PromoteResult,
+  type GoldenQuestion,
+  type PromotionAuditRow,
+} from './spi/exam-immunity.js'

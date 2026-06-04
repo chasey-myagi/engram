@@ -57,8 +57,10 @@ export const verificationKind = pgEnum('verification_kind', [
 ])
 /** metrics_events 事件类别（A.9 评测埋点）。gap_recorded = 召回交白卷的诚实信号（S10）；后续评测埋点同表扩。 */
 export const metricsEventKind = pgEnum('metrics_event_kind', ['gap_recorded'])
-/** L5 缺口候选状态（S11 只产 queued；晋升到 promoted / 驳回 rejected 是 S12 的 QA 门，届时扩枚举）。 */
-export const l5CandidateStatus = pgEnum('l5_candidate_status', ['queued'])
+/** L5 缺口候选状态：queued（S11 入队）→ promoted（过 A1 免疫晋升 golden）/ rejected（毒株被免疫拒，终态）。 */
+export const l5CandidateStatus = pgEnum('l5_candidate_status', ['queued', 'promoted', 'rejected'])
+/** 晋升裁决（S12 A1 免疫流水线的可审计事件）。 */
+export const promotionDecision = pgEnum('promotion_decision', ['promoted', 'rejected'])
 
 /** source：不可变原文。content_hash 幂等去重；authority_score 连续、消费方可覆盖；meta 是领域身份注入口。 */
 export const source = pgTable('source', {
@@ -256,6 +258,48 @@ export const l5Candidates = pgTable(
   (t) => [index('idx_l5_candidates_status').on(t.status)],
 )
 
+/**
+ * golden_questions：过 A1 免疫晋升后的 golden 考题命名空间（S12，A.9）。append-only。
+ * **独立表、不在 claim 里** ⇒ recall（只读 claim）结构上永不召回它（防 KB 泄漏分数虚高，红线 A.9）。
+ * 只判分（经 S10 runL5Suite 复用打分，零评测专用路径）、永不召回。每条带：源候选、免疫造的毒株 claim、
+ * 晋升人（人的架构权威）、免疫判据快照（basis）。candidate_id UNIQUE ⇒ 一候选至多晋升一次。
+ */
+export const goldenQuestions = pgTable('golden_questions', {
+  id: uuid('id').primaryKey(),
+  candidateId: uuid('candidate_id')
+    .notNull()
+    .unique()
+    .references(() => l5Candidates.id),
+  query: text('query').notNull(),
+  // A1 免疫流水线经真 append 造的毒株 claim（draft、永不召回；patrol 巡查记录挂在它上）。
+  poisonClaimId: uuid('poison_claim_id')
+    .notNull()
+    .references(() => claim.id),
+  promotedBy: text('promoted_by').notNull(),
+  basis: jsonb('basis').notNull(), // 免疫判据快照（四检结果）
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+/**
+ * promotion_audit：A1 免疫晋升的可审计事件流（S12，A.9）。append-only。
+ * **每次晋升尝试**（通过/驳回）都落一行：谁（decided_by）、何时（created_at）、凭何（basis 免疫判据）。
+ * 「fail ⇒ logged and never promoted」就落在这里；通过的另进 golden_questions。
+ */
+export const promotionAudit = pgTable(
+  'promotion_audit',
+  {
+    id: uuid('id').primaryKey(),
+    candidateId: uuid('candidate_id')
+      .notNull()
+      .references(() => l5Candidates.id),
+    decision: promotionDecision('decision').notNull(),
+    decidedBy: text('decided_by').notNull(),
+    basis: jsonb('basis').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('idx_promotion_audit_candidate').on(t.candidateId)],
+)
+
 /** page_claims：page = claim 的 M:N 组装（A.1 未声明 FK，照此实现）。 */
 export const pageClaims = pgTable(
   'page_claims',
@@ -274,3 +318,4 @@ export type ProvRelevance = (typeof provRelevance.enumValues)[number]
 export type VerificationKind = (typeof verificationKind.enumValues)[number]
 export type MetricsEventKind = (typeof metricsEventKind.enumValues)[number]
 export type L5CandidateStatus = (typeof l5CandidateStatus.enumValues)[number]
+export type PromotionDecision = (typeof promotionDecision.enumValues)[number]

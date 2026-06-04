@@ -36,6 +36,13 @@
       "when": 1780546035442,
       "tag": "0004_known_lilith",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1780548193575,
+      "tag": "0005_sticky_blue_shield",
+      "breakpoints": true
     }
   ]
 }
