@@ -202,6 +202,7 @@ export {
   getEditorConflictQueue,
   getResolvedConflicts,
   getClaimStatus,
+  adjudicatedPairKeys,
   CONFLICT_ADJUDICATED,
   type ConflictAdjudicatedPayload,
   type ConflictAdjudication,

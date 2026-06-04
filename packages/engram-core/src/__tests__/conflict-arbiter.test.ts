@@ -192,6 +192,62 @@ describe('S20 conflict-arbiter SPI (A.5): deterministic adjudication, no status 
     expect(s.supersedes.size).toBe(0)
   })
 
+  it('loadConflictSide ignores tangential/irrelevant provenance when scoring authority/indepSupport (anti-Goodhart: an off-relevance source cannot inflate the ladder ④/⑤)', async () => {
+    // one LOW-authority EXACT source (counts) + a HIGH-authority TANGENTIAL and a HIGH-authority IRRELEVANT (must NOT count)
+    const id = randomUUID()
+    await db.insert(claim).values({
+      id,
+      claimText: 'sku-rel relevance filter',
+      subject: 'sku-rel',
+      predicate: 'p',
+      object: 'o',
+      status: 'active',
+      confidence: 0.5,
+      confidenceRaw: 0.5,
+      confidenceFactors: {
+        factors: { ...HIGH, ageDays: 0, activeContradicts: 0, staleDecay: 1, conflictDecay: 1 },
+        weights: DEFAULT_WEIGHTS,
+        calibrationVersion: CALIBRATION_IDENTITY,
+      },
+      lineageId: randomUUID(),
+      asOf: new Date(),
+      createdBy: 'test:author',
+      embedding: null,
+      embeddingVersion: null,
+    })
+    const exact = await aSource({ authority: 0.2 })
+    const tangential = await aSource({ authority: 0.99 })
+    const irrelevant = await aSource({ authority: 0.95 })
+    await db.insert(claimProvenance).values([
+      {
+        id: randomUUID(),
+        claimId: id,
+        sourceId: exact.sourceId,
+        locator: 'L1',
+        relevance: 'exact',
+      },
+      {
+        id: randomUUID(),
+        claimId: id,
+        sourceId: tangential.sourceId,
+        locator: 'L2',
+        relevance: 'tangential',
+      },
+      {
+        id: randomUUID(),
+        claimId: id,
+        sourceId: irrelevant.sourceId,
+        locator: 'L3',
+        relevance: 'irrelevant',
+      },
+    ])
+    const s = await loadConflictSide(db, id)
+    // ④ authority = the EXACT source's 0.2, NOT the tangential 0.99 / irrelevant 0.95 (off-relevance excluded)
+    expect(s.authority).toBe(0.2)
+    // ⑤ indepSupport counts only the one exact (supporting) source — off-relevance sources don't pad it
+    expect(s.indepSupport).toBe(1)
+  })
+
   it('loadConflictSide reflects a supersedes edge: the new head supersedes the old version', async () => {
     const src = await aSource()
     const oldId = await activeClaim({

@@ -264,6 +264,25 @@ export async function getResolvedConflicts(db: DB): Promise<ConflictAdjudication
   return rows.map(toAdjudication).filter((a) => a.payload.outcome === 'resolved')
 }
 
+/**
+ * 已落 conflict_adjudicated 标记的（无序）对 key 集合。Arbiter cron/重触发据此**跳过已裁对**——不重判、不再写
+ * 重复事件（呼应 contradicts 边的幂等：同一对至多一次裁决落库，兑现「裁决可反复跑而不堆叠」）。key = min(a,b)|max(a,b)。
+ * 注：当前全表扫 conflict_adjudicated 分区（与 getResolvedConflicts 同口径）；有真消费方后再加分页/索引。
+ */
+export async function adjudicatedPairKeys(db: DB): Promise<Set<string>> {
+  const rows = await db
+    .select({ payload: metricsEvents.payload })
+    .from(metricsEvents)
+    .where(eq(metricsEvents.kind, CONFLICT_ADJUDICATED))
+  const keys = new Set<string>()
+  for (const r of rows) {
+    if (!isAdjudicatedPayload(r.payload)) continue
+    const { claimA: a, claimB: b } = r.payload
+    keys.add(a < b ? `${a}|${b}` : `${b}|${a}`)
+  }
+  return keys
+}
+
 /** （工具）读一条 claim 的当前状态——Arbiter worker/测试断言「裁决未动 status」用。 */
 export async function getClaimStatus(db: DB, claimId: string): Promise<ClaimStatus | null> {
   const [row] = await db

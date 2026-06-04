@@ -388,4 +388,43 @@ describe('S20 Arbiter worker (bounded loop on harness-pi) — A.5 deterministic 
     expect(res.resolved).toBe(1)
     expect(res.outcomes.find((o) => o.outcome === 'resolved')!.winnerId).toBe(a)
   })
+
+  it('idempotent cron: a resolved conflict is NOT re-adjudicated next run — no duplicate believed marker, loop not even entered', async () => {
+    const { a, b } = await seedPair({
+      query: 'idem res A',
+      aAsOf: new Date('2025-06-01T00:00:00.000Z'), // a strictly newer ⇒ unique winner (③ recency)
+      bAsOf: new Date('2025-01-01T00:00:00.000Z'),
+      aAuthority: 0.5,
+      bAuthority: 0.5,
+    })
+    const r1 = await runArbiter(
+      { db, runtime: runtimeOf([adjudicateTurn(a, b), finishTurn(), stopTurn]) },
+      {},
+    )
+    expect(r1.resolved).toBe(1)
+    expect(await getResolvedConflicts(db)).toHaveLength(1) // one believed marker written
+    // 2nd cron run: pair already adjudicated → selectPairs skips it → loop NOT entered (throwingRuntime proves it)
+    const r2 = await runArbiter({ db, runtime: throwingRuntime }, {})
+    expect(r2.resolved).toBe(0)
+    expect(await getResolvedConflicts(db)).toHaveLength(1) // STILL 1 — re-run does not stack a duplicate marker
+  })
+
+  it('idempotent cron: an escalated conflict is NOT re-escalated next run — the editor queue does not stack duplicates', async () => {
+    const { a, b } = await seedPair({
+      query: 'idem esc A',
+      aAsOf: new Date('2025-01-01T00:00:00.000Z'), // equal recency + authority + indep, no supersede ⇒ tie ⇒ escalate
+      bAsOf: new Date('2025-01-01T00:00:00.000Z'),
+      aAuthority: 0.5,
+      bAuthority: 0.5,
+    })
+    const r1 = await runArbiter(
+      { db, runtime: runtimeOf([adjudicateTurn(a, b), finishTurn(), stopTurn]) },
+      {},
+    )
+    expect(r1.escalated).toBe(1)
+    expect(await getEditorConflictQueue(db)).toHaveLength(1)
+    const r2 = await runArbiter({ db, runtime: throwingRuntime }, {})
+    expect(r2.escalated).toBe(0)
+    expect(await getEditorConflictQueue(db)).toHaveLength(1) // STILL 1 — no duplicate editor-queue entry
+  })
 })

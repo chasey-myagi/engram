@@ -21,6 +21,7 @@ import {
   loadConflictSide,
   resolveConflict,
   schema,
+  adjudicatedPairKeys,
   type ConflictSide,
   type DB,
 } from '@engram/core'
@@ -121,9 +122,13 @@ async function selectPairs(
     .from(schema.claim)
     .where(inArray(schema.claim.id, ids))
   const statusById = new Map(rows.map((r) => [r.id, r.status]))
-  return deduped.filter(
+  const active = deduped.filter(
     ([a, b]) => statusById.get(a) === 'active' && statusById.get(b) === 'active',
   )
+  // 幂等：跳过已落 conflict_adjudicated 标记的对——cron/重触发反复跑不再重判、不堆叠重复事件
+  // （呼应 contradicts 边的幂等；机判 resolved 是终态、escalated 待人，均不应每日 cron 再写一条）。
+  const adjudicated = await adjudicatedPairKeys(db)
+  return active.filter(([a, b]) => !adjudicated.has(pairKey(a, b)))
 }
 
 /**
