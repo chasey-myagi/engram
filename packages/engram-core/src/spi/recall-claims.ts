@@ -1,7 +1,7 @@
 /**
  * 召回路径（Consumer SPI 的读半边，附录 A.2）—— 最高测试缝。评测=消费，同走这条缝。
  *
- * recallClaims(db, query, ctx) 返回 RecallResult[]，每行带：
+ * recallClaims(db, embedder, query, ctx) 返回 RecallResult[]，每行带：
  *   - claim 本体
  *   - 召回瞬间拍下的 ConfidenceSnapshot（value=g(raw) / raw / 因子 / 权重 / 校准版本 / takenAt）
  *   - provenances[]（每个结果至少 1 条出处；无出处的 claim 绝不出现）

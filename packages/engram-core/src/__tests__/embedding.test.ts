@@ -9,7 +9,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { CALIBRATION_IDENTITY, DEFAULT_WEIGHTS } from '../confidence/confidence.js'
 import { createDb, type DB } from '../db/client.js'
-import { EMBEDDING_DIM } from '../embedding/embedder.js'
+import { EMBEDDING_DIM, type Embedder } from '../embedding/embedder.js'
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { getReembedMarkers, markStaleForReembed, reembedMarked } from '../embedding/reembed.js'
 import { addSource, appendClaim } from '../spi/append-claim.js'
@@ -207,6 +207,104 @@ describe('S9 embedding substrate (A.6)', () => {
     const included = await recallClaims(db, qe, 'q', { minSimilarity: 0.5 })
     expect(included.map((r) => r.claim.claimText)).toEqual(['cosine 0.6 claim']) // 0.6 ≥ 0.5 → in
     expect(await recallClaims(db, qe, 'q', { minSimilarity: 0.7 })).toEqual([]) // 0.6 < 0.7 → out
+  })
+
+  it('recall consults the EMBEDDER-declared minSimilarity (middle tier) when ctx gives none', async () => {
+    // embedder declares 0.5 (like DashScope); a cosine-0.3 claim is above DEFAULT(0.1) but below 0.5
+    const e = { ...makeFakeEmbedder({ vectorOf: () => unit(0) }), minSimilarity: 0.5 }
+    await seedActiveWithVector('cosine 0.3 claim', vec(0.3))
+    await seedActiveWithVector('cosine 0.8 claim', vec(0.8))
+    const hits = await recallClaims(db, e, 'q') // no ctx override → embedder floor 0.5 applies
+    expect(hits.map((r) => r.claim.claimText)).toEqual(['cosine 0.8 claim']) // 0.3 gated out by embedder floor
+  })
+
+  it('an active claim with a NULL embedding is excluded from recall (legacy coexistence; no error)', async () => {
+    const id = randomUUID()
+    await db.insert(claim).values({
+      id,
+      claimText: 'legacy unembedded active claim',
+      status: 'active',
+      confidence: 0.8,
+      confidenceRaw: 0.8,
+      confidenceFactors: {
+        factors: {
+          authority: 0.8,
+          humanReview: 0.8,
+          entailment: 0.8,
+          indepSupport: 0.8,
+          usageCorrect: 0.8,
+          ageDays: 0,
+          activeContradicts: 0,
+          staleDecay: 1,
+          conflictDecay: 1,
+        },
+        weights: DEFAULT_WEIGHTS,
+        calibrationVersion: CALIBRATION_IDENTITY,
+      },
+      lineageId: randomUUID(),
+      asOf: new Date(),
+      createdBy: 'test',
+      embedding: null, // legacy / unembedded
+      embeddingVersion: null,
+    })
+    const { sourceId } = await aSource()
+    await db
+      .insert(claimProvenance)
+      .values({ id: randomUUID(), claimId: id, sourceId, locator: 'p1', relevance: 'exact' })
+    // high confidence + active, but no vector → must not surface and must not throw
+    expect(await recallClaims(db, embedder, 'legacy unembedded active claim')).toEqual([])
+  })
+
+  it('markStaleForReembed also catches NULL-version (pre-S9 / legacy) claims', async () => {
+    const id = randomUUID()
+    await db.insert(claim).values({
+      id,
+      claimText: 'legacy null-version claim',
+      status: 'active',
+      confidence: 0.8,
+      confidenceRaw: 0.8,
+      confidenceFactors: {
+        factors: {
+          authority: 0.8,
+          humanReview: 0.8,
+          entailment: 0.8,
+          indepSupport: 0.8,
+          usageCorrect: 0.8,
+          ageDays: 0,
+          activeContradicts: 0,
+          staleDecay: 1,
+          conflictDecay: 1,
+        },
+        weights: DEFAULT_WEIGHTS,
+        calibrationVersion: CALIBRATION_IDENTITY,
+      },
+      lineageId: randomUUID(),
+      asOf: new Date(),
+      createdBy: 'test',
+      embedding: await embedder.embed('legacy null-version claim'),
+      embeddingVersion: null, // no version anchor (legacy)
+    })
+    expect(await markStaleForReembed(db, embedder.version)).toBe(1) // null version is stale
+    expect((await getReembedMarkers(db)).map((m) => m.claimId)).toEqual([id])
+    expect(await reembedMarked(db, embedder)).toBe(1)
+    const [row] = await db.select({ v: claim.embeddingVersion }).from(claim).where(eq(claim.id, id))
+    expect(row!.v).toBe(embedder.version) // legacy row now stamped current
+  })
+
+  it('threads kind through the SPI: append embeds claim_text as document, recall embeds the query as query', async () => {
+    const calls: (string | undefined)[] = []
+    const recording: Embedder = {
+      version: 'fake:recording',
+      dim: EMBEDDING_DIM,
+      embed: (_text: string, kind?: 'query' | 'document') => {
+        calls.push(kind)
+        return Promise.resolve(unit(0))
+      },
+    }
+    const { sourceId } = await aSource()
+    await appendClaim(db, recording, { claimText: 'kind probe' }, [{ sourceId, locator: 'l' }])
+    await recallClaims(db, recording, 'kind probe')
+    expect(calls).toEqual(['document', 'query']) // append → document, recall query → query
   })
 })
 

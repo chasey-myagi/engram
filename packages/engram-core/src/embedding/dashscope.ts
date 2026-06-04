@@ -20,7 +20,9 @@ export function makeDashScopeEmbedder(opts: { apiKey?: string; model?: string } 
   return {
     version: `dashscope:${model}`,
     dim: EMBEDDING_DIM,
-    minSimilarity: 0.5, // 真模型语义空间的召回下界（远高于 fake 的 0.1）；趋近 A.6 的 0.65/0.75
+    // 真模型语义空间的**召回候选**下界（远高于 fake 的 0.1）。注意 A.6 的 0.75/0.65 是 **lineage 同事实判定**
+    // (S14) 的阈值、不是 recall 候选门；召回这里取 0.5 起步，consumer 可经 ctx.minSimilarity 再调。
+    minSimilarity: 0.5,
     async embed(text: string, kind: EmbedKind = 'document'): Promise<number[]> {
       const res = await fetch(DASHSCOPE_URL, {
         method: 'POST',

@@ -57,6 +57,7 @@ export {
   DEFAULT_RECALL_TOPK,
   DEFAULT_RECALL_MIN_SIMILARITY,
   type Embedder,
+  type EmbedKind,
 } from './embedding/embedder.js'
 export { makeFakeEmbedder, type FakeEmbedderOptions } from './embedding/fake-embedder.js'
 export { makeDashScopeEmbedder } from './embedding/dashscope.js'
