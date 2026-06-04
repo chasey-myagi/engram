@@ -279,11 +279,14 @@ export async function commitClaim(
         have.add(p.sourceId)
       }
       // 按全量出处重算 confidence（只数 supports 源；f3 随独立印证数升；保持原 claim 的 asOf，不刷新年龄）。
+      // target 已是既存 claim → 传 claimId，让 f2 entailment 反映它最新的 patrol 裁决（S17）。
       const all = await tx
         .select({ sourceId: claimProvenance.sourceId, relevance: claimProvenance.relevance })
         .from(claimProvenance)
         .where(eq(claimProvenance.claimId, target.id))
-      const conf = await computeConfidenceFromProvenances(tx, all, locked.asOf)
+      const conf = await computeConfidenceFromProvenances(tx, all, locked.asOf, {
+        claimId: target.id,
+      })
       await tx
         .update(claim)
         .set({
