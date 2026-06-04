@@ -20,9 +20,13 @@ import { getFailurePool } from './report-usage.js'
 import { recallClaims } from './recall-claims.js'
 import { randomUUID } from 'node:crypto'
 
-/** 「人确认」判据：by_role 以 'human' 起头才算人（agent 自报的 kbLacksAnswer 不入 L5 队列）。 */
+/**
+ * 「人确认」判据：by_role 是裸 'human' 或 'human:' 前缀才算人（agent 自报的 kbLacksAnswer 不入 L5 队列）。
+ * 仓内角色都冒号分隔（agent:x / consumer:unknown / human:judge），刻意不写成宽松的 startsWith('human')，
+ * 免得把 'humanoid-agent' 之类误判成人。
+ */
 export function isHumanRole(byRole: string): boolean {
-  return byRole.startsWith('human')
+  return byRole === 'human' || byRole.startsWith('human:')
 }
 
 /** regression_pool 一行的读出形状。 */
@@ -50,47 +54,53 @@ export interface L5Candidate {
 }
 
 /**
- * 反流：失败事件 → 回归池（+ 人确认缺口 → L5 候选队列）。幂等（source_event_id UNIQUE + ON CONFLICT DO NOTHING）。
- * 返回**本次新增**的入池数与入队数（已存在的不计）。
+ * 反流：失败事件 → 回归池（+ 人确认缺口 → L5 候选队列）。幂等锚是 **source_event_id UNIQUE**（每条 usage_truth
+ * 失败事件至多入池一行）—— **不是**按 (claim, query) 去重：同一 claim、同一 query 的两条独立 refuted 事件是两次
+ * 真实生产失败观测，各入一行（回归集要反映真实生产分布，频次本身是信号，对齐 S10 gap 的 append-only 取向）。
+ * 「不重复」(AC5) 指的是同一事件反复跑反流不重复入池，不是把同 claim+query 的多次失败折叠成一条。
+ * 全部插入包在一个事务里 ⇒ 要么整批落、要么不落，返回的 {pooled,l5Queued} 计数即本次真实新增（权威）。
+ * adopted/partial 天然不入（getFailurePool 已只取失败两态）。
  */
 export async function refluxFailures(db: DB): Promise<{ pooled: number; l5Queued: number }> {
   const failures = await getFailurePool(db) // 已只含 refuted/corrected，按时间升序
-  let pooled = 0
-  let l5Queued = 0
-  for (const f of failures) {
-    const insPool = await db
-      .insert(regressionPool)
-      .values({
-        id: randomUUID(),
-        sourceEventId: f.id,
-        claimId: f.claimId,
-        query: f.query,
-        outcome: f.outcome,
-        taskId: f.taskId,
-        predictedConfidence: f.predictedConfidence,
-        calibrationVersion: f.calibrationVersion,
-      })
-      .onConflictDoNothing({ target: regressionPool.sourceEventId })
-      .returning({ id: regressionPool.id })
-    if (insPool.length > 0) pooled++
-
-    // 人确认「KB 真没答案」且有 query → 入 L5 缺口候选队列（等 S12 QA 晋升）。
-    if (f.kbLacksAnswer && isHumanRole(f.byRole) && f.query != null) {
-      const insCand = await db
-        .insert(l5Candidates)
+  return db.transaction(async (tx) => {
+    let pooled = 0
+    let l5Queued = 0
+    for (const f of failures) {
+      const insPool = await tx
+        .insert(regressionPool)
         .values({
           id: randomUUID(),
           sourceEventId: f.id,
-          query: f.query,
           claimId: f.claimId,
-          confirmedBy: f.byRole,
+          query: f.query,
+          outcome: f.outcome,
+          taskId: f.taskId,
+          predictedConfidence: f.predictedConfidence,
+          calibrationVersion: f.calibrationVersion,
         })
-        .onConflictDoNothing({ target: l5Candidates.sourceEventId })
-        .returning({ id: l5Candidates.id })
-      if (insCand.length > 0) l5Queued++
+        .onConflictDoNothing({ target: regressionPool.sourceEventId })
+        .returning({ id: regressionPool.id })
+      if (insPool.length > 0) pooled++
+
+      // 人确认「KB 真没答案」且有 query → 入 L5 缺口候选队列（等 S12 QA 晋升）。
+      if (f.kbLacksAnswer && isHumanRole(f.byRole) && f.query != null) {
+        const insCand = await tx
+          .insert(l5Candidates)
+          .values({
+            id: randomUUID(),
+            sourceEventId: f.id,
+            query: f.query,
+            claimId: f.claimId,
+            confirmedBy: f.byRole,
+          })
+          .onConflictDoNothing({ target: l5Candidates.sourceEventId })
+          .returning({ id: l5Candidates.id })
+        if (insCand.length > 0) l5Queued++
+      }
     }
-  }
-  return { pooled, l5Queued }
+    return { pooled, l5Queued }
+  })
 }
 
 /** 读回归池（按时间升序，反映真实生产失败分布）。 */
@@ -145,7 +155,12 @@ export interface ReplayVerdict {
 
 /**
  * 重放一条回归项：用其原始 query 走真 recall_claims，看失败 claim 是否仍出现在结果里。
- * 注意 recall_claims 在零召回时会落 gap 信号（S10）—— 这是「评测=消费走同一条缝」的应有副作用，刻意不旁路。
+ *
+ * pass 判据**刻意很窄**：pass = 那条**具体的失败 claim** 不再被召回（被取代 / 隔离 / 跌破门）。它只回答
+ * 「这个失败还复不复现」，**不**断言「KB 现在能给对答案」—— 故隔离/删掉坏 claim 也会判 pass（这点可被 Goodhart：
+ * 删库即过回归）。这是有意的边界，不是 bug：别把它误改成「必须召回到正确答案」。「KB 该会而不会」是正交问题，
+ * 由 L5 缺口候选（人确认入队、S12 晋升）和 recall 的 gap 信号分别承载，不混进这条窄回归判据。
+ * 又：recall_claims 在零召回时会落 gap 信号（S10）—— 这是「评测=消费走同一条缝」的应有副作用，刻意不旁路。
  */
 export async function replayRegressionItem(
   db: DB,

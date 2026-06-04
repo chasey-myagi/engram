@@ -13,6 +13,7 @@ import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { claim, claimProvenance } from '../db/schema.js'
 import { addSource } from '../spi/append-claim.js'
 import { reportUsage } from '../spi/report-usage.js'
+import { recallClaims } from '../spi/recall-claims.js'
 import {
   getL5Candidates,
   getRegressionPool,
@@ -132,6 +133,11 @@ describe('S11 production-failure reflux → live regression set (A.2/A.9)', () =
     expect(aItem.outcome).toBe('refuted')
     expect(aItem.query).toBe('query about a')
     expect(aItem.taskId).toBe('task-a')
+    // both failure outcomes carry their key fields symmetrically
+    const bItem = items.find((i) => i.claimId === b)!
+    expect(bItem.outcome).toBe('corrected')
+    expect(bItem.query).toBe('query about b')
+    expect(bItem.taskId).toBe('task-b')
   })
 
   it('a pooled failure carries its query + recall-time confSnapshot and replays through recall_claims to a pass/fail verdict', async () => {
@@ -267,11 +273,79 @@ describe('S11 production-failure reflux → live regression set (A.2/A.9)', () =
     expect(report.unreplayable).toBe(1) // #3 has no query
   })
 
+  it('empty inputs degrade cleanly: reflux over no failures returns zeros; replay over an empty pool returns an all-zero report', async () => {
+    expect(await refluxFailures(db)).toEqual({ pooled: 0, l5Queued: 0 })
+    expect(await replayRegressionPool(db, embedder)).toEqual({
+      total: 0,
+      passed: 0,
+      failed: 0,
+      unreplayable: 0,
+      results: [],
+    })
+  })
+
+  it('a failure reported without a confSnapshot pools with null predictedConfidence/calibrationVersion (legacy/optional path)', async () => {
+    const c = await seedActiveAnswering('snapshotless failure', 'snapshotless query')
+    await reportUsage(db, c, 'refuted', { byRole: 'agent:x', query: 'snapshotless query' }) // no confidenceAtRecall / calibrationVersion
+
+    await refluxFailures(db)
+    const [item] = await getRegressionPool(db)
+    expect(item!.predictedConfidence).toBeNull()
+    expect(item!.calibrationVersion).toBeNull()
+    expect(item!.query).toBe('snapshotless query') // still replayable
+  })
+
+  it('keyed by claim+query/task is NOT a dedup key: two independent failures of the same claim+query pool as two rows (production distribution, frequency = signal)', async () => {
+    const q = 'recurring failure query'
+    const c = await seedActiveAnswering('recurring failing claim', q)
+    await reportUsage(db, c, 'refuted', { byRole: 'agent:x', query: q }) // first production failure
+    await reportUsage(db, c, 'refuted', { byRole: 'agent:x', query: q }) // a second, independent failure
+
+    const { pooled } = await refluxFailures(db)
+    expect(pooled).toBe(2) // two distinct usage_truth events ⇒ two pool rows (dedup is per source_event_id only)
+    const items = await getRegressionPool(db)
+    expect(items).toHaveLength(2)
+    expect(items.every((i) => i.claimId === c && i.query === q)).toBe(true)
+    expect(new Set(items.map((i) => i.sourceEventId)).size).toBe(2) // each anchored to its own event
+  })
+
+  it('replay pass is a NARROW criterion: quarantining the failing claim yields pass even though the KB still lacks the right answer (deliberate, not a bug)', async () => {
+    const q = 'narrow-pass-semantics query'
+    const c = await seedActiveAnswering('the wrong claim that gets quarantined', q)
+    await reportUsage(db, c, 'refuted', { byRole: 'agent:x', query: q })
+    await refluxFailures(db)
+    const [item] = await getRegressionPool(db)
+
+    // Quarantine the bad claim. The KB now has NO answer for q (recall returns [] → an L5-style gap),
+    // yet the regression replay reports pass: its only question is "does the SPECIFIC bad claim still
+    // surface?" — and it no longer does. The orthogonal "KB still lacks the right answer" is tracked
+    // elsewhere (L5 candidate queue + recall's gap signal), deliberately NOT folded into this verdict.
+    await db.update(claim).set({ status: 'quarantined' }).where(eq(claim.id, c))
+    const verdict = await replayRegressionItem(db, embedder, item!)
+    expect(verdict.stillRecalled).toBe(false)
+    expect(verdict.pass).toBe(true) // narrow pass: the failing claim is gone, regardless of whether a correct answer exists
+    const stillEmpty = await recallClaims(db, embedder, q)
+    expect(stillEmpty).toHaveLength(0) // …and indeed the KB now answers nothing for q
+  })
+
+  it('a corrected failure whose claim is still recalled replays to fail (symmetry with refuted)', async () => {
+    const q = 'corrected-still-live query'
+    const c = await seedActiveAnswering('a corrected-but-still-served claim', q)
+    await reportUsage(db, c, 'corrected', { byRole: 'agent:x', query: q })
+    await refluxFailures(db)
+    const [item] = await getRegressionPool(db)
+    expect(item!.outcome).toBe('corrected')
+    const verdict = await replayRegressionItem(db, embedder, item!)
+    expect(verdict.stillRecalled).toBe(true)
+    expect(verdict.pass).toBe(false) // the claim is still live ⇒ the failure still reproduces
+  })
+
   it('isHumanRole: only a human-prefixed role counts as a confirmation', () => {
     expect(isHumanRole('human:judge')).toBe(true)
     expect(isHumanRole('human')).toBe(true)
     expect(isHumanRole('agent:x')).toBe(false)
     expect(isHumanRole('consumer:unknown')).toBe(false)
     expect(isHumanRole('verifier')).toBe(false)
+    expect(isHumanRole('humanoid-agent')).toBe(false) // tightened: not every 'human…' prefix is a human
   })
 })
