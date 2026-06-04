@@ -78,6 +78,13 @@
       "when": 1780591606279,
       "tag": "0010_nervous_tyger_tiger",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1780596864622,
+      "tag": "0011_stiff_praxagora",
+      "breakpoints": true
     }
   ]
 }

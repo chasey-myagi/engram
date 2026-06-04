@@ -195,6 +195,34 @@ export const standards = pgTable(
 )
 
 /**
+ * governance_state：恒温器派生策略的版本化持久化（S26，A.7/A.8）。**沿 standards 的 append-only/版本化式样**：
+ * 每跑一轮 GovernanceController 落一行新版本，「活动策略」= createdAt 最新一行（无则四旋钮归零的基线）。
+ * policy = 四旋钮（promotionGateLevel / patrolFrequency / ingestionThrottle / arbiterPriority，皆 [0,1]）；
+ * metrics = 触发本步的五指标快照（审计/可解释）；source 标明读到的指标是否降级（silent degrade 时记真）。
+ * **可逆**：回滚 = 追一行旧 policy（append-only，不物理改写历史）。**审计**：每步都留痕（含 reason）。
+ * 不新增 claim_status / metrics_event_kind（A.1 冻结）——这是独立的**新表**，不碰任何冻结枚举/红边。
+ */
+export const governanceState = pgTable(
+  'governance_state',
+  {
+    id: uuid('id').primaryKey(),
+    promotionGateLevel: doublePrecision('promotion_gate_level').notNull(),
+    patrolFrequency: doublePrecision('patrol_frequency').notNull(),
+    ingestionThrottle: doublePrecision('ingestion_throttle').notNull(),
+    arbiterPriority: doublePrecision('arbiter_priority').notNull(),
+    // 触发本步的五指标快照（GovernanceMetrics）+ 各旋钮 target（live derived 平衡点）。离线审计/可解释，不进任何计分。
+    metrics: jsonb('metrics').notNull(),
+    // 本步来由（'cycle' 周期步 / 'rollback' 回滚 / 'manual'…）+ 人类可读说明，审计用。
+    reason: text('reason').notNull(),
+    // 写入者（'controller' / 'human:editor' 回滚时）。
+    createdBy: text('created_by').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // 活动版本按 created_at 倒序取第一行 —— 建索引。
+  (t) => [index('idx_governance_state_created').on(t.createdAt)],
+)
+
+/**
  * metrics_events：append-only 评测事件流（A.9）。沿 usage_truth 的「只记事件 + 离线聚合」式样。
  * S10 首个用途 gap_recorded：当一次非空 recall 没有任何 claim 越过消费门（库确实没答案），
  * recall 落一条引用该 query 的 gap 事件 —— 盲点的诚实信号，绝不拿杜撰/门下 claim 顶替。

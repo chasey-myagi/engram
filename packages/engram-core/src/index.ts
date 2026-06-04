@@ -269,3 +269,7 @@ export {
   type RulingRefusedPayload,
   type RefusedRuling,
 } from './spi/nc-exact-gate.js'
+// S26 · GovernanceController 恒温器（A.7/A.8）：确定性闭环控制律（proportional + deadband + bounded damped step，
+// 收敛不振荡）→ 五指标映射 D2 收紧 + falseQuarantineRate 反向放宽巡查（counter-force）；版本化持久化 + fail-silent
+// 编排 + L2 仿真谐波。全经 governance barrel 导出。
+export * from './governance/index.js'
