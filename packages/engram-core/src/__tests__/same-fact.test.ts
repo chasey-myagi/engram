@@ -13,8 +13,9 @@ import {
   type StoredConfidence,
 } from '../confidence/confidence.js'
 import { createDb, type DB } from '../db/client.js'
+import { EMBEDDING_DIM } from '../embedding/embedder.js'
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
-import { claim, relation } from '../db/schema.js'
+import { claim, relation, type ClaimStatus } from '../db/schema.js'
 import { addSource } from '../spi/append-claim.js'
 import { commitClaim } from '../spi/commit-claim.js'
 import { recallClaims } from '../spi/recall-claims.js'
@@ -56,6 +57,10 @@ describe('S14 same-fact pure functions (A.6)', () => {
     expect(objectEquivalent('1m', '1kg')).toBe(false) // cross-dimension
     expect(objectEquivalent('red', 'blue')).toBe(false)
     expect(objectEquivalent('1m', '2m')).toBe(false)
+    expect(objectEquivalent('-1m', '-100cm')).toBe(true) // negative quantities normalize
+    expect(objectEquivalent('5lb', '5lb')).toBe(true) // unknown unit ⇒ exact-string fallback
+    expect(objectEquivalent('5lb', '5kg')).toBe(false) // unknown unit ⇒ no false numeric merge
+    expect(objectEquivalent('1m', '1')).toBe(false) // unit vs bare number ⇒ not equivalent
   })
 
   it('deterministicVerdict: same / contradicts / refines / null', () => {
@@ -215,17 +220,38 @@ async function indepSupportOf(claimId: string): Promise<number> {
   return (row!.f as StoredConfidence).factors.indepSupport
 }
 
-/** Directly seed an active claim with S/P/O + an embedding (no contradicts/refines edges) — for racing-candidate setups. */
-async function seedActiveClaim(s: string, p: string, o: string): Promise<string> {
+function unit(i: number): number[] {
+  const v = new Array(EMBEDDING_DIM).fill(0)
+  v[i] = 1
+  return v
+}
+/** A vector whose cosine similarity with unit(0) is exactly `cos`. */
+function vec(cos: number): number[] {
+  const v = new Array(EMBEDDING_DIM).fill(0)
+  v[0] = cos
+  v[1] = Math.sqrt(1 - cos * cos)
+  return v
+}
+
+/** Directly seed a claim row with chosen S/P/O, status, and embedding (null allowed) — for candidate-recall setups. */
+async function seedClaimRow(opts: {
+  subject?: string
+  predicate?: string
+  object?: string
+  claimText?: string
+  status?: ClaimStatus
+  embedding?: number[] | null
+}): Promise<string> {
   const id = randomUUID()
-  const text = `${s} ${p} ${o}`
+  const text =
+    opts.claimText ?? `${opts.subject ?? ''} ${opts.predicate ?? ''} ${opts.object ?? ''}`.trim()
   await db.insert(claim).values({
     id,
-    claimText: text,
-    subject: s,
-    predicate: p,
-    object: o,
-    status: 'active',
+    claimText: text || 'seeded',
+    subject: opts.subject,
+    predicate: opts.predicate,
+    object: opts.object,
+    status: opts.status ?? 'active',
     confidence: 0.8,
     confidenceRaw: 0.8,
     confidenceFactors: {
@@ -246,10 +272,15 @@ async function seedActiveClaim(s: string, p: string, o: string): Promise<string>
     lineageId: randomUUID(),
     asOf: new Date(),
     createdBy: 'test',
-    embedding: await embedder.embed(text),
-    embeddingVersion: embedder.version,
+    embedding: opts.embedding === undefined ? await embedder.embed(text) : opts.embedding,
+    embeddingVersion: opts.embedding === null ? null : embedder.version,
   })
   return id
+}
+
+/** Active claim with S/P/O + embedding (no edges) — convenience over seedClaimRow. */
+async function seedActiveClaim(s: string, p: string, o: string): Promise<string> {
+  return seedClaimRow({ subject: s, predicate: p, object: o, status: 'active' })
 }
 
 const SKU = { subject: 'sku-7', predicate: 'maxThroughput', object: '500mbps' }
@@ -517,6 +548,85 @@ describe('S14 commitClaim — same-fact dedup + un-inflatable f3 (A.6)', () => {
       ),
     ).rejects.toThrow()
     expect((await db.select().from(claim)).length).toBe(before) // single transaction rolled back — no orphan claim
+  })
+
+  it('stage-1 floor: a near-neighbor below the 0.75 candidate similarity is NOT a candidate (no merge, no gray-zone LLM)', async () => {
+    // custom embedder: the probe maps to a vector with cosine 0.70 vs the seeded claim's unit(0) — in (0.65,0.75)
+    const tunedJudge = makeFakeSameFactJudge({ verdictOf: () => 'same' })
+    const tuned = makeFakeEmbedder({
+      version: 'fake:tuned',
+      vectorOf: (t) => (t === 'probe near neighbor' ? vec(0.7) : unit(0)),
+    })
+    await seedClaimRow({ claimText: 'seeded near neighbor', embedding: unit(0) }) // no subject ⇒ NN-only candidate path
+    const res = await commitClaim(db, tuned, tunedJudge, { claimText: 'probe near neighbor' }, [
+      { sourceId: (await aSource()).sourceId, locator: 'a' },
+    ])
+    expect(res.merged).toBe(false) // similarity 0.70 < 0.75 ⇒ not a candidate ⇒ new claim
+    expect(tunedJudge.callCount()).toBe(0) // sub-0.75 NN never reaches stage-2 adjudication
+  })
+
+  it('stage-1 guard: a same-subject claim with a NULL embedding is excluded (not pulled into the gray zone)', async () => {
+    const judge = makeFakeSameFactJudge({ verdictOf: () => 'same' })
+    await seedClaimRow({
+      subject: 'sku-null',
+      predicate: 'p',
+      object: 'o',
+      status: 'active',
+      embedding: null,
+    })
+    const res = await commitClaim(
+      db,
+      embedder,
+      judge,
+      { claimText: 'sku-null thing', subject: 'sku-null' },
+      [{ sourceId: (await aSource()).sourceId, locator: 'a' }],
+    )
+    // without the isNotNull(embedding) guard, the null-embedding same-subject row would arrive at similarity 1.0
+    // and burn a gray-zone LLM call; the guard excludes it ⇒ no candidate, no call, new claim
+    expect(judge.callCount()).toBe(0)
+    expect(res.merged).toBe(false)
+  })
+
+  it('superseded claims are never merge targets: an equivalent fact creates a NEW claim, not a merge into the dead version', async () => {
+    const dead = await seedClaimRow({
+      subject: 'sku-3',
+      predicate: 'p',
+      object: 'o',
+      status: 'superseded',
+    })
+    const s1 = await aSource()
+    const res = await commitClaim(
+      db,
+      embedder,
+      unrelatedJudge,
+      { claimText: 'sku-3 p o', subject: 'sku-3', predicate: 'p', object: 'o' },
+      [{ sourceId: s1.sourceId, locator: 'a' }],
+    )
+    expect(res.merged).toBe(false) // superseded is excluded from candidates ⇒ new claim
+    expect(res.claimId).not.toBe(dead)
+    expect((await db.select().from(claim)).length).toBe(2) // the dead version is still there, plus the new claim
+  })
+
+  it('merge edge dedup: committing the same contradicting fact twice into a merge target keeps a single A↔B contradicts edge', async () => {
+    const a = await seedActiveClaim('sku-6', 'color', 'red')
+    const b = await seedActiveClaim('sku-6', 'color', 'blue')
+    const mk = async () =>
+      commitClaim(
+        db,
+        embedder,
+        unrelatedJudge,
+        { claimText: 'sku-6 color red', subject: 'sku-6', predicate: 'color', object: 'red' },
+        [{ sourceId: (await aSource()).sourceId, locator: 'x' }],
+      )
+    await mk() // merges into A, records A↔B contradiction
+    await mk() // merges again — must NOT add a second A↔B contradicts edge
+    const rows = await db.select().from(relation)
+    const ab = rows.filter(
+      (r) =>
+        r.type === 'contradicts' &&
+        ((r.fromClaim === a && r.toClaim === b) || (r.fromClaim === b && r.toClaim === a)),
+    )
+    expect(ab).toHaveLength(1)
   })
 
   it('D1: commitClaim rejects a claim with zero provenance', async () => {
