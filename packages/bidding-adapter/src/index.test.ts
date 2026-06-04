@@ -13,6 +13,7 @@ import {
   recallClaims,
   schema,
   type DB,
+  makeFakeEmbedder,
   type RecallResult,
 } from '@engram/core'
 
@@ -59,6 +60,7 @@ function makeResult(id: string, value: number, sourceId: string): RecallResult {
     provenances: [{ sourceId, locator: 'p1', relevance: 'exact' }],
     mustVerify: value < 0.6,
     contradicts: [],
+    embeddingVersion: null,
   }
 }
 
@@ -159,6 +161,7 @@ const migrationsFolder = join(
   'engram-core',
   'drizzle',
 )
+const embedder = makeFakeEmbedder()
 
 let admin: pg.Pool
 let pool: pg.Pool
@@ -219,6 +222,8 @@ async function seedActiveClaim(text: string, sourceId: string, raw = 0.9): Promi
       },
       calibrationVersion: 'identity',
     },
+    embedding: await embedder.embed(text),
+    embeddingVersion: embedder.version,
     lineageId: randomUUID(),
     asOf: new Date(),
     createdBy: 'test',
@@ -284,7 +289,7 @@ describe('bidding-adapter DB integration — business identity via source.meta (
     const idOff = await seedActiveClaim('bidding spec official', off.sourceId, 0.9)
     const idForum = await seedActiveClaim('bidding spec forum', forum.sourceId, 0.9)
 
-    const kernel = await recallClaims(db, 'bidding spec')
+    const kernel = await recallClaims(db, embedder, 'bidding spec')
     const gConf = new Map(kernel.map((r) => [r.claim.id, r.confidence.value]))
     expect(gConf.get(idOff)).toBeCloseTo(0.9)
     expect(gConf.get(idForum)).toBeCloseTo(0.9)
