@@ -211,7 +211,7 @@ export async function appendClaim(
   provenances: ProvenanceInput[],
 ): Promise<{ claimId: string }> {
   requireProvenance(provenances)
-  const embedding = await embedder.embed(draft.claimText) // 嵌入在事务外算（纯计算/远程调用，不持锁）
+  const embedding = await embedder.embed(draft.claimText, 'document') // 嵌入在事务外算（纯计算/远程调用，不持锁）
   return db.transaction(async (tx) => {
     const conf = await computeClaimConfidence(tx, draft, provenances)
     const claimId = await insertClaim(tx, draft, randomUUID(), conf, embedding, embedder.version)
@@ -230,7 +230,7 @@ export async function supersedeClaim(
   provenances: ProvenanceInput[],
 ): Promise<{ claimId: string }> {
   requireProvenance(provenances)
-  const embedding = await embedder.embed(draft.claimText)
+  const embedding = await embedder.embed(draft.claimText, 'document')
   return db.transaction(async (tx) => {
     const old = await tx
       .select({ lineageId: claim.lineageId, status: claim.status })

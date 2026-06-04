@@ -33,6 +33,7 @@ export function makeFakeEmbedder(opts: FakeEmbedderOptions = {}): Embedder {
   return {
     version,
     dim: EMBEDDING_DIM,
+    // 对称 fake：忽略 kind（query/document 同一映射），用 DEFAULT_RECALL_MIN_SIMILARITY。
     embed: (text: string) => Promise.resolve(vectorOf(text)),
   }
 }

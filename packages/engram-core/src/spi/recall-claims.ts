@@ -13,7 +13,7 @@
  *
  * 关键设计：raw 召回时用**活动权重**对存档因子现算（rawFromStoredFactors，S7 配置态变更即刻生效），
  * 再 value=applyG(raw, 版本)（g 现算，S27/S28 换 g 即时生效）。存档的 confidence_raw 自 S7 起是写时审计快照、
- * 召回不再读它。检索匹配 S3 用确定性子串（text/subject）；语义向量是 S9。
+ * 召回不再读它。S9：候选源 = claim_text 嵌入的 HNSW 近邻 top-k（只嵌 claim_text，不再匹配 subject/谓/宾）。
  */
 import { and, cosineDistance, eq, inArray, isNotNull, or } from 'drizzle-orm'
 
@@ -131,13 +131,16 @@ export async function recallClaims(
   const floor = Math.max(std.consumeFloor, resolveFloor(ctx.confidenceFloor))
   const limit = typeof ctx.limit === 'number' && ctx.limit > 0 ? ctx.limit : DEFAULT_RECALL_LIMIT
   const topK = typeof ctx.topK === 'number' && ctx.topK > 0 ? ctx.topK : DEFAULT_RECALL_TOPK
+  // 相似度下界：ctx 显式 > 嵌入器推荐（真模型语义空间更高）> 内核默认（适配 fake 子串空间）。
   const minSimilarity =
-    typeof ctx.minSimilarity === 'number' ? ctx.minSimilarity : DEFAULT_RECALL_MIN_SIMILARITY
+    typeof ctx.minSimilarity === 'number'
+      ? ctx.minSimilarity
+      : (embedder.minSimilarity ?? DEFAULT_RECALL_MIN_SIMILARITY)
 
   // 消费门第一层 = 状态可消费：只放 status=active（draft 影子区 / quarantined / superseded / flagged 全硬排除，
   // PRD A.4 状态表 / 设计稿消费门；晋升 draft→active 是 S13）。② 候选源（S9）= claim_text 嵌入的 HNSW 近邻
   // top-k（替代 S3 子串匹配；gate 不变）。NULL 向量行排除。重算/排序/limit 仍在 JS 侧（见下）。
-  const queryVector = await embedder.embed(query)
+  const queryVector = await embedder.embed(query, 'query')
   const distance = cosineDistance(claim.embedding, queryVector)
   const nn = await db
     .select({

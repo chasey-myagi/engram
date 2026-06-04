@@ -77,7 +77,7 @@ export async function reembedMarked(db: DB, embedder: Embedder): Promise<number>
   let reembedded = 0
   for (const r of rows) {
     if (r.version === embedder.version) continue // 已是当前版本 → 跳过
-    const vector = await embedder.embed(r.claimText)
+    const vector = await embedder.embed(r.claimText, 'document')
     await db
       .update(claim)
       .set({ embedding: vector, embeddingVersion: embedder.version })

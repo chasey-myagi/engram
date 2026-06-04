@@ -171,12 +171,56 @@ describe('S9 embedding substrate (A.6)', () => {
     // re-running reembed skips already-current claims
     expect(await reembedMarked(db, v2)).toBe(0)
   })
+
+  it('reembed writes the NEW vector (not just bumps the version)', async () => {
+    const v1 = makeFakeEmbedder({ version: 'fake:v1' }) // trigram vector
+    const newVec = unit(13)
+    const v2 = makeFakeEmbedder({ version: 'fake:v2', vectorOf: () => newVec }) // distinct vector
+    const s = await aSource()
+    const { claimId } = await appendClaim(db, v1, { claimText: 'vector should change' }, [
+      { sourceId: s.sourceId, locator: 'l' },
+    ])
+    await markStaleForReembed(db, v2.version)
+    await reembedMarked(db, v2)
+    const [row] = await db
+      .select({ embedding: claim.embedding, version: claim.embeddingVersion })
+      .from(claim)
+      .where(eq(claim.id, claimId))
+    expect(row!.version).toBe('fake:v2')
+    expect(row!.embedding).toEqual(newVec) // the actual vector was rewritten, not left stale
+  })
+
+  it('candidate retrieval is capped at topK by vector distance — a high-confidence claim beyond top-k is dropped pre-gate', async () => {
+    const qe = makeFakeEmbedder({ vectorOf: () => unit(0) }) // every query → e0
+    await seedActiveWithVector('near one', vec(1.0)) // cosine 1.0
+    await seedActiveWithVector('near two', vec(0.9)) // cosine 0.9
+    await seedActiveWithVector('near three', vec(0.8)) // cosine 0.8 — 3rd nearest, still high confidence
+
+    expect((await recallClaims(db, qe, 'q')).length).toBe(3) // default topK keeps all three
+    const top2 = await recallClaims(db, qe, 'q', { topK: 2 })
+    expect(top2.map((r) => r.claim.claimText).sort()).toEqual(['near one', 'near two']) // 3rd dropped by topK
+  })
+
+  it('the minSimilarity floor (ctx override) gates candidates exactly at the cosine boundary', async () => {
+    const qe = makeFakeEmbedder({ vectorOf: () => unit(0) })
+    await seedActiveWithVector('cosine 0.6 claim', vec(0.6))
+    const included = await recallClaims(db, qe, 'q', { minSimilarity: 0.5 })
+    expect(included.map((r) => r.claim.claimText)).toEqual(['cosine 0.6 claim']) // 0.6 ≥ 0.5 → in
+    expect(await recallClaims(db, qe, 'q', { minSimilarity: 0.7 })).toEqual([]) // 0.6 < 0.7 → out
+  })
 })
 
 // --- vector helpers for the semantic tests (1024-dim, deterministic) ---
 function unit(i: number): number[] {
   const v = new Array<number>(EMBEDDING_DIM).fill(0)
   v[i % EMBEDDING_DIM] = 1
+  return v
+}
+/** unit vector whose cosine with e0 (= unit(0)) is exactly `cos`. */
+function vec(cos: number): number[] {
+  const v = new Array<number>(EMBEDDING_DIM).fill(0)
+  v[0] = cos
+  v[1] = Math.sqrt(Math.max(0, 1 - cos * cos))
   return v
 }
 function mix(i: number, j: number, w: number): number[] {

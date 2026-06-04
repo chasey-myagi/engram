@@ -8,12 +8,18 @@ import { EMBEDDING_DIM } from '../db/schema.js'
 
 export { EMBEDDING_DIM }
 
+/** 嵌入用途。非对称模型（DashScope text-embedding-v3）query/document 各自空间；对称/fake 忽略。 */
+export type EmbedKind = 'query' | 'document'
+
 export interface Embedder {
   /** 版本锚，写进 claim.embedding_version；变更触发 reembed。 */
   readonly version: string
   /** 向量维度（必须等于 schema 的 EMBEDDING_DIM）。 */
   readonly dim: number
-  embed(text: string): Promise<number[]>
+  /** 本嵌入空间推荐的召回相似度下界（可选）；recall 取 ctx.minSimilarity ?? 这个 ?? DEFAULT。 */
+  readonly minSimilarity?: number
+  /** kind 默认 'document'（写入 claim 用）；recall 给 query 算向量时传 'query'。 */
+  embed(text: string, kind?: EmbedKind): Promise<number[]>
 }
 
 /** 召回 HNSW 近邻取的候选数（A.6 top-k=50）。 */

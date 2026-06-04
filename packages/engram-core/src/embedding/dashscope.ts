@@ -2,7 +2,7 @@
  * 生产嵌入器：阿里 DashScope text-embedding-v3（1024 维）。读 DASHSCOPE_API_KEY（对齐官方 SDK 惯例）。
  * 经 Embedder 接口注入内核，**不在 CI/单测里跑**（联网 + 需 key）；本地有 key 时可跑 env-gated 冒烟测试。
  */
-import { EMBEDDING_DIM, type Embedder } from './embedder.js'
+import { EMBEDDING_DIM, type EmbedKind, type Embedder } from './embedder.js'
 
 const DASHSCOPE_URL =
   'https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding'
@@ -20,14 +20,16 @@ export function makeDashScopeEmbedder(opts: { apiKey?: string; model?: string } 
   return {
     version: `dashscope:${model}`,
     dim: EMBEDDING_DIM,
-    async embed(text: string): Promise<number[]> {
+    minSimilarity: 0.5, // 真模型语义空间的召回下界（远高于 fake 的 0.1）；趋近 A.6 的 0.65/0.75
+    async embed(text: string, kind: EmbedKind = 'document'): Promise<number[]> {
       const res = await fetch(DASHSCOPE_URL, {
         method: 'POST',
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model,
           input: { texts: [text] },
-          parameters: { dimension: EMBEDDING_DIM, text_type: 'document' },
+          // text-embedding-v3 非对称：query/document 各自空间，必须按用途区分
+          parameters: { dimension: EMBEDDING_DIM, text_type: kind },
         }),
       })
       if (!res.ok) {
