@@ -61,6 +61,19 @@ export {
 } from './runtime/port.js'
 export { makeHarnessPiRuntime } from './runtime/harness-pi.js'
 
+// S24 · choreography 数据面路由器（极简确定性事件总线；按工种**声明的触发**路由，非在线 meta-orchestrator）。
+export {
+  EventDispatcher,
+  routeKeys,
+  DISTILLER_TRIGGER,
+  type EngramEvent,
+  type EngramEventType,
+  type WorkerHandler,
+  type RegisteredWorker,
+  type DispatchTrace,
+  type RunToConvergenceResult,
+} from './runtime/dispatcher.js'
+
 // S16 · read_source 端口 + 实现（按 kind 选读法；含图走 VLM，经注入端口，零硬编码模型）。
 export {
   type SourceReader,
