@@ -16,15 +16,24 @@ import {
   applyG,
   conflictDecay,
   rawFromStoredFactors,
+  type CalibrationMap,
   type ConfidenceFactorBreakdown,
   type FactorWeights,
   type StoredConfidence,
 } from './confidence.js'
+import { loadCalibrationMaps } from '../calibration/calibration-store.js'
 import type { DB } from '../db/client.js'
 import { claim, relation } from '../db/schema.js'
 import { latestEntailmentFactors } from '../verifier/patrol-verdict.js'
 import { latestUsageCorrectFactors } from '../harvest/usage-correct.js'
 import { latestHumanReviewFactors } from '../editor/human-review.js'
+
+/**
+ * 校准映射解析表（S27）：version → 该版本的 CalibrationMap。recall / inbox 在请求开头按候选 claim 钉的
+ * **版本集合**批量解析（见 calibration-store.loadCalibrationMaps），再逐条同步喂给 applyG，保持纯/同步热路径。
+ * identity 版本不必在此（applyG 对 identity 直通 raw、不查 map）；空表/全 identity → 空 Map 即可。
+ */
+export type CalibrationMaps = Map<string, CalibrationMap>
 
 /** 一条 claim 实时重算后的 confidence 结果（recall / inbox 共用）。 */
 export interface LiveConfidence {
@@ -128,6 +137,9 @@ export function recomputeLiveConfidence(
     entailment: Map<string, number>
     usageCorrect: Map<string, number>
   },
+  // S27：候选 claim 各自钉的 calibrationVersion → 已解析的 g' 映射。identity 不必在此（applyG 直通）；
+  // 缺省空 Map = 全 identity 老行为（向后兼容）。每条按**自己钉的版本**取 map → 老快照冻结在它当年的 g。
+  maps: CalibrationMaps = new Map(),
 ): Map<string, LiveConfidence> {
   const out = new Map<string, LiveConfidence>()
   for (const c of candidates) {
@@ -151,7 +163,8 @@ export function recomputeLiveConfidence(
             ...(liveUsageCorrect === undefined ? {} : { usageCorrect: liveUsageCorrect }),
           }
     const raw = rawFromStoredFactors(factors, weights, { conflictDecay: cDecay })
-    const value = applyG(raw, stored.calibrationVersion)
+    // 按该 claim 钉的版本取 g'（identity → applyG 直通、map 入参被忽略）。
+    const value = applyG(raw, stored.calibrationVersion, maps.get(stored.calibrationVersion))
     out.set(c.id, {
       raw,
       value,
@@ -165,8 +178,8 @@ export function recomputeLiveConfidence(
 }
 
 /**
- * 一站式实时重算：给定候选 id 集，自查实时 f1/f2/f4 覆盖 + 实时矛盾，按活动权重重算每条 value。
- * inbox 用它（recall 因已在自己路径查过这些信号、为省往返仍内联调底层 recomputeLiveConfidence）。
+ * 一站式实时重算：给定候选 id 集，自查实时 f1/f2/f4 覆盖 + 实时矛盾 + 各候选钉的 g' 映射，按活动权重重算每条 value。
+ * inbox 用它（recall 因已在自己路径查过这些信号、为省往返仍内联调底层 recomputeLiveConfidence + 自解析 maps）。
  */
 export async function loadLiveConfidence(
   db: DB,
@@ -174,15 +187,22 @@ export async function loadLiveConfidence(
   weights: FactorWeights,
 ): Promise<Map<string, LiveConfidence>> {
   const ids = candidates.map((c) => c.id)
-  const [contradictsByClaim, humanReview, entailment, usageCorrect] = await Promise.all([
+  // 候选钉的非 identity 版本集合 → 批量解析 g' 映射（identity 不必解析）。
+  const versions = candidates.map(
+    (c) => (c.confidenceFactors as StoredConfidence).calibrationVersion,
+  )
+  const [contradictsByClaim, humanReview, entailment, usageCorrect, maps] = await Promise.all([
     liveContradictsByClaim(db, ids),
     latestHumanReviewFactors(db, ids),
     latestEntailmentFactors(db, ids),
     latestUsageCorrectFactors(db, ids),
+    loadCalibrationMaps(db, versions),
   ])
-  return recomputeLiveConfidence(candidates, weights, contradictsByClaim, {
-    humanReview,
-    entailment,
-    usageCorrect,
-  })
+  return recomputeLiveConfidence(
+    candidates,
+    weights,
+    contradictsByClaim,
+    { humanReview, entailment, usageCorrect },
+    maps,
+  )
 }

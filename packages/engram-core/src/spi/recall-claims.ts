@@ -30,6 +30,7 @@ import {
   type FactorWeights,
 } from '../confidence/confidence.js'
 import { liveContradictsByClaim, recomputeLiveConfidence } from '../confidence/live-recompute.js'
+import { loadCalibrationMaps } from '../calibration/calibration-store.js'
 import type { DB } from '../db/client.js'
 import { claim, claimProvenance, type ClaimStatus, type ProvRelevance } from '../db/schema.js'
 import { latestEntailmentFactors } from '../verifier/patrol-verdict.js'
@@ -174,15 +175,28 @@ export async function recallClaims(
   // 无人审则不覆盖、沿用存档值），与 f2/f4 同款实时口径（不吃写时快照、反映最新人审）。一次批量查回。
   const humanReviewByClaim = await latestHumanReviewFactors(db, candidateIds)
 
+  // S27：按候选 claim **各自钉的** calibrationVersion 批量解析 g′ 映射（identity 不必解析、applyG 直通）。
+  // 老快照冻结：每条按它钉的版本算 g，换活动版本不回溯改写老 claim。一次批量查回（热路径再同步 applyG）。
+  const calibrationVersions = candidates.map(
+    (c) => (c.confidenceFactors as { calibrationVersion: string }).calibrationVersion,
+  )
+  const calibrationMaps = await loadCalibrationMaps(db, calibrationVersions)
+
   // 召回瞬间：用活动权重对存档因子重算 raw（配置态变更即刻生效）+ 实时 conflictDecay，再现算 g → value。
   // S23：合成逻辑抽到 recomputeLiveConfidence（recall / editor inbox 单一口径）；recall 把已批量查回的实时
-  // 矛盾/f1/f2/f4 传入（不重复往返），结果与原内联 gated.map 逐字等价。
+  // 矛盾/f1/f2/f4 + S27 g′ 映射传入（不重复往返），结果与原内联 gated.map 逐字等价。
   const takenAt = new Date()
-  const liveById = recomputeLiveConfidence(candidates, std.factorWeights, contradictsByClaim, {
-    humanReview: humanReviewByClaim,
-    entailment: entailmentByClaim,
-    usageCorrect: usageCorrectByClaim,
-  })
+  const liveById = recomputeLiveConfidence(
+    candidates,
+    std.factorWeights,
+    contradictsByClaim,
+    {
+      humanReview: humanReviewByClaim,
+      entailment: entailmentByClaim,
+      usageCorrect: usageCorrectByClaim,
+    },
+    calibrationMaps,
+  )
   const gated = candidates
     .map((c) => {
       const live = liveById.get(c.id)!

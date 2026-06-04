@@ -48,6 +48,54 @@ export {
   type ReliabilityBin,
   type ReliabilityReport,
 } from './calibration/calibration.js'
+// S27 · g′ 表示 + applyG-by-version（命门 A.3）：单调校准映射（升序非递减 knots，分段线性插值）。
+export {
+  applyG,
+  applyGMap,
+  assertCalibrationMap,
+  CALIBRATION_IDENTITY,
+  IDENTITY_MAP,
+  type CalibrationKnot,
+  type CalibrationMap,
+} from './confidence/confidence.js'
+// S27 · 校准映射版本化 store（append-only / 活动=最新一行）+ 原子激活（验收门唯一写者）+ g=identity 即时回退（Story 29）。
+export {
+  appendCalibrationMapTx,
+  commitCalibrationMap,
+  rollbackToIdentity,
+  getActiveCalibrationVersion,
+  getActiveCalibrationMap,
+  getCalibrationMap,
+  loadCalibrationMaps,
+  getCalibrationHistory,
+  type CommitCalibrationInput,
+  type CalibrationMapRow,
+} from './calibration/calibration-store.js'
+// S27 · 旁挂只读 Advisor（能力：诊断 + 绑 ΔECE，无写权）+ 拟合端口（S28 isotonic 从此接入；S27 不实现）。
+export {
+  advise,
+  identityLikeCandidate,
+  type GoldenSample,
+  type CalibrationFitter,
+  type CalibrationProposal,
+  type AdvisorOptions,
+} from './calibration/advisor.js'
+// S27 · 确定性验收门（权力：5 项全过才 approve，逐项可咬；A.8 否决在线 meta-orchestrator）。
+export {
+  runAcceptanceGate,
+  MAX_GATE_FLIP_FRACTION,
+  MIN_SAMPLES_PER_BIN,
+  type GateCheckId,
+  type GateCheck,
+  type GateVerdict,
+  type GateInputs,
+} from './calibration/acceptance-gate.js'
+// S27 · 控制面链路：Advisor→验收门→（5/5 原子换 / 否则 fail-silent HOLD）。活动 g 的唯一写入路径（除即时回退）。
+export {
+  evaluateAndMaybeSwap,
+  type SwapResult,
+  type EvaluateOptions,
+} from './calibration/recalibrate.js'
 export { applyAdapter, DEFAULT_ADAPTER_EPSILON, type RecallAdapter } from './spi/adapter.js'
 export {
   setStandards,
