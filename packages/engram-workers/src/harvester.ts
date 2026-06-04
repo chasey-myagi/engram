@@ -20,7 +20,7 @@
  * 整轮选批失败（DB 抖动）则整轮跳过、维持现状（既有 confidence 一字不动）。下一轮 batch/cron 再来。
  */
 import { recomputeClaimConfidence, schema, type DB, type RecomputeResult } from '@engram/core'
-import { eq } from 'drizzle-orm'
+import { and, eq, inArray } from 'drizzle-orm'
 
 const DEFAULT_BY_ROLE = 'agent:harvester'
 const DEFAULT_MAX_CLAIMS = 500
@@ -122,14 +122,18 @@ async function selectUsageClaims(
 ): Promise<string[]> {
   const cols = { claimId: schema.claimVerification.claimId }
   if (opts.claimIds && opts.claimIds.length > 0) {
+    // 限定下推进 SQL：不能先 limit(maxClaims) 截断再内存过滤——>maxClaims 条 usage claim 时目标可能落在
+    // 截断之外被静默漏算（且 selectDistinct 无序，命中靠运气）。inArray 在被投影列上无耦合问题。
     const rows = await db
       .selectDistinct(cols)
       .from(schema.claimVerification)
-      .where(eq(schema.claimVerification.kind, 'usage_truth'))
-      .limit(opts.maxClaims)
-    const wanted = new Set(opts.claimIds)
-    // 限定这批 claim（在去重结果上过滤，避免 and(kind, inArray) 与 distinct 的列投影耦合）。
-    return rows.map((r) => r.claimId).filter((id) => wanted.has(id))
+      .where(
+        and(
+          eq(schema.claimVerification.kind, 'usage_truth'),
+          inArray(schema.claimVerification.claimId, opts.claimIds),
+        ),
+      )
+    return rows.map((r) => r.claimId)
   }
   const rows = await db
     .selectDistinct(cols)

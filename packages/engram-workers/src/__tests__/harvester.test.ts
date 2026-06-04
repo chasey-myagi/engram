@@ -159,6 +159,25 @@ describe('S19 Harvester worker — usage→confidence loop (pure statistics, A.6
     expect(after.usageCorrect).toBeLessThan(1)
   })
 
+  it('batch targeting is not truncated by maxClaims: a targeted claim beyond the row cap is still recomputed', async () => {
+    // 4 distinct usage-claims; target the 4th with maxClaims=1. Pre-fix (limit(1)+in-memory filter) would
+    // distinct→1 arbitrary row, filter to ∅, and silently no-op. Post-fix (inArray in SQL, no limit) recomputes it.
+    const ids: string[] = []
+    for (let i = 0; i < 3; i += 1) {
+      const id = await mkClaim({ claimText: `sku batch decoy ${i}` })
+      await reportUsage(db, id, 'adopted', { byRole: `consumer:d${i}`, taskId: `td-${i}` })
+      ids.push(id) // decoys: 3 distinct usage-claims
+    }
+    const target = await mkClaim({ claimText: 'sku batch target' })
+    for (const u of ['x', 'y', 'z']) {
+      await reportUsage(db, target, 'adopted', { byRole: `consumer:${u}`, taskId: `tt-${u}` }) // n=3 → f4=1
+    }
+    // 4 distinct usage-claims, maxClaims=1: pre-fix limit(1)+filter would drop the target (no-op); post-fix inArray finds it.
+    const res = await harvestBatch({ db }, [target], { maxClaims: 1 })
+    expect(res.harvested).toBe(1)
+    expect((await storedOf(target)).usageCorrect).toBe(1) // recomputed despite maxClaims=1
+  })
+
   it('refuted history keeps f4 at 0 (does not raise confidence), vs adopted which does raise it', async () => {
     // Two identical claims: one gets independent ADOPTED, the other independent REFUTED.
     const adoptedClaim = await mkClaim({ claimText: 'sku harvest adopt' })
@@ -174,7 +193,7 @@ describe('S19 Harvester worker — usage→confidence loop (pure statistics, A.6
     expect(adopted.usageCorrect).toBe(1) // observed=1 → f4=1
     expect(refuted.usageCorrect).toBe(0) // observed=0 → f4=0
     // f4 weight 0.1: adopted raw is exactly 0.1·(1−0) higher than refuted's (identical otherwise).
-    expect(adopted.raw - refuted.raw).toBeCloseTo(0.1, 10)
+    expect(adopted.raw - refuted.raw).toBeCloseTo(0.1, 6) // float products w/ wall-clock staleDecay → 6 digits, not 10
     expect(refuted.raw).toBeLessThan(adopted.raw) // refuted history does not raise confidence; adopted does
   })
 

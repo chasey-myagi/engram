@@ -117,7 +117,7 @@ function statsFromRows(rows: IdentityRow[]): UsageCorrectStats {
   const latestByIdentity = new Map<string, CountedOutcome | null>()
   for (const r of rows) {
     // 独立身份键：by_role ⊕ taskId。同 (by_role, task) 多次上报 = 同一票，后到者覆盖（取最新结局）。
-    const key = `${r.byRole} ${r.taskId ?? ''}`
+    const key = JSON.stringify([r.byRole, r.taskId ?? ''])
     if (isCountedOutcome(r.outcome)) {
       latestByIdentity.set(key, r.outcome)
     } else {
