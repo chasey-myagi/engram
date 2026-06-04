@@ -1,0 +1,38 @@
+{
+  "name": "@engram/workers",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Engram 五工种 — 跑在 harness-pi 上、经 Consumer SPI 自养知识库（Distiller 等）。领域无关。",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "!**/*.test.*"
+  ],
+  "scripts": {
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.20.0",
+    "pg": "^8.21.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "@engram/core": "workspace:*",
+    "@harness-pi/core": "^0.2.0",
+    "drizzle-orm": "^0.45.2"
+  }
+}

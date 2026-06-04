@@ -15,7 +15,7 @@ import {
 import { createDb, type DB } from '../db/client.js'
 import { EMBEDDING_DIM } from '../embedding/embedder.js'
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
-import { claim, relation, type ClaimStatus } from '../db/schema.js'
+import { claim, claimProvenance, relation, type ClaimStatus } from '../db/schema.js'
 import { addSource } from '../spi/append-claim.js'
 import { commitClaim } from '../spi/commit-claim.js'
 import { recallClaims } from '../spi/recall-claims.js'
@@ -605,6 +605,79 @@ describe('S14 commitClaim — same-fact dedup + un-inflatable f3 (A.6)', () => {
     expect(res.merged).toBe(false) // superseded is excluded from candidates ⇒ new claim
     expect(res.claimId).not.toBe(dead)
     expect((await db.select().from(claim)).length).toBe(2) // the dead version is still there, plus the new claim
+  })
+
+  // 红线 #2「只人能放松，agent 只能收紧」+ 防数据丢失：人隔离/收紧过的 claim（quarantined/flagged）不可作 agent 合并目标。
+  for (const status of ['quarantined', 'flagged'] as const) {
+    it(`${status} claims are never merge targets: an equivalent agent fact creates a NEW draft (no provenance attached to the isolated claim, no confidence raise)`, async () => {
+      const isolated = await seedClaimRow({
+        subject: 'sku-q',
+        predicate: 'p',
+        object: 'o',
+        status,
+      })
+      const before = await db.select().from(claim).where(eq(claim.id, isolated))
+      const s1 = await aSource()
+      const res = await commitClaim(
+        db,
+        embedder,
+        unrelatedJudge,
+        {
+          claimText: 'sku-q p o',
+          subject: 'sku-q',
+          predicate: 'p',
+          object: 'o',
+          createdBy: 'agent:distiller',
+        },
+        [{ sourceId: s1.sourceId, locator: 'a' }],
+      )
+      // (1) not swallowed: a real new fact matching an isolated claim becomes its own recallable draft
+      expect(res.merged).toBe(false)
+      expect(res.claimId).not.toBe(isolated)
+      expect((await db.select().from(claim)).length).toBe(2)
+      // (2) the isolated claim gained NO provenance — an agent did not strengthen a human-isolated claim
+      const isolatedProv = await db
+        .select()
+        .from(claimProvenance)
+        .where(eq(claimProvenance.claimId, isolated))
+      expect(isolatedProv).toHaveLength(0)
+      // (3) its confidence is untouched (no upward recompute)
+      const after = await db.select().from(claim).where(eq(claim.id, isolated))
+      expect(after[0]!.confidence).toBe(before[0]!.confidence)
+      expect(after[0]!.status).toBe(status) // still isolated
+    })
+  }
+
+  it('merge prefers a healthy same-fact target over a more-isolated one: an active twin absorbs the merge, the quarantined twin is left untouched', async () => {
+    const quarantined = await seedClaimRow({
+      subject: 'sku-z',
+      predicate: 'p',
+      object: 'o',
+      status: 'quarantined',
+    })
+    const active = await seedClaimRow({
+      subject: 'sku-z',
+      predicate: 'p',
+      object: 'o',
+      status: 'active',
+    })
+    const s1 = await aSource()
+    const res = await commitClaim(
+      db,
+      embedder,
+      unrelatedJudge,
+      { claimText: 'sku-z p o', subject: 'sku-z', predicate: 'p', object: 'o' },
+      [{ sourceId: s1.sourceId, locator: 'a' }],
+    )
+    expect(res.merged).toBe(true)
+    expect(res.claimId).toBe(active) // merged into the mergeable twin, skipping the quarantined one
+    // the quarantined twin gained no provenance
+    const qProv = await db
+      .select()
+      .from(claimProvenance)
+      .where(eq(claimProvenance.claimId, quarantined))
+    expect(qProv).toHaveLength(0)
+    expect((await db.select().from(claim)).length).toBe(2) // no third claim created
   })
 
   it('merge edge dedup: committing the same contradicting fact twice into a merge target keeps a single A↔B contradicts edge', async () => {

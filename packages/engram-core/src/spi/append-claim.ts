@@ -217,6 +217,24 @@ async function recordContradictions(tx: Tx, newClaimId: string, draft: DraftClai
   }
 }
 
+/** 读一条 source（工种 read_source 用，如 Distiller）。不存在返 null。 */
+export async function getSource(
+  db: DB,
+  sourceId: string,
+): Promise<{ id: string; content: string; kind: SourceKind; authorityScore: number } | null> {
+  const [row] = await db
+    .select({
+      id: source.id,
+      content: source.content,
+      kind: source.kind,
+      authorityScore: source.authorityScore,
+    })
+    .from(source)
+    .where(eq(source.id, sourceId))
+    .limit(1)
+  return row ?? null
+}
+
 /** 幂等入原文：content_hash 撞号则复用既有行（不重复落库），单语句 ON CONFLICT 总返存活 id。meta 原样存。 */
 export async function addSource(db: DB, input: SourceInput): Promise<{ sourceId: string }> {
   const rows = await db
