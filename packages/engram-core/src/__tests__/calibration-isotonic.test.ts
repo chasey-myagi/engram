@@ -150,6 +150,22 @@ async function seedMiscalibratedUsage(claimId: string, count: number): Promise<v
   }
 }
 
+/**
+ * 落一批**全 adopted** 的 usage_truth（每条独立身份）：各 raw 的 observed 恒=1 ⇒ isotonic 拟出常量 g′
+ * （零分辨力）⇒ 验收门必拒（output_spread/翻转率）。用于证明「拟合成功但门拒 → HOLD」这条 A.7 失效静音路径。
+ */
+async function seedFlatUsage(claimId: string, count: number): Promise<void> {
+  for (let i = 0; i < count; i++) {
+    const raw = ((i % 10) + 0.5) / 10 // raw 仍铺开 0.05..0.95，但 outcome 恒为 adopted
+    await reportUsage(db, claimId, 'adopted', {
+      byRole: `flat:${i}`,
+      taskId: `flat-task-${i}`,
+      confidenceAtRecall: raw,
+      calibrationVersion: CALIBRATION_IDENTITY,
+    })
+  }
+}
+
 describe('S28 ≥200 门 + usage_truth 取样（独立门控）', () => {
   it('<200 条独立 usage_truth → 不拟合，g 维持 identity', async () => {
     const cid = await seedClaim('threshold claim')
@@ -170,6 +186,15 @@ describe('S28 ≥200 门 + usage_truth 取样（独立门控）', () => {
     await seedMiscalibratedUsage(cid, MIN_FIT_SAMPLES + 40) // 240 条
     const res = await fitAndMaybeRecalibrate(db, { version: 'iso-fit-1' })
     expect(res.fitted).toBe(true)
+  })
+
+  it('恰好 200 条独立 usage_truth → 拟合（门是 ≥ 而非 >，钉死 off-by-one）', async () => {
+    const cid = await seedClaim('threshold exact claim')
+    await seedMiscalibratedUsage(cid, MIN_FIT_SAMPLES) // 恰 200
+    const samples = await collectUsageCalibrationSamples(db)
+    expect(samples).toHaveLength(MIN_FIT_SAMPLES) // 确认正好 200 distinct
+    const res = await fitAndMaybeRecalibrate(db, { version: 'iso-200' })
+    expect(res.fitted).toBe(true) // 200 == 门 → 拟合（不是 <200 的 below_threshold）
   })
 
   it('独立门控：同一身份刷单 1000 次只算一票 → 不足 200、不拟合（防 Goodhart）', async () => {
@@ -218,17 +243,32 @@ describe('S28 经验收门原子换 + ECE 下降证明', () => {
     ).ece
     const res = await fitAndMaybeRecalibrate(db, { version: 'iso-ece-proof' })
     expect(res.fitted).toBe(true)
-    if (res.fitted && res.swapResult.swapped) {
-      // 换上的 g' 在同一 golden 上的 ECE。
-      const g = res.swapResult.proposal.candidate
-      const eceFitted = computeReliability(
-        samples.map((s) => ({ predicted: applyGMap(s.rawPredicted, g), correct: s.correct })),
-        10,
-      ).ece
-      expect(eceFitted).toBeLessThan(eceIdentity) // 核心 payoff
-      // proposal 自带的 candidateEce/currentEce 也应同向（candidate 更准）。
-      expect(res.swapResult.proposal.candidateEce).toBeLessThan(res.swapResult.proposal.currentEce)
-    }
+    if (!res.fitted) throw new Error('expected a fit at ≥200 samples')
+    // 硬断言**真的换上了**——绝不把核心 payoff 藏在 `if (swapped)` 后面，否则验收门一旦 HOLD 本证明就空过（gate#1 test-review）。
+    expect(res.swapResult.swapped).toBe(true)
+    // 换上的 g' 在同一 golden 上的 ECE。
+    const g = res.swapResult.proposal.candidate
+    const eceFitted = computeReliability(
+      samples.map((s) => ({ predicted: applyGMap(s.rawPredicted, g), correct: s.correct })),
+      10,
+    ).ece
+    expect(eceFitted).toBeLessThan(eceIdentity) // 核心 payoff
+    // proposal 自带的 candidateEce/currentEce 也应同向（candidate 更准）。
+    expect(res.swapResult.proposal.candidateEce).toBeLessThan(res.swapResult.proposal.currentEce)
+  })
+
+  it('拟合成功但验收门 REJECT → fail-silent HOLD：g 维持 identity，拒判绝不泄漏进活动 g（A.7 失效静音）', async () => {
+    // 全 adopted 的足量样本 ⇒ isotonic 拟出**常量 g′**（每个 raw 同一 observed=1）⇒ 验收门 ⑥ output_spread（或 ③ 翻转率）拒。
+    const cid = await seedClaim('hold claim')
+    await seedFlatUsage(cid, MIN_FIT_SAMPLES + 40) // 真拟合（≥200）但门会拒
+    const res = await fitAndMaybeRecalibrate(db, { version: 'iso-hold' })
+    expect(res.fitted).toBe(true) // 真的拟合了
+    if (!res.fitted) throw new Error('expected a fit at ≥200 samples')
+    expect(res.swapResult.swapped).toBe(false) // 但验收门拒判
+    expect(res.swapResult.verdict.approved).toBe(false)
+    // 关键的 A.7 保证：拒判 = 维持现状，活动 g 一动不动（绝不让被拒候选漏进活动版本）。
+    expect(await getActiveCalibrationVersion(db)).toBe(CALIBRATION_IDENTITY)
+    expect(await getCalibrationHistory(db)).toHaveLength(0)
   })
 })
 

@@ -5,7 +5,7 @@
  * evaluateAndMaybeSwap(db, samples, candidate, ...)：
  *   ① advise(only-read)：算 current/candidate 的 ECE + ΔECE，产 proposal（Advisor 从不自己换 g）；
  *   ② 读当前态（活动 g / 活动 consumeFloor / 恒温器 promotionGateLevel）喂验收门（纯函数）；
- *   ③ 5/5 approve → commitCalibrationMap **原子激活**候选（append 定义即成活动版本，一个 tx）；
+ *   ③ 6/6 approve → commitCalibrationMap **原子激活**候选（append 定义即成活动版本，一个 tx）；
  *      任一不过 reject → **不碰活动 g**（HOLD），只返回裁决 + 是哪项咬住（caller 落审计日志）。绝不抛进主干。
  *
  * 能力/权力分离在此硬兑现：approve 之外，没有任何路径能改活动 g；reject 时现状 g 原样不动（fail-silent）。
@@ -29,9 +29,9 @@ import {
 
 /** evaluateAndMaybeSwap 的结果。swapped=true → 候选已原子激活（committed 是落库行）；false → HOLD，活动 g 未动。 */
 export interface SwapResult {
-  /** 是否真换了活动 g（仅 5/5 approve 时 true）。 */
+  /** 是否真换了活动 g（仅 6/6 approve 时 true）。 */
   swapped: boolean
-  /** 验收门裁决（含 5 项明细 + 首个未过项）。 */
+  /** 验收门裁决（含 6 项明细 + 首个未过项）。 */
   verdict: GateVerdict
   /** Advisor 的建议（候选 + ΔECE 验证依据）。 */
   proposal: CalibrationProposal
@@ -75,7 +75,7 @@ export async function evaluateAndMaybeSwap(
   }
   const verdict = runAcceptanceGate(gateInputs)
 
-  // ③ 5/5 → 原子激活；否则 HOLD（活动 g 不动）。
+  // ③ 全过 → 原子激活；否则 HOLD（活动 g 不动）。
   if (!verdict.approved) {
     return { swapped: false, verdict, proposal }
   }
@@ -90,7 +90,7 @@ export async function evaluateAndMaybeSwap(
       // 跨此断点的历史 raw/conf 不可比——纵向趋势/ECE 比对须按 code_version 分段（不可混算）。
       codeVersion: CALIBRATION_CODE_VERSION,
     },
-    reason: `advisor-accept: ΔECE ${proposal.deltaEce.toFixed(4)} (5/5 checks)`,
+    reason: `advisor-accept: ΔECE ${proposal.deltaEce.toFixed(4)} (${verdict.checks.length}/${verdict.checks.length} checks)`,
     createdBy: opts.createdBy ?? 'gate:advisor-accept',
   })
   return { swapped: true, verdict, proposal, committed }
