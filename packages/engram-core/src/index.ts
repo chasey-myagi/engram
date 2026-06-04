@@ -172,6 +172,19 @@ export {
   type GoldenQuestion,
   type PromotionAuditRow,
 } from './spi/exam-immunity.js'
+// S29 · 冻结红队世代（版本化 append-only，纵向比较的固定敌手）+ 免疫力维度（detection rate，离线报告、不进计分）。
+export {
+  freezeRedTeamGeneration,
+  getRedTeamGeneration,
+  getRedTeamGenerations,
+  recordImmunityScore,
+  getImmunityScores,
+  REDTEAM_CLASSES,
+  type RedTeamClass,
+  type RedTeamItem,
+  type RedTeamGeneration,
+  type ImmunityScore,
+} from './spi/redteam-generation.js'
 export {
   transitionClaim,
   PROMOTE_CONFIDENCE_FLOOR,

@@ -398,6 +398,71 @@ export const pageClaims = pgTable(
   (t) => [primaryKey({ columns: [t.pageId, t.claimId] })],
 )
 
+/**
+ * redteam_generations：**冻结、版本化、append-only 的红队对抗样本世代**（S29，A.9 stories 50/51 + P3「冻结红队代际」）。
+ * 免疫力必须对**固定的敌手**纵向度量，故一个 generation = 一个具名版本（version）+ 它定下的对抗样本集（items）：
+ *   - 同一 version 至多一行（version UNIQUE）：世代一旦落定即冻结、**不可静默重写**（item 集随版本走）。
+ *   - 一个新世代 = **一个新版本**（季度滚动）；旧世代行原样保留（append-only，纵向比较的锚）。
+ *   - items = 四类对抗样本（false/contradiction/stale/near-dup-poison）的冻结清单（JSONB，内核不解释其领域语义）。
+ * **沿 standards / governance_state / calibration_map 的版本化 append-only 式样**，是独立**新表**——
+ * 不碰任何冻结枚举（A.1：claim_status / metrics_event_kind 等），红线#4 天然守住。纯评测配置态，绝不进任何在线计分。
+ */
+export const redteamGenerations = pgTable(
+  'redteam_generations',
+  {
+    id: uuid('id').primaryKey(),
+    // 具名世代版本（如 'rt-2026Q2'）。UNIQUE ⇒ 世代冻结、不可重写；新世代另起新版本。
+    version: text('version').notNull().unique(),
+    // 冻结的四类对抗样本清单（RedTeamItem[]）。世代落定后此集即不可变（重打分对同一集，纵向可比）。
+    items: jsonb('items').notNull(),
+    // 本世代来由 / 季度标签（审计）。
+    reason: text('reason').notNull(),
+    // 写入者（'eval:redteam' / 'human:redteam-curator'…）。
+    createdBy: text('created_by').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // 按版本反查冻结样本集（等值反查，hash 索引）；按时间列世代史。
+  (t) => [
+    index('idx_redteam_generations_created').on(t.createdAt),
+    index('idx_redteam_generations_version').using('hash', t.version),
+  ],
+)
+
+/**
+ * redteam_immunity_scores：**免疫力作为一个被报告的「维度」**（S29，A.9 story 50 + L3 第六维「★免疫红队」）——
+ * append-only 评测埋点，**离线聚合、绝不进任何在线判据/校准 g/纵向趋势**（A3 红线#5 的结构性边界：
+ * 拟合器 collectUsageCalibrationSamples 只读 claim_verification(kind='usage_truth')，**从不**读本表，故免疫分无路进 g）。
+ *
+ * 为何独立新表而非往 metrics_events 加 kind：metrics_event_kind 是**冻结枚举**（红线#4），加值即违红线；
+ * 且免疫分天然**属于某个冻结世代**（generationVersion FK 语义），与 calibration_map「分总是某个 g 版本的分」同构。
+ * 故沿 governance_state/calibration_map 的版本化 append-only 式样，把维度落进与世代同源的专表 —— 既是「metrics 通道」
+ * 的精神延续（只记事件、离线聚合），又零触碰冻结枚举。每类一行：detected/injected → detectionRate（纯报告，不计分）。
+ */
+export const redteamImmunityScores = pgTable(
+  'redteam_immunity_scores',
+  {
+    id: uuid('id').primaryKey(),
+    // 这批分打在哪个**冻结世代**上（纵向比较的锚：同 version 重打分应同分）。FK 到 redteam_generations.version。
+    generationVersion: text('generation_version')
+      .notNull()
+      .references(() => redteamGenerations.version),
+    // 对抗类别：'false' | 'contradiction' | 'stale' | 'near_dup_poison'（与四注入器对齐；纯文本标签，内核不解释）。
+    redteamClass: text('redteam_class').notNull(),
+    // 注入数 / 被对应工种逮到数 → 检出率（detected/injected）。维度报告口径，**不进任何计分**。
+    injected: integer('injected').notNull(),
+    detected: integer('detected').notNull(),
+    detectionRate: doublePrecision('detection_rate').notNull(),
+    // 本次打分诊断负载（哪个工种逮到、各 item 命中明细等），离线分析用，不进任何计分。
+    payload: jsonb('payload')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdBy: text('created_by').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // 按世代 + 类别取最新一次打分（纵向比较）。
+  (t) => [index('idx_redteam_scores_gen_class').on(t.generationVersion, t.redteamClass)],
+)
+
 export type SourceKind = (typeof sourceKind.enumValues)[number]
 export type ClaimStatus = (typeof claimStatus.enumValues)[number]
 export type RelationType = (typeof relationType.enumValues)[number]
