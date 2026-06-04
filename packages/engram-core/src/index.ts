@@ -177,3 +177,14 @@ export {
   entailmentVerdictToFactor,
   type PatrolVerdict,
 } from './verifier/patrol-verdict.js'
+// S19 · f4 usageCorrect 生产者（usage_truth 独立门控统计 → observed_correctness → f4）。Harvester 工种调它。
+export {
+  computeUsageCorrectStats,
+  computeUsageCorrectFactor,
+  latestUsageCorrectFactors,
+  usageCorrectStatsFromCounts,
+  USAGE_CORRECT_K,
+  USAGE_CORRECT_MIN_SAMPLES,
+  type UsageCorrectStats,
+} from './harvest/usage-correct.js'
+export { recomputeClaimConfidence, type RecomputeResult } from './harvest/recompute.js'
