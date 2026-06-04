@@ -39,6 +39,16 @@ export interface ReportUsageContext {
   confidenceAtRecall?: number
   /** 产生该预测值的 g 版本（快照的 calibrationVersion）；用于将来按 g 版本分段校准（S28）。 */
   calibrationVersion?: string
+  /**
+   * 触发本次消费的原始召回 query（消费方在 recall 时已知）。失败回流（S11）据此把池中失败**重放过 recall_claims**
+   * 给当前行为打 pass/fail —— 没有它，refuted/corrected 事件就无法回放成活回归集。
+   */
+  query?: string
+  /**
+   * 人确认「KB 对这个问题压根没有正确答案」（不是某条 claim 错，而是该会的它不会）。
+   * 仅当上报方是人（by_role 'human…' 前缀）时这条信号才被回流路由进 L5 缺口候选队列（S11），等 QA 晋升（S12）。
+   */
+  kbLacksAnswer?: boolean
 }
 
 /** usage_truth 事件的读出形状（verdict JSONB 展平 + 列字段）。 */
@@ -53,6 +63,10 @@ export interface UsageEvent {
   predictedConfidence: number | null
   /** 该预测值的 g 版本（无则 null）。 */
   calibrationVersion: string | null
+  /** 触发本次消费的原始召回 query（无则 null）—— S11 回放用。 */
+  query: string | null
+  /** 人确认「KB 压根没有正确答案」（缺省 false）—— S11 路由 L5 候选用。 */
+  kbLacksAnswer: boolean
   createdAt: Date
 }
 
@@ -63,6 +77,8 @@ interface UsageVerdict {
   note: string | null
   predictedConfidence: number | null
   calibrationVersion: string | null
+  query: string | null
+  kbLacksAnswer: boolean
 }
 
 function isUsageOutcome(x: unknown): x is UsageOutcome {
@@ -90,6 +106,8 @@ function toUsageEvent(row: typeof claimVerification.$inferSelect): UsageEvent {
       typeof verdict.predictedConfidence === 'number' ? verdict.predictedConfidence : null,
     calibrationVersion:
       typeof verdict.calibrationVersion === 'string' ? verdict.calibrationVersion : null,
+    query: typeof verdict.query === 'string' ? verdict.query : null,
+    kbLacksAnswer: verdict.kbLacksAnswer === true,
     createdAt: row.createdAt,
   }
 }
@@ -130,6 +148,8 @@ export async function reportUsage(
     note: ctx.note ?? null,
     predictedConfidence: ctx.confidenceAtRecall ?? null,
     calibrationVersion: ctx.calibrationVersion ?? null,
+    query: ctx.query ?? null,
+    kbLacksAnswer: ctx.kbLacksAnswer ?? false,
   }
   await db.insert(claimVerification).values({
     id,

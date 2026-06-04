@@ -57,6 +57,8 @@ export const verificationKind = pgEnum('verification_kind', [
 ])
 /** metrics_events 事件类别（A.9 评测埋点）。gap_recorded = 召回交白卷的诚实信号（S10）；后续评测埋点同表扩。 */
 export const metricsEventKind = pgEnum('metrics_event_kind', ['gap_recorded'])
+/** L5 缺口候选状态（S11 只产 queued；晋升到 promoted / 驳回 rejected 是 S12 的 QA 门，届时扩枚举）。 */
+export const l5CandidateStatus = pgEnum('l5_candidate_status', ['queued'])
 
 /** source：不可变原文。content_hash 幂等去重；authority_score 连续、消费方可覆盖；meta 是领域身份注入口。 */
 export const source = pgTable('source', {
@@ -200,6 +202,60 @@ export const metricsEvents = pgTable(
   ],
 )
 
+/**
+ * regression_pool：生产失败回流成的活回归集（S11，A.2/A.9）。append-only。
+ * 反流任务把 usage_truth 里 outcome∈{refuted,corrected} 的事件挖进来，按 claim + 原始 query/task 归档，
+ * 保留召回瞬间快照（预测概率 + g 版本）与到失败 claim 的归因（claim_id FK ⇒ 经 claim_provenance 可钻回出处）。
+ * source_event_id UNIQUE = 幂等锚：每条 usage_truth 失败事件至多回流一次，反流可反复跑而不重复入池。
+ * 池中项经 query 重放过 recall_claims（评测=消费，零专用路径）→ 对当前行为打 pass/fail。
+ */
+export const regressionPool = pgTable(
+  'regression_pool',
+  {
+    id: uuid('id').primaryKey(),
+    // 来源 usage_truth 事件（claim_verification.id）。UNIQUE ⇒ 反流幂等、不重复入池。
+    sourceEventId: uuid('source_event_id').notNull().unique(),
+    // 失败归因到具体 claim（FK ⇒ 经 claim_provenance 回溯出处谱系）。
+    claimId: uuid('claim_id')
+      .notNull()
+      .references(() => claim.id),
+    // 原始召回 query（重放用）；老事件未带则 null（不可重放，记 unreplayable）。
+    query: text('query'),
+    // 失败结局：refuted / corrected（由反流逻辑保证，adopted/partial 不入池）。
+    outcome: text('outcome').notNull(),
+    taskId: text('task_id'),
+    // 召回瞬间快照：预测概率 + 产生它的 g 版本（usage_truth 当时所存的全部快照位）。
+    predictedConfidence: doublePrecision('predicted_confidence'),
+    calibrationVersion: text('calibration_version'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // 按 claim 反查该 claim 的全部失败 —— 归因扫描。
+  (t) => [index('idx_regression_pool_claim').on(t.claimId)],
+)
+
+/**
+ * l5_candidates：人确认「KB 真没答案」的缺口候选队列（S11，A.9）。append-only。
+ * 反流仅在 by_role 为人（'human…' 前缀）且带 kb_lacks_answer 标记且有 query 时入队 —— 人确认才算数。
+ * status 起步只有 queued；晋升进 L5 冻结考卷是 S12 的 QA 门（题=毒株，须先过免疫流水线，红线 A1）。
+ */
+export const l5Candidates = pgTable(
+  'l5_candidates',
+  {
+    id: uuid('id').primaryKey(),
+    // 来源 usage_truth 事件。UNIQUE ⇒ 反流幂等、不重复入队。
+    sourceEventId: uuid('source_event_id').notNull().unique(),
+    // 候选缺口问题（即原始 query，作 L5 题面）。NOT NULL：没问题就不成题。
+    query: text('query').notNull(),
+    // 触发的失败 claim（可空，留作溯源；候选本质是「该会而不会的问题」、不绑某条 claim）。
+    claimId: uuid('claim_id').references(() => claim.id),
+    // 确认人的 by_role（'human…'）。
+    confirmedBy: text('confirmed_by').notNull(),
+    status: l5CandidateStatus('status').notNull().default('queued'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('idx_l5_candidates_status').on(t.status)],
+)
+
 /** page_claims：page = claim 的 M:N 组装（A.1 未声明 FK，照此实现）。 */
 export const pageClaims = pgTable(
   'page_claims',
@@ -217,3 +273,4 @@ export type RelationType = (typeof relationType.enumValues)[number]
 export type ProvRelevance = (typeof provRelevance.enumValues)[number]
 export type VerificationKind = (typeof verificationKind.enumValues)[number]
 export type MetricsEventKind = (typeof metricsEventKind.enumValues)[number]
+export type L5CandidateStatus = (typeof l5CandidateStatus.enumValues)[number]
