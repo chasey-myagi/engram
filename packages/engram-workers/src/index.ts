@@ -42,6 +42,14 @@ export {
   type HarvesterResult,
   type HarvestOutcome,
 } from './harvester.js'
+  runArbiter,
+  arbitrateConflicts,
+  ARBITER_TRIGGER,
+  type ArbiterDeps,
+  type ArbiterOptions,
+  type ArbiterResult,
+  type ArbiterOutcome,
+} from './arbiter.js'
 export {
   type AgentRuntime,
   type AgentTool,

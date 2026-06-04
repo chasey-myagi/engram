@@ -188,3 +188,22 @@ export {
   type UsageCorrectStats,
 } from './harvest/usage-correct.js'
 export { recomputeClaimConfidence, type RecomputeResult } from './harvest/recompute.js'
+export {
+  adjudicateConflict,
+  MACHINE_RUNGS,
+  type ConflictSide,
+  type Adjudication,
+  type LadderRung,
+} from './spi/conflict-ladder.js'
+export {
+  loadConflictSide,
+  resolveConflict,
+  escalateConflict,
+  getEditorConflictQueue,
+  getResolvedConflicts,
+  getClaimStatus,
+  CONFLICT_ADJUDICATED,
+  type ConflictAdjudicatedPayload,
+  type ConflictAdjudication,
+  type ConflictPersistResult,
+} from './spi/conflict-arbiter.js'

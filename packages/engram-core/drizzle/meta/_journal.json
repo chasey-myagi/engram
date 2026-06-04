@@ -57,6 +57,13 @@
       "when": 1780560343502,
       "tag": "0007_loving_siren",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1780565681817,
+      "tag": "0008_gifted_kate_bishop",
+      "breakpoints": true
     }
   ]
 }

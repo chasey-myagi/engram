@@ -31,7 +31,7 @@ import {
   type EntailmentVerdict,
   type PatrolVerdict,
 } from '@engram/core'
-import { and, desc, eq, inArray } from 'drizzle-orm'
+import { and, desc, eq, inArray, ne, or } from 'drizzle-orm'
 
 const MS_PER_DAY = 86_400_000
 const DEFAULT_BY_ROLE = 'agent:verifier'
@@ -165,6 +165,36 @@ async function loadEvidence(
 }
 
 /**
+ * 找一条 claim 的矛盾对端（conflict 信号的 peer，S20 路由跟进）：取其 contradicts 边另一端、且对端**未被取代**的 claimId。
+ * 用于 not_co_true 时回填 PatrolVerdict.conflictsWith —— 把「与谁不可同真」交给 Arbiter（pairwise 裁决的正主）。
+ * 多个对端则取确定性的一个（id 最小，可回归）；无对端（巡查判定的语义冲突尚无显式边）→ null，不强填。
+ */
+async function findContradictingPeer(db: DB, claimId: string): Promise<string | null> {
+  const edges = await db
+    .select({ from: schema.relation.fromClaim, to: schema.relation.toClaim })
+    .from(schema.relation)
+    .where(
+      and(
+        eq(schema.relation.type, 'contradicts'),
+        or(eq(schema.relation.fromClaim, claimId), eq(schema.relation.toClaim, claimId)),
+      ),
+    )
+  const peers = new Set<string>()
+  for (const e of edges) {
+    const other = e.from === claimId ? e.to : e.from
+    if (other != null && other !== claimId) peers.add(other)
+  }
+  if (peers.size === 0) return null
+  // 对端须仍存活（superseded 不再参与矛盾）；多个取 id 最小（确定性）。
+  const rows = await db
+    .select({ id: schema.claim.id })
+    .from(schema.claim)
+    .where(and(inArray(schema.claim.id, [...peers]), ne(schema.claim.status, 'superseded')))
+  const alive = rows.map((r) => r.id).sort()
+  return alive.length > 0 ? alive[0]! : null
+}
+
+/**
  * 据 entailment 裁决 + 时效 + 当前状态，按 A.4 收紧/晋升一条 claim。返回迁移结果（无迁移 → null）。
  * 全经 transitionClaim（蓝边收紧由内核放行，放松边内核拒）。conf 门由 transitionClaim 自校（draft→active 需 conf≥0.5）。
  */
@@ -265,11 +295,16 @@ export async function runVerifier(
       const ageDays = Math.max(0, (Date.now() - c.asOf.getTime()) / MS_PER_DAY)
       const stale = ageDays > halfLifeDays
 
+      // S20 路由跟进：not_co_true（与他 claim 不可同真）时回填矛盾对端，把 pairwise 冲突信号交给 Arbiter（裁决正主）。
+      // 其余裁决（pass/fail）不是 pairwise 冲突，不填 conflictsWith。S17 当初延迟的这格由此闭合。
+      const conflictsWith =
+        entailment === 'not_co_true' ? await findContradictingPeer(deps.db, c.id) : null
       // 落 patrol 裁决（judge≠athlete：by_role=本工种）。append-only，多轮各留一行；f2 读最新一条。
       const verdict: PatrolVerdict = {
         entailment,
         reason: reasonFor(c.status, stale),
         judgeVersion: deps.judge.version,
+        ...(conflictsWith != null ? { conflictsWith } : {}),
       }
       await writePatrolVerdict(deps.db, { claimId: c.id, byRole, verdict })
       result.patrolled += 1

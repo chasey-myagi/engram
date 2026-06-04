@@ -277,4 +277,47 @@ describe('S17 Verifier worker (D3 patrol: 函数/统计 + 点状一次 LLM) — 
     expect(judge.callCount()).toBe(1)
     expect(await statusOf(target.claimId)).toBe('flagged')
   })
+
+  // S20 routed follow-up: S17 deferred the conflict signal's peer id (conflictsWith). The Verifier now populates it
+  // on a not_co_true verdict, finding the contradicting peer via the contradicts edge — handing the pairwise
+  // conflict to the Arbiter (the owner of pairwise resolution).
+  it('not_co_true populates the patrol verdict with the contradicting peer id (conflictsWith) — the routed conflict signal for the Arbiter', async () => {
+    const target = await mkClaim({ status: 'active', claimText: 'k p A' })
+    const peer = await mkClaim({ status: 'active', claimText: 'k p B' })
+    await db.insert(schema.relation).values({
+      id: randomUUID(),
+      fromClaim: target.claimId,
+      toClaim: peer.claimId,
+      type: 'contradicts',
+    })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'not_co_true' })
+    // patrol only the target so we assert its verdict precisely (peer would also be patrolled in a full round).
+    const res = await verifyEnqueued({ db, judge }, [target.claimId])
+    expect(res.patrolled).toBe(1)
+
+    const rows = await patrolRows(target.claimId)
+    expect(rows).toHaveLength(1)
+    const verdict = rows[0]!.verdict as { entailment: string; conflictsWith?: string }
+    expect(verdict.entailment).toBe('not_co_true')
+    expect(verdict.conflictsWith).toBe(peer.claimId) // the deferred-from-S17 peer id is now filled
+    // not_co_true is also a tighten signal: active→flagged (blue), unchanged red-line behavior.
+    expect(await statusOf(target.claimId)).toBe('flagged')
+  })
+
+  it('a non-conflict verdict (fail) leaves conflictsWith unset even when a contradicts edge exists (only not_co_true routes the pairwise signal)', async () => {
+    const target = await mkClaim({ status: 'active', claimText: 'k p A' })
+    const peer = await mkClaim({ status: 'active', claimText: 'k p B' })
+    await db.insert(schema.relation).values({
+      id: randomUUID(),
+      fromClaim: target.claimId,
+      toClaim: peer.claimId,
+      type: 'contradicts',
+    })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'fail' })
+    await verifyEnqueued({ db, judge }, [target.claimId])
+    const rows = await patrolRows(target.claimId)
+    const verdict = rows[0]!.verdict as { entailment: string; conflictsWith?: string }
+    expect(verdict.entailment).toBe('fail')
+    expect(verdict.conflictsWith).toBeUndefined()
+  })
 })

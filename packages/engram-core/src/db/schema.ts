@@ -56,10 +56,16 @@ export const verificationKind = pgEnum('verification_kind', [
   'usage_truth',
   'reembed_marker',
 ])
-/** metrics_events 事件类别（A.9 评测埋点）。gap_recorded=召回白卷(S10)；source_human_pending=Distiller 降级标记(S15)。 */
+/**
+ * metrics_events 事件类别（A.9 评测埋点）。gap_recorded=召回白卷(S10)；source_human_pending=Distiller 降级标记(S15)；
+ * conflict_adjudicated=Arbiter 冲突裁决留痕(S20)：payload.outcome 分流「resolved（机判自裁的采信/信任标记）」与
+ * 「escalated（升级主编队列，待人用同一张优先级表 + ① 人工裁定）」。沿 source_human_pending 的「事件即标记」式样，
+ * 不新增 claim_status（A.1 冻结），故 Arbiter 标采信/升级**不**改 claim 状态——红线#2「只人能放松」由此天然守住。
+ */
 export const metricsEventKind = pgEnum('metrics_event_kind', [
   'gap_recorded',
   'source_human_pending',
+  'conflict_adjudicated',
 ])
 /** L5 缺口候选状态：queued（S11 入队）→ promoted（过 A1 免疫晋升 golden）/ rejected（毒株被免疫拒，终态）。 */
 export const l5CandidateStatus = pgEnum('l5_candidate_status', ['queued', 'promoted', 'rejected'])
