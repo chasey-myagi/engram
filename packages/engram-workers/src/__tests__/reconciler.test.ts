@@ -358,4 +358,82 @@ describe('S18 Reconciler worker (batch_appended: 函数 + 灰区一次 LLM) — 
     expect(res2.reviewed).toBe(0)
     expect(judge.callCount()).toBe(0)
   })
+
+  it('bounded LLM budget: maxPairs caps total judge calls even when more anchors qualify', async () => {
+    const sub = 'skuBudget'
+    const a = await mkClaim({
+      claimText: `${sub} capacity is at least 0800 mah`,
+      subject: sub,
+      predicate: 'capacity',
+      object: 'at least 800',
+    })
+    await mkClaim({
+      claimText: `${sub} capacity is at least 4000 mah`,
+      subject: sub,
+      predicate: 'capacity',
+      object: 'at least 4000',
+    })
+    await mkClaim({
+      claimText: `${sub} capacity is at least 5000 mah`,
+      subject: sub,
+      predicate: 'capacity',
+      object: 'at least 5000',
+    })
+    const judge = boundOracle()
+    const res = await runReconciler({ db, judge }, { claimIds: [a.claimId], maxPairs: 1 })
+    expect(judge.callCount()).toBe(1) // budget=1 → exactly one pair judged despite ≥2 qualifying anchors (no unbounded spend)
+    expect(res.reviewed).toBe(1)
+  })
+
+  it('bounded LLM budget: findAnchors caps anchors per claim (8) so >8 near twins cannot drive unbounded calls', async () => {
+    const sub = 'skuAnchorCap'
+    const a = await mkClaim({
+      claimText: `${sub} capacity is at least 9999 mah`,
+      subject: sub,
+      predicate: 'capacity',
+      object: 'at least 9999',
+    })
+    for (let n = 1; n <= 9; n += 1) {
+      // 9 near same-subject twins (> the per-claim cap of 8)
+      await mkClaim({
+        claimText: `${sub} capacity is at least ${n}00 mah`,
+        subject: sub,
+        predicate: 'capacity',
+        object: `at least ${n}00`,
+      })
+    }
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'pass' }) // count calls; A(strictest) refines all
+    await runReconciler({ db, judge }, { claimIds: [a.claimId] }) // default maxPairs=200
+    expect(judge.callCount()).toBeLessThanOrEqual(8) // 9 candidates, but findAnchors .limit(8) caps the LLM calls
+  })
+
+  it('transition-failure degrades safely: a 2nd poison anchor re-flagging an already-flagged A catches the no-op throw — escalation still recorded, no crash, no double-flag', async () => {
+    const sub = 'skuDegrade'
+    const a = await mkClaim({
+      claimText: `${sub} capacity is at least 0800 mah`,
+      subject: sub,
+      predicate: 'capacity',
+      object: 'at least 800',
+    })
+    const b1 = await mkClaim({
+      claimText: `${sub} capacity is at least 4000 mah`,
+      subject: sub,
+      predicate: 'capacity',
+      object: 'at least 4000',
+    })
+    const b2 = await mkClaim({
+      claimText: `${sub} capacity is at least 5000 mah`,
+      subject: sub,
+      predicate: 'capacity',
+      object: 'at least 5000',
+    })
+    const judge = boundOracle() // A(≥800) ⊬ B1/B2 → both poison
+    const res = await runReconciler({ db, judge }, { claimIds: [a.claimId] })
+    expect(judge.callCount()).toBe(2) // both anchors judged (multi-anchor fan-out)
+    expect(res.escalations).toBe(2) // signal recorded for BOTH, even when the 2nd transition throws (never dropped)
+    expect(res.flagged).toBe(1) // only the 1st transition succeeded; the 2nd hit transitionClaim's no-op throw → caught
+    expect(await statusOf(a.claimId)).toBe('flagged') // tightened once, stays flagged — no crash, no double transition
+    expect(await statusOf(b1.claimId)).toBe('active') // anchors untouched
+    expect(await statusOf(b2.claimId)).toBe('active')
+  })
 })
