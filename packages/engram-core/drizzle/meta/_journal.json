@@ -43,6 +43,13 @@
       "when": 1780548193575,
       "tag": "0005_sticky_blue_shield",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1780553489517,
+      "tag": "0006_boring_pepper_potts",
+      "breakpoints": true
     }
   ]
 }

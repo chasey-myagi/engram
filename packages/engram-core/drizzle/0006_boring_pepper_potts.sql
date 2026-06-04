@@ -1,0 +1,2 @@
+ALTER TABLE "source" ADD COLUMN "derived_from_source_id" uuid;--> statement-breakpoint
+ALTER TABLE "source" ADD CONSTRAINT "source_derived_from_source_id_source_id_fk" FOREIGN KEY ("derived_from_source_id") REFERENCES "public"."source"("id") ON DELETE no action ON UPDATE no action;

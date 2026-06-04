@@ -20,6 +20,7 @@ import {
   type ComputedConfidence,
   type StoredConfidence,
 } from '../confidence/confidence.js'
+import { countIndependentSupports } from '../same-fact/independent.js'
 import type { DB, Tx } from '../db/client.js'
 import type { Embedder } from '../embedding/embedder.js'
 import {
@@ -39,6 +40,8 @@ export interface SourceInput {
   kind: SourceKind
   authorityScore?: number
   meta?: Record<string, unknown>
+  /** A.6 独立来源血缘：本源派生自哪个上游源（独立印证沿此链折叠，防同源刷 f3）。 */
+  derivedFromSourceId?: string
 }
 
 export interface DraftClaim {
@@ -69,20 +72,27 @@ function requireProvenance(provenances: ProvenanceInput[]): void {
 }
 
 /**
- * S2 命门：从 claim 的出处源算连续 confidence。authority 取最强源、indepSupport 数独立源
- * （S2 阶段独立≈不同 source id；完整 A.6 独立判定是 S14）、stale 看 as_of、halfLife 看最强源的 kind。
+ * 命门：从一组出处源算连续 confidence。authority 取最强源、halfLife 看最强源 kind、
+ * indepSupport 数**独立** supports 源（A.6：hash 去重 + derived_from 折叠 + agent_synthesis 0.5 折扣，S14）。
+ * 既给 appendClaim 写新 claim 用，也给 commitClaim 合并后按全量源重算 f3 用（单一真相源）。
  */
-async function computeClaimConfidence(
+export async function computeConfidenceFromSourceIds(
   tx: Tx,
-  draft: DraftClaim,
-  provenances: ProvenanceInput[],
+  sourceIds: string[],
+  asOf?: Date,
 ): Promise<ComputedConfidence> {
-  const sourceIds = [...new Set(provenances.map((p) => p.sourceId))]
-  const sources = sourceIds.length
+  const ids = [...new Set(sourceIds)]
+  const sources = ids.length
     ? await tx
-        .select({ authority: source.authorityScore, kind: source.kind })
+        .select({
+          id: source.id,
+          authority: source.authorityScore,
+          kind: source.kind,
+          contentHash: source.contentHash,
+          derivedFromSourceId: source.derivedFromSourceId,
+        })
         .from(source)
-        .where(inArray(source.id, sourceIds))
+        .where(inArray(source.id, ids))
     : []
   // 最强源（authority 最高）一遍扫出：它的 authority_score 作 f0、它的 kind 定半衰期。
   const dominant = sources.reduce<(typeof sources)[number] | null>(
@@ -91,12 +101,24 @@ async function computeClaimConfidence(
   )
   const authority = dominant?.authority ?? 0
   const halfLifeDays = dominant ? halfLifeDaysForKind(dominant.kind) : 180
-  const indepSupport = independentSupportScore(sources.length) // 1 源→0（无独立印证），越多越高
-  const asOf = draft.asOf ?? new Date()
-  const ageDays = Math.max(0, (Date.now() - asOf.getTime()) / MS_PER_DAY)
+  const indepSupport = independentSupportScore(countIndependentSupports(sources)) // A.6 独立印证数
+  const resolvedAsOf = asOf ?? new Date()
+  const ageDays = Math.max(0, (Date.now() - resolvedAsOf.getTime()) / MS_PER_DAY)
   return computeConfidence(
     { ...NEUTRAL_FACTORS, authority, indepSupport },
     { ageDays, halfLifeDays, activeContradicts: 0 },
+  )
+}
+
+async function computeClaimConfidence(
+  tx: Tx,
+  draft: DraftClaim,
+  provenances: ProvenanceInput[],
+): Promise<ComputedConfidence> {
+  return computeConfidenceFromSourceIds(
+    tx,
+    provenances.map((p) => p.sourceId),
+    draft.asOf,
   )
 }
 
@@ -191,6 +213,9 @@ export async function addSource(db: DB, input: SourceInput): Promise<{ sourceId:
       kind: input.kind,
       authorityScore: input.authorityScore ?? 0.5,
       meta: input.meta ?? {},
+      ...(input.derivedFromSourceId !== undefined
+        ? { derivedFromSourceId: input.derivedFromSourceId }
+        : {}),
     })
     .onConflictDoUpdate({
       target: source.contentHash,
