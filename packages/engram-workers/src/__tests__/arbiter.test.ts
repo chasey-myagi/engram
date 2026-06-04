@@ -11,6 +11,7 @@ import {
   addSource,
   createDb,
   getEditorConflictQueue,
+  getRefusedRulings,
   getResolvedConflicts,
   makeFakeEmbedder,
   recallClaims,
@@ -79,12 +80,14 @@ beforeEach(async () => {
   )
 })
 
-/** Seed one ACTIVE, recallable S/P/O claim (HIGH profile) + one exact provenance from a chosen-authority source. */
+/** Seed one ACTIVE, recallable S/P/O claim (HIGH profile) + one provenance from a chosen-authority source. */
 async function seedClaim(opts: {
   query: string
   object: string
   asOf: Date
   authority: number
+  /** 出处相关度档（默认 exact，保持既有用例语义不变）。S21 用 supporting 喂弱反向证据。 */
+  relevance?: schema.ProvRelevance
 }): Promise<string> {
   const { sourceId } = await addSource(db, {
     content: `src-${randomUUID()}`,
@@ -113,9 +116,13 @@ async function seedClaim(opts: {
     embedding: await embedder.embed(opts.query),
     embeddingVersion: embedder.version,
   })
-  await db
-    .insert(schema.claimProvenance)
-    .values({ id: randomUUID(), claimId: id, sourceId, locator: 'L1', relevance: 'exact' })
+  await db.insert(schema.claimProvenance).values({
+    id: randomUUID(),
+    claimId: id,
+    sourceId,
+    locator: 'L1',
+    relevance: opts.relevance ?? 'exact',
+  })
   return id
 }
 
@@ -126,18 +133,23 @@ async function seedPair(opts: {
   bAsOf: Date
   aAuthority: number
   bAuthority: number
+  /** 出处相关度档（默认两侧 exact）。S21 用于让胜者只有弱反向证据。 */
+  aRelevance?: schema.ProvRelevance
+  bRelevance?: schema.ProvRelevance
 }): Promise<{ a: string; b: string }> {
   const a = await seedClaim({
     query: opts.query,
     object: 'A',
     asOf: opts.aAsOf,
     authority: opts.aAuthority,
+    ...(opts.aRelevance !== undefined ? { relevance: opts.aRelevance } : {}),
   })
   const b = await seedClaim({
     query: opts.query,
     object: 'B',
     asOf: opts.bAsOf,
     authority: opts.bAuthority,
+    ...(opts.bRelevance !== undefined ? { relevance: opts.bRelevance } : {}),
   })
   await db
     .insert(schema.relation)
@@ -426,5 +438,68 @@ describe('S20 Arbiter worker (bounded loop on harness-pi) — A.5 deterministic 
     const r2 = await runArbiter({ db, runtime: throwingRuntime }, {})
     expect(r2.escalated).toBe(0)
     expect(await getEditorConflictQueue(db)).toHaveLength(1) // STILL 1 — no duplicate editor-queue entry
+  })
+
+  // S21 · NC-exact 红线（红线#3 / A.6）在 Arbiter 路：机判自裁 = 把**败者**判为负（refuted）。
+  // 落采信标记前须经同一统一闸门：**胜者**须有 ≥1 条 relevance='exact' 反向命题；无则拒判 + 升级主编（不落采信）。
+  it('NC-exact red line: a unique ladder winner whose evidence is only SUPPORTING (no exact reverse proposition) is REFUSED — no believed marker, escalated to the editor-in-chief instead', async () => {
+    // a is strictly newer ⇒ ③ recency picks a as the unique winner; but a's only provenance is 'supporting'.
+    const { a, b } = await seedPair({
+      query: 'nc p A',
+      aAsOf: new Date('2025-06-01T00:00:00.000Z'), // newer → winner
+      bAsOf: new Date('2025-01-01T00:00:00.000Z'),
+      aAuthority: 0.5,
+      bAuthority: 0.5,
+      aRelevance: 'supporting', // winner lacks an EXACT reverse proposition
+      bRelevance: 'supporting',
+    })
+    const res = await arbitrateConflicts(
+      { db, runtime: runtimeOf([adjudicateTurn(a, b), finishTurn(), stopTurn]) },
+      [[a, b]],
+    )
+
+    // refused: NO believed/trust marker recorded; the pair is escalated to the human queue instead.
+    expect(res.resolved).toBe(0)
+    expect(res.escalated).toBe(1)
+    expect(await getResolvedConflicts(db)).toHaveLength(0)
+    const queue = await getEditorConflictQueue(db)
+    expect(queue).toHaveLength(1)
+    expect(queue[0]!.payload.rung).toBe('human')
+    expect(queue[0]!.payload.reason).toMatch(/NC-exact/)
+
+    // the refusal is recorded on the shared ruling_refused queue (same gate as the Verifier path)
+    const refused = await getRefusedRulings(db)
+    expect(refused).toHaveLength(1)
+    expect(refused[0]!.payload.ruledAgainstClaimId).toBe(b) // loser ruled-against
+    expect(refused[0]!.payload.reverseEvidenceClaimId).toBe(a) // exact looked for on the WINNER
+    expect(refused[0]!.payload.rulingKind).toBe('refuted')
+    expect(refused[0]!.payload.path).toBe('arbiter')
+
+    // red line #2: nothing relaxed/quarantined — both stay active and recallable
+    expect(await statusOf(a)).toBe('active')
+    expect(await statusOf(b)).toBe('active')
+  })
+
+  it('NC-exact red line: the same ladder winner WITH an exact reverse proposition self-adjudicates normally (believed marker, no refusal)', async () => {
+    const { a, b } = await seedPair({
+      query: 'nc p A',
+      aAsOf: new Date('2025-06-01T00:00:00.000Z'), // newer → winner
+      bAsOf: new Date('2025-01-01T00:00:00.000Z'),
+      aAuthority: 0.5,
+      bAuthority: 0.5,
+      aRelevance: 'exact', // winner carries the EXACT reverse proposition
+      bRelevance: 'supporting',
+    })
+    const res = await arbitrateConflicts(
+      { db, runtime: runtimeOf([adjudicateTurn(a, b), finishTurn(), stopTurn]) },
+      [[a, b]],
+    )
+
+    expect(res.resolved).toBe(1)
+    expect(res.escalated).toBe(0)
+    const resolved = await getResolvedConflicts(db)
+    expect(resolved).toHaveLength(1)
+    expect(resolved[0]!.payload.winnerId).toBe(a)
+    expect(await getRefusedRulings(db)).toHaveLength(0) // exact present → no refusal
   })
 })
