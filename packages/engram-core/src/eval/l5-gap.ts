@@ -21,7 +21,7 @@ export interface L5Question {
 }
 
 /**
- * 冻结的 L5 盲点题集（12 题）。领域无关的事实型提问；新库对它们一概没有越门答案。
+ * 冻结的 L5 盲点题集（10–20 题量级）。领域无关的事实型提问；新库对它们一概没有越门答案。
  * 冻结（Object.freeze）防止运行期被改 —— 考卷一旦立就是固定毒株。
  */
 export const L5_GAP_QUESTIONS: readonly L5Question[] = Object.freeze(

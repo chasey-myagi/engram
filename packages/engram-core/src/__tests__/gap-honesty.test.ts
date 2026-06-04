@@ -13,7 +13,7 @@ import {
 } from '../confidence/confidence.js'
 import { createDb, type DB } from '../db/client.js'
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
-import { claim, claimProvenance } from '../db/schema.js'
+import { claim, claimProvenance, metricsEvents } from '../db/schema.js'
 import { addSource } from '../spi/append-claim.js'
 import { recallClaims } from '../spi/recall-claims.js'
 import { GAP_RECORDED, getGapEvents, getMetricsEvents } from '../spi/metrics.js'
@@ -266,8 +266,10 @@ describe('S10 gap honesty signal + L5 blind-spot suite (A.9)', () => {
 
     const asc = await getMetricsEvents(db, GAP_RECORDED)
     const desc = await getGapEvents(db)
+    const all = await getMetricsEvents(db) // no-kind branch: unfiltered read, same 3 ascending
     expect(asc).toHaveLength(3)
     expect(desc).toHaveLength(3)
+    expect(all.map((e) => e.id)).toEqual(asc.map((e) => e.id)) // unfiltered === kind-filtered here (only gaps exist)
     // A dropped/reversed orderBy on either side breaks this: desc must be asc reversed. The secondary
     // id tiebreaker (both sides) is what makes "asc reversed === desc" deterministic even if two inserts
     // share a created_at — don't simplify the orderBy to created_at alone or this reintroduces flakiness.
@@ -281,5 +283,39 @@ describe('S10 gap honesty signal + L5 blind-spot suite (A.9)', () => {
     await recallClaims(db, embedder, q)
     await recallClaims(db, embedder, q)
     expect(await getGapEvents(db, q)).toHaveLength(2) // frequency of asking = strength of the blind-spot signal
+  })
+
+  it('fail-loud read: a gap_recorded row with NULL query_text is rejected, not surfaced as a bad event', async () => {
+    // bypass recordGap to inject a malformed row (e.g. a stray manual write) the read path must refuse
+    await db.insert(metricsEvents).values({
+      id: randomUUID(),
+      kind: GAP_RECORDED,
+      queryText: null,
+      payload: { candidateCount: 0, gatedCount: 0, floor: 0.4, embedderVersion: 'x' },
+    })
+    await expect(getGapEvents(db)).rejects.toThrow(/null query_text/)
+  })
+
+  it('fail-loud read: a gap_recorded row with a malformed payload (missing numeric field) is rejected, not coerced to undefined', async () => {
+    await db.insert(metricsEvents).values({
+      id: randomUUID(),
+      kind: GAP_RECORDED,
+      queryText: 'q with a broken payload',
+      payload: { gatedCount: 0, floor: 0.4, embedderVersion: 'x' }, // candidateCount missing
+    })
+    await expect(getGapEvents(db)).rejects.toThrow(/malformed payload/)
+  })
+
+  it('the suite runner forwards ctx to recall_claims: a tightened floor flows through runGapQuestion into the recorded gap', async () => {
+    const obs = await runGapQuestion(
+      db,
+      embedder,
+      { id: 'l5-ctx', query: 'runner ctx pass-through unanswerable query' },
+      { confidenceFloor: 0.7 },
+    )
+    expect(obs.correct).toBe(true) // still a gap (no answer)
+    const gaps = await getGapEvents(db, obs.question.query)
+    expect(gaps).toHaveLength(1)
+    expect(gaps[0]!.payload.floor).toBe(0.7) // ctx survived the runner → the actual gate was attributed
   })
 })
