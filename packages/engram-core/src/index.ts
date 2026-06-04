@@ -9,11 +9,14 @@ export * as schema from './db/schema.js'
 export { createPool, createDb, type DB } from './db/client.js'
 export {
   addSource,
+  getSource,
   appendClaim,
   supersedeClaim,
+  computeConfidenceFromProvenances,
   type SourceInput,
   type DraftClaim,
   type ProvenanceInput,
+  type ProvenanceRef,
 } from './spi/append-claim.js'
 export {
   recallClaims,
@@ -115,6 +118,11 @@ export {
   type PositiveEvidence,
 } from './spi/transition.js'
 export { commitClaim, type CommitResult } from './spi/commit-claim.js'
+export {
+  markSourceHumanPending,
+  getHumanPendingSources,
+  type HumanPendingSource,
+} from './spi/worker-audit.js'
 export {
   objectEquivalent,
   deterministicVerdict,

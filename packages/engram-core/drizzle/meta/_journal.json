@@ -50,6 +50,13 @@
       "when": 1780553489517,
       "tag": "0006_boring_pepper_potts",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1780560343502,
+      "tag": "0007_loving_siren",
+      "breakpoints": true
     }
   ]
 }

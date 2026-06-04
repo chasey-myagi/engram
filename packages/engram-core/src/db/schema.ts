@@ -56,8 +56,11 @@ export const verificationKind = pgEnum('verification_kind', [
   'usage_truth',
   'reembed_marker',
 ])
-/** metrics_events 事件类别（A.9 评测埋点）。gap_recorded = 召回交白卷的诚实信号（S10）；后续评测埋点同表扩。 */
-export const metricsEventKind = pgEnum('metrics_event_kind', ['gap_recorded'])
+/** metrics_events 事件类别（A.9 评测埋点）。gap_recorded=召回白卷(S10)；source_human_pending=Distiller 降级标记(S15)。 */
+export const metricsEventKind = pgEnum('metrics_event_kind', [
+  'gap_recorded',
+  'source_human_pending',
+])
 /** L5 缺口候选状态：queued（S11 入队）→ promoted（过 A1 免疫晋升 golden）/ rejected（毒株被免疫拒，终态）。 */
 export const l5CandidateStatus = pgEnum('l5_candidate_status', ['queued', 'promoted', 'rejected'])
 /** 晋升裁决（S12 A1 免疫流水线的可审计事件）。 */
