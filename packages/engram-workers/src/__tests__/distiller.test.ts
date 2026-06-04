@@ -21,6 +21,7 @@ import {
 import { createFakeModel, type FakeAssistantResponse } from '@harness-pi/core/testing'
 
 import { runDistiller } from '../distiller.js'
+import type { AgentRuntime } from '../runtime/port.js'
 import { makeHarnessPiRuntime } from '../runtime/harness-pi.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
@@ -84,6 +85,31 @@ const stopTurn: FakeAssistantResponse = {
 
 function runtimeOf(script: FakeAssistantResponse[]) {
   return makeHarnessPiRuntime(createFakeModel(script))
+}
+
+// A port-level runtime whose loop, if ever entered, hard-fails the test — proves a code path runs
+// BEFORE the loop (e.g. the unsupported-kind guard short-circuits without touching the runtime).
+const throwingRuntime: AgentRuntime = {
+  run() {
+    throw new Error('agent loop must not run')
+  },
+}
+
+// A port-level runtime that commits one grounded claim and THEN reports a non-'done' terminus —
+// simulates "loop did real work, then crashed/aborted" so we can assert error-degrade + partial-work survival.
+const commitThenErrorRuntime: AgentRuntime = {
+  async run(req) {
+    const commit = req.tools.find((t) => t.name === 'commit_claim')
+    if (!commit) throw new Error('commit_claim tool not provided to runtime')
+    await commit.execute({
+      claimText: 'partial fact',
+      subject: 's',
+      predicate: 'p',
+      object: 'o',
+      locator: 'L1',
+    })
+    return { reason: 'error', turns: 1 }
+  },
 }
 
 async function aSource(opts: { kind?: string; content?: string } = {}) {
@@ -249,6 +275,25 @@ describe('S15 Distiller worker (bounded loop on harness-pi) — A.7 five-stage s
     })
     expect(res.status).toBe('human_pending')
     expect(res.reason).toBe('max_turns')
+    expect(res.committed).toBe(2) // two facts committed within the 2-turn budget before the cutoff
+    const pending = await getHumanPendingSources(db)
+    expect(pending.some((p) => p.sourceId === sourceId && p.byRole === 'agent:distiller')).toBe(
+      true,
+    )
+    // partial work survives degradation: the claims committed before the cutoff are persisted
+    expect(await db.select().from(schema.claim)).toHaveLength(2)
+  })
+
+  it('bounded loop: a non-done terminus (reason=error) degrades to human-pending; claims committed before the failure survive', async () => {
+    const { sourceId } = await aSource()
+    const res = await runDistiller(
+      { db, embedder, judge, runtime: commitThenErrorRuntime },
+      sourceId,
+    )
+    expect(res.status).toBe('human_pending')
+    expect(res.reason).toBe('error')
+    expect(res.committed).toBe(1) // the one claim committed before the loop errored
+    expect(await db.select().from(schema.claim)).toHaveLength(1) // partial work persisted, not rolled back
     const pending = await getHumanPendingSources(db)
     expect(pending.some((p) => p.sourceId === sourceId && p.byRole === 'agent:distiller')).toBe(
       true,
@@ -257,17 +302,18 @@ describe('S15 Distiller worker (bounded loop on harness-pi) — A.7 five-stage s
 
   it('unsupported source kind degrades to human-pending without running the loop (S15 reads structured_spec / human_qa only)', async () => {
     const { sourceId } = await aSource({ kind: 'external_feed' })
-    // a runtime whose model would throw if ever run — proves the loop is NOT invoked for an unsupported kind
-    const res = await runDistiller({ db, embedder, judge, runtime: runtimeOf([]) }, sourceId)
+    // throwingRuntime hard-fails if the loop is entered — so a green test proves the unsupported-kind
+    // guard short-circuits BEFORE the runtime is touched (robust to a guard regression).
+    const res = await runDistiller({ db, embedder, judge, runtime: throwingRuntime }, sourceId)
     expect(res.status).toBe('human_pending')
     expect(res.reason).toBe('unsupported_kind')
     expect(res.committed).toBe(0)
     expect((await getHumanPendingSources(db)).some((p) => p.sourceId === sourceId)).toBe(true)
   })
 
-  it('a missing source throws', async () => {
+  it('a missing source throws before the loop runs', async () => {
     await expect(
-      runDistiller({ db, embedder, judge, runtime: runtimeOf([]) }, randomUUID()),
+      runDistiller({ db, embedder, judge, runtime: throwingRuntime }, randomUUID()),
     ).rejects.toThrow(/not found/)
   })
 })
