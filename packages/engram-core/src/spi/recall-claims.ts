@@ -15,7 +15,7 @@
  * 再 value=applyG(raw, 版本)（g 现算，S27/S28 换 g 即时生效）。存档的 confidence_raw 自 S7 起是写时审计快照、
  * 召回不再读它。S9：候选源 = claim_text 嵌入的 HNSW 近邻 top-k（只嵌 claim_text，不再匹配 subject/谓/宾）。
  */
-import { and, cosineDistance, eq, inArray, isNotNull, or } from 'drizzle-orm'
+import { and, cosineDistance, eq, inArray, isNotNull } from 'drizzle-orm'
 
 import { getActiveStandards } from '../config/standards.js'
 import {
@@ -26,21 +26,12 @@ import {
 import {
   KERNEL_CONFIDENCE_FLOOR,
   MUST_VERIFY_THRESHOLD,
-  applyG,
-  conflictDecay,
-  rawFromStoredFactors,
   type ConfidenceFactorBreakdown,
   type FactorWeights,
-  type StoredConfidence,
 } from '../confidence/confidence.js'
+import { liveContradictsByClaim, recomputeLiveConfidence } from '../confidence/live-recompute.js'
 import type { DB } from '../db/client.js'
-import {
-  claim,
-  claimProvenance,
-  relation,
-  type ClaimStatus,
-  type ProvRelevance,
-} from '../db/schema.js'
+import { claim, claimProvenance, type ClaimStatus, type ProvRelevance } from '../db/schema.js'
 import { latestEntailmentFactors } from '../verifier/patrol-verdict.js'
 import { latestUsageCorrectFactors } from '../harvest/usage-correct.js'
 import { latestHumanReviewFactors } from '../editor/human-review.js'
@@ -168,48 +159,10 @@ export async function recallClaims(
   const candidates = nn.filter((c) => 1 - Number(c.distance) >= minSimilarity)
 
   // S8 矛盾显式：数每个候选的 active contradicts 边（对端仍 active 才算活跃矛盾），喂实时 conflictDecay。
+  // S23：抽到 live-recompute.ts 的 liveContradictsByClaim（recall / editor inbox 单一口径）。recall 候选恒为 active，
+  // 故候选集内对端天然算活跃；助手会另补查非候选对端的 status，只把仍 active 的对端计入。行为与原内联逐字等价。
   const candidateIds = candidates.map((c) => c.id)
-  const candidateSet = new Set(candidateIds)
-  const edges = candidateIds.length
-    ? await db
-        .select({ from: relation.fromClaim, to: relation.toClaim })
-        .from(relation)
-        .where(
-          and(
-            eq(relation.type, 'contradicts'),
-            or(inArray(relation.fromClaim, candidateIds), inArray(relation.toClaim, candidateIds)),
-          ),
-        )
-    : []
-  // 候选都是 active；非候选对端的 status 需查一遍（矛盾边对端可能没命中 query 子串）。
-  const otherIds = [
-    ...new Set(
-      edges
-        .flatMap((e) => [e.from, e.to])
-        .filter((id): id is string => id != null && !candidateSet.has(id)),
-    ),
-  ]
-  const otherRows = otherIds.length
-    ? await db
-        .select({ id: claim.id, status: claim.status })
-        .from(claim)
-        .where(inArray(claim.id, otherIds))
-    : []
-  // 所有“仍 active”的相关 id（候选必 active；再并入非候选对端里 active 的）。只有 active 对端才算活跃矛盾。
-  const activeIds = new Set<string>(candidateIds)
-  for (const r of otherRows) if (r.status === 'active') activeIds.add(r.id)
-  const contradictsByClaim = new Map<string, Set<string>>()
-  const addContra = (a: string, b: string) => {
-    const s = contradictsByClaim.get(a) ?? new Set<string>()
-    s.add(b)
-    contradictsByClaim.set(a, s)
-  }
-  for (const e of edges) {
-    if (e.to == null) continue // relation.to_claim 可空：半边防御性跳过
-    if (e.from === e.to) continue // 防御：自指 contradicts 边不让 claim 与自己矛盾（写路径已挡，直插库兜底）
-    if (candidateSet.has(e.from) && activeIds.has(e.to)) addContra(e.from, e.to)
-    if (candidateSet.has(e.to) && activeIds.has(e.from)) addContra(e.to, e.from)
-  }
+  const contradictsByClaim = await liveContradictsByClaim(db, candidateIds)
 
   // S17 f2 实时口径：召回时把 entailment 因子接到候选 claim **最新 patrol 裁决**（pass→1 / fail/not_co_true→0；
   // 无 patrol 则不覆盖、沿用存档值），与 conflictDecay 的实时重算同款（不吃写时快照、反映最新巡查）。一次批量查回。
@@ -222,41 +175,28 @@ export async function recallClaims(
   const humanReviewByClaim = await latestHumanReviewFactors(db, candidateIds)
 
   // 召回瞬间：用活动权重对存档因子重算 raw（配置态变更即刻生效）+ 实时 conflictDecay，再现算 g → value。
+  // S23：合成逻辑抽到 recomputeLiveConfidence（recall / editor inbox 单一口径）；recall 把已批量查回的实时
+  // 矛盾/f1/f2/f4 传入（不重复往返），结果与原内联 gated.map 逐字等价。
   const takenAt = new Date()
+  const liveById = recomputeLiveConfidence(candidates, std.factorWeights, contradictsByClaim, {
+    humanReview: humanReviewByClaim,
+    entailment: entailmentByClaim,
+    usageCorrect: usageCorrectByClaim,
+  })
   const gated = candidates
     .map((c) => {
-      // confidence_factors 是 jsonb；写路径是唯一写者且类型锁定（StoredConfidence），故此处盲转安全。
-      const stored = c.confidenceFactors as StoredConfidence
-      const contra = contradictsByClaim.get(c.id)
-      const activeContradicts = contra ? contra.size : 0
-      const cDecay = conflictDecay(activeContradicts) // 实时矛盾边数 → 惩罚
-      // f1/f2/f4 实时覆盖：有人审/patrol/usage 则用其值，否则沿用存档因子（其余因子不动）。
-      const liveHumanReview = humanReviewByClaim.get(c.id)
-      const liveEntailment = entailmentByClaim.get(c.id)
-      const liveUsageCorrect = usageCorrectByClaim.get(c.id)
-      const factors: ConfidenceFactorBreakdown =
-        liveHumanReview === undefined &&
-        liveEntailment === undefined &&
-        liveUsageCorrect === undefined
-          ? stored.factors
-          : {
-              ...stored.factors,
-              ...(liveHumanReview === undefined ? {} : { humanReview: liveHumanReview }),
-              ...(liveEntailment === undefined ? {} : { entailment: liveEntailment }),
-              ...(liveUsageCorrect === undefined ? {} : { usageCorrect: liveUsageCorrect }),
-            }
-      const raw = rawFromStoredFactors(factors, std.factorWeights, { conflictDecay: cDecay })
-      // S7 阶段 g 仍只有 'identity'（g 是统计态、S28 接管，与配置态 w 分离）。未知版本 applyG 会抛 → S27/S28 处理。
-      const value = applyG(raw, stored.calibrationVersion)
+      const live = liveById.get(c.id)!
       return {
         c,
-        raw,
-        value,
-        stored,
-        factors,
-        activeContradicts,
-        cDecay,
-        contradicts: contra ? [...contra] : [],
+        raw: live.raw,
+        value: live.value,
+        // S7 起召回不再读存档 confidence 列；保留 calibrationVersion 入快照（从存档因子取）。
+        calibrationVersion: (c.confidenceFactors as { calibrationVersion: string })
+          .calibrationVersion,
+        factors: live.factors,
+        activeContradicts: live.activeContradicts,
+        cDecay: live.conflictDecay,
+        contradicts: live.contradicts,
       }
     })
     .filter((g) => g.value >= floor)
@@ -314,7 +254,7 @@ export async function recallClaims(
           conflictDecay: g.cDecay,
         },
         weights: std.factorWeights, // 活动权重入快照——"为什么当时这么信"可重建（历史快照随它冻结）
-        calibrationVersion: g.stored.calibrationVersion,
+        calibrationVersion: g.calibrationVersion,
         takenAt,
       },
       provenances,

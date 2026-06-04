@@ -27,6 +27,7 @@ import {
 } from '../db/schema.js'
 import type { DB, Tx } from '../db/client.js'
 import { countIndependentSupports, type SourceIndep } from '../same-fact/independent.js'
+import { isHumanRole } from './reflux.js'
 import type { Adjudication, ConflictSide, LadderRung } from './conflict-ladder.js'
 
 /** conflict_adjudicated 事件的 metrics_event_kind 值（S20）。 */
@@ -210,6 +211,58 @@ export async function escalateConflict(
     const eventId = await writeAdjudicatedEvent(tx, payload)
     return { outcome: 'escalated', eventId, rung: opts.rung }
   })
+}
+
+/**
+ * 主编**人工裁定**一条升级到队列（getEditorConflictQueue）的冲突 —— A.5 优先级表的**第①阶（人工裁定）**，
+ * 叠在机判阶梯（②③④⑤，conflict-ladder.ts）**之上**。机判阶梯的顺序**不改**（Arbiter 永不用①）；本函数只在其上
+ * 加①这一阶：
+ *   - **①是人专属**：caller 必是 `human:<id>`（裸 'human' 亦可，复用 isHumanRole）；agent caller **被代码拒**
+ *     （不只是文档约定——红线#2「只人能放松/裁定」由 requireHuman 在任何副作用前硬执行）。
+ *   - **①可选任一方**：人可裁 winner = a **或** b，**无视**机判阶梯会怎么判（这正是「①人工裁定」的含义——
+ *     人有最终话语权，能推翻机判会得到的结论）。winnerId 必须 ∈ {a, b}，否则抛。
+ *
+ * 落库**复用 S20 的 resolveConflict**（不重写阶梯、不重写采信标记逻辑）：记一条 contradicts 边（幂等、双方都留、
+ * 不删败者、不改任一 claim.status——红线#2：人裁定的是「该信谁」，放松/隔离/复活走 editor-action 的红边）+ 一条
+ * conflict_adjudicated(outcome='resolved') 采信标记，**rung='human'** 标明在①定的、byRole=人（可审计、可解释）。
+ * 人裁后 recall 即按采信标记反映（败者吃实时 conflictDecay 惩罚，与机判自裁同款——经 recall 可测）。
+ *
+ * a===b（自冲突）/ winnerId 不在 {a,b} / 任一 claim 不存在 → 抛（不落库）。
+ */
+export async function humanAdjudicateConflict(
+  db: DB,
+  opts: { a: string; b: string; winnerId: string; by: string; reason?: string },
+): Promise<ConflictPersistResult> {
+  // 红线#2 硬执行：①人工裁定仅人可用，agent caller 在任何副作用（边/事件/采信标记）之前即被拒。
+  if (!isHumanRole(opts.by)) {
+    throw new Error(
+      `humanAdjudicateConflict: rung ① (human ruling) is human-exclusive — caller '${opts.by}' is not human (an agent may only use the machine ladder ②③④⑤)`,
+    )
+  }
+  if (opts.a === opts.b) {
+    throw new Error('humanAdjudicateConflict: a claim cannot conflict with itself')
+  }
+  // ①可选任一方：winner 必须是这对冲突的某一方（人有话语权选 a 或 b，但不能凭空指第三者）。
+  if (opts.winnerId !== opts.a && opts.winnerId !== opts.b) {
+    throw new Error(
+      `humanAdjudicateConflict: winnerId '${opts.winnerId}' must be one of the conflicting pair {${opts.a}, ${opts.b}}`,
+    )
+  }
+  const loserId = opts.winnerId === opts.a ? opts.b : opts.a
+  // 复用 loadConflictSide 仅为校验两端 claim 都存在（确定性、纯读）；① 的胜负由人指定、不读机判快照。
+  await loadConflictSide(db, opts.a)
+  await loadConflictSide(db, opts.b)
+  // 构造一个 rung='human' 的 winner 裁决，复用 resolveConflict 落「contradicts 边 + 采信标记」（不重写其逻辑）。
+  const adjudication: Adjudication = {
+    outcome: 'winner',
+    winnerId: opts.winnerId,
+    loserId,
+    rung: 'human',
+    reason:
+      opts.reason ??
+      `human ruling (rung ①): editor '${opts.by}' picked ${opts.winnerId} over ${loserId}`,
+  }
+  return resolveConflict(db, { a: opts.a, b: opts.b, adjudication, byRole: opts.by })
 }
 
 /** conflict_adjudicated 事件的读出形状（payload 已校验）。 */
