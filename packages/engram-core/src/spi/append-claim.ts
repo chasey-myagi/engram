@@ -21,6 +21,7 @@ import {
   type StoredConfidence,
 } from '../confidence/confidence.js'
 import { countIndependentSupports } from '../same-fact/independent.js'
+import { getActiveCalibrationMap } from '../calibration/calibration-store.js'
 import { computeEntailmentFactor } from '../verifier/patrol-verdict.js'
 import { computeUsageCorrectFactor } from '../harvest/usage-correct.js'
 import { computeHumanReviewFactor } from '../editor/human-review.js'
@@ -138,7 +139,19 @@ export async function computeConfidenceFromProvenances(
     liveFactors.entailment = await computeEntailmentFactor(tx, opts.claimId)
     liveFactors.usageCorrect = await computeUsageCorrectFactor(tx, opts.claimId)
   }
-  return computeConfidence(liveFactors, { ageDays, halfLifeDays, activeContradicts: 0 })
+  // S28 FIX 1（写路径让 g 真正生效）：把新 claim 钉到**当前活动校准版本**、并存 value=activeG(raw)。
+  // 在同一事务内解析活动 g（version + 已解析 map）——非 identity 版本必须带 map 喂给 applyG（否则抛）。
+  // 这是「越用越准」闭环里 g 对**新写入**生效的口子：fit 出 g' 并过门换上后，此后新 claim 即按 g' 钉版本/算值；
+  // 老 claim 各自钉自己当年的版本（recall 按钉的版本现算）→ 换 g 不回溯改写历史（快照冻结，见 confidence.ts）。
+  const activeMap = await getActiveCalibrationMap(tx)
+  return computeConfidence(
+    liveFactors,
+    { ageDays, halfLifeDays, activeContradicts: 0 },
+    {
+      calibrationVersion: activeMap.version,
+      map: activeMap,
+    },
+  )
 }
 
 async function computeClaimConfidence(

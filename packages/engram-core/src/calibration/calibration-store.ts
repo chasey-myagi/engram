@@ -14,7 +14,7 @@
  */
 import { randomUUID } from 'node:crypto'
 
-import { desc, eq, inArray } from 'drizzle-orm'
+import { desc, inArray } from 'drizzle-orm'
 
 import {
   CALIBRATION_IDENTITY,
@@ -127,9 +127,13 @@ export async function getActiveCalibrationVersion(db: DB): Promise<string> {
   return rows.length ? rows[0]!.version : CALIBRATION_IDENTITY
 }
 
-/** 活动校准映射（version + knots）。表空 / 活动版本是 identity → IDENTITY_MAP（空 knots，g=raw）。 */
-export async function getActiveCalibrationMap(db: DB): Promise<CalibrationMap> {
-  const rows = await db
+/**
+ * 活动校准映射（version + knots）。表空 / 活动版本是 identity → IDENTITY_MAP（空 knots，g=raw）。
+ * 接 DB | Tx：S28 FIX 1 的写路径在自己的事务内解析活动 g、把新 claim 钉到活动版本（与该 claim 写入同一原子边界，
+ * 杜绝「读到活动版本 A、提交瞬间已换成 B」的 TOCTOU）；recalibrate 仍用 DB 实例调（事务外只读快照）。
+ */
+export async function getActiveCalibrationMap(exec: DB | Tx): Promise<CalibrationMap> {
+  const rows = await exec
     .select()
     .from(calibrationMap)
     .orderBy(desc(calibrationMap.createdAt), desc(calibrationMap.id))
@@ -139,34 +143,22 @@ export async function getActiveCalibrationMap(db: DB): Promise<CalibrationMap> {
 }
 
 /**
- * 解析**指定版本**的校准映射（取该 version 最新定义行；identity / 未找到 → IDENTITY_MAP）。
- * recall/inbox 按 claim 钉的版本解析它喂 applyG。返回的 map.version 恒等于入参 version（applyG 会校验一致）。
- */
-export async function getCalibrationMap(db: DB, version: string): Promise<CalibrationMap> {
-  if (version === CALIBRATION_IDENTITY) return IDENTITY_MAP
-  const rows = await db
-    .select()
-    .from(calibrationMap)
-    .where(eq(calibrationMap.version, version))
-    .orderBy(desc(calibrationMap.createdAt), desc(calibrationMap.id))
-    .limit(1)
-  if (rows.length === 0) return { version: CALIBRATION_IDENTITY, knots: [] }
-  return rowToMap(toRow(rows[0]!))
-}
-
-/**
  * 批量解析一组版本 → Map<version, CalibrationMap>（recall/inbox 请求开头一次查回，热路径再同步 applyG）。
  * 只查**非 identity 且唯一**的版本（identity 不入表/不必解析）；未找到的版本不入返回 Map（applyG 会因缺 map 抛，
  * 但正常情况下 claim 钉的版本必有定义行——缺失说明数据被外力删，宁可显式失败也不静默用错 g）。
+ *
+ * S28 FIX 2：原来还有一个单版本解析器 getCalibrationMap，它在「未找到」时静默返回 identity 形状的 map，
+ * 与本函数「未找到即丢、让 applyG 抛」的语义相反——两套「not found」语义会让同一缺失数据在两条路径上行为分裂。
+ * getCalibrationMap 没有任何非测试调用者（YAGNI），已删除。全仓库只剩本函数一条版本解析口径（缺失 = fail-loud）。
  */
 export async function loadCalibrationMaps(
-  db: DB,
+  exec: DB | Tx,
   versions: string[],
 ): Promise<Map<string, CalibrationMap>> {
   const out = new Map<string, CalibrationMap>()
   const wanted = [...new Set(versions.filter((v) => v !== CALIBRATION_IDENTITY))]
   if (wanted.length === 0) return out
-  const rows = await db
+  const rows = await exec
     .select()
     .from(calibrationMap)
     .where(inArray(calibrationMap.version, wanted))
