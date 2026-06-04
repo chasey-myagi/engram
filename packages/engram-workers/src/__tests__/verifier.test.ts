@@ -10,6 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import {
   addSource,
   createDb,
+  getRefusedRulings,
   makeFakeEmbedder,
   makeFakeEntailmentJudge,
   recallClaims,
@@ -66,7 +67,9 @@ afterAll(async () => {
 })
 
 beforeEach(async () => {
-  await pool.query('TRUNCATE source, claim, claim_provenance, relation, claim_verification CASCADE')
+  await pool.query(
+    'TRUNCATE source, claim, claim_provenance, relation, claim_verification, metrics_events CASCADE',
+  )
 })
 
 /** 一个一律按 verdict 判定、抛错可控、记调用次数的 fake EntailmentJudge。 */
@@ -107,6 +110,8 @@ async function mkClaim(opts: {
   authorityScore?: number
   factors?: Partial<Factors>
   recallable?: boolean
+  /** 出处相关度档（默认 exact，保持既有用例语义不变）。S21 用 supporting/tangential 喂弱反向证据。 */
+  relevance?: schema.ProvRelevance
 }): Promise<{ claimId: string; sourceId: string }> {
   const claimText = opts.claimText ?? `claim-${randomUUID()}`
   const { sourceId } = await addSource(db, {
@@ -147,7 +152,7 @@ async function mkClaim(opts: {
     claimId,
     sourceId,
     locator: 'L1',
-    relevance: 'exact',
+    relevance: opts.relevance ?? 'exact',
   })
   return { claimId, sourceId }
 }
@@ -319,5 +324,75 @@ describe('S17 Verifier worker (D3 patrol: 函数/统计 + 点状一次 LLM) — 
     const verdict = rows[0]!.verdict as { entailment: string; conflictsWith?: string }
     expect(verdict.entailment).toBe('fail')
     expect(verdict.conflictsWith).toBeUndefined()
+  })
+
+  // S21 · NC-exact 红线（红线#3 / A.6）在 Verifier 路：fail/not_co_true 的收紧 = 把 claim 判为负 —— 须 ≥1 条
+  // relevance='exact' 反向证据，否则拒判（收紧不落）+ 强制升级主编（ruling_refused）。仅时效不受此门约束。
+  it('NC-exact red line: a fail ruling on a claim with only SUPPORTING reverse evidence is REFUSED — no active→flagged, an escalation is generated, status stays active', async () => {
+    const { claimId } = await mkClaim({ status: 'active', relevance: 'supporting' })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'fail' })
+    const res = await runVerifier({ db, judge })
+
+    // patrol verdict still recorded (the judge ran), but the negative ruling did NOT tighten the claim.
+    expect(res.patrolled).toBe(1)
+    expect(res.transitions).toBe(0)
+    expect(res.ncExactRefusals).toBe(1)
+    expect(await statusOf(claimId)).toBe('active') // refused → NOT flagged
+
+    const refused = await getRefusedRulings(db)
+    expect(refused).toHaveLength(1)
+    expect(refused[0]!.payload.ruledAgainstClaimId).toBe(claimId)
+    expect(refused[0]!.payload.rulingKind).toBe('non_compliant') // fail → non_compliant
+    expect(refused[0]!.payload.path).toBe('verifier')
+    expect(res.outcomes[0]!.ncExactRefused?.eventId).toBe(refused[0]!.eventId)
+  })
+
+  it('NC-exact red line: a not_co_true ruling with only TANGENTIAL reverse evidence is REFUSED + escalated (refuted-kind)', async () => {
+    const { claimId } = await mkClaim({ status: 'active', relevance: 'tangential' })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'not_co_true' })
+    const res = await runVerifier({ db, judge })
+
+    expect(res.transitions).toBe(0)
+    expect(res.ncExactRefusals).toBe(1)
+    expect(await statusOf(claimId)).toBe('active')
+    const refused = await getRefusedRulings(db)
+    expect(refused).toHaveLength(1)
+    expect(refused[0]!.payload.rulingKind).toBe('refuted') // not_co_true → refuted
+  })
+
+  it('NC-exact red line: supplying an EXACT reverse proposition lets the same fail ruling PROCEED (active→flagged, no escalation)', async () => {
+    const { claimId } = await mkClaim({ status: 'active', relevance: 'exact' })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'fail' })
+    const res = await runVerifier({ db, judge })
+
+    expect(res.transitions).toBe(1)
+    expect(res.ncExactRefusals).toBe(0)
+    expect(await statusOf(claimId)).toBe('flagged') // exact reverse evidence → ruling proceeds
+    expect(await getRefusedRulings(db)).toHaveLength(0)
+  })
+
+  it('NC-exact red line: a flagged claim with only supporting evidence is NOT tightened to quarantined (refused) — only humans relax, agents only tighten WITH exact evidence', async () => {
+    const { claimId } = await mkClaim({ status: 'flagged', relevance: 'supporting' })
+    const res = await runVerifier({
+      db,
+      judge: makeFakeEntailmentJudge({ verdictOf: () => 'fail' }),
+    })
+    expect(res.transitions).toBe(0)
+    expect(res.ncExactRefusals).toBe(1)
+    expect(await statusOf(claimId)).toBe('flagged') // stays flagged — quarantine refused for lack of exact
+    expect(await getRefusedRulings(db)).toHaveLength(1)
+  })
+
+  it('NC-exact red line does NOT block a pure-staleness flag (staleness is decay, not a non_compliant/refuted ruling): supporting-only stale claim still flags', async () => {
+    const old = new Date(Date.now() - 800 * MS_PER_DAY) // > structured_spec half-life (730d)
+    const { claimId } = await mkClaim({ status: 'active', asOf: old, relevance: 'supporting' })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'pass' }) // entailment OK, only stale
+    const res = await runVerifier({ db, judge })
+
+    expect(res.outcomes[0]!.stale).toBe(true)
+    expect(res.transitions).toBe(1)
+    expect(res.ncExactRefusals).toBe(0) // staleness is not gated by NC-exact
+    expect(await statusOf(claimId)).toBe('flagged')
+    expect(await getRefusedRulings(db)).toHaveLength(0)
   })
 })

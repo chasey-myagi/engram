@@ -17,6 +17,7 @@
  */
 import {
   adjudicateConflict,
+  assertNcExactEvidence,
   escalateConflict,
   loadConflictSide,
   resolveConflict,
@@ -185,18 +186,47 @@ export async function runArbiter(
     }
     // 纯确定性阶梯：该信谁由它判，零 LLM。
     const adj = adjudicateConflict(sideA, sideB)
-    if (adj.outcome === 'winner') {
-      const persisted = await resolveConflict(deps.db, { a, b, adjudication: adj, byRole })
+    if (adj.outcome === 'winner' && adj.winnerId !== undefined && adj.loserId !== undefined) {
+      // NC-exact 红线（红线#3 / A.6）：机判自裁 = 把**败者**判为负（refuted），采信胜者。
+      // 落采信前**必过统一闸门**：胜者须有 ≥1 条 relevance='exact' 反向命题（明确反向、含定量否定）方可把败者判负。
+      // 无 exact 反向证据 → 拒判 + 强制升级主编（写 ruling_refused），**不**落 resolveConflict 的采信标记，
+      // 转而 escalate 把这对交给人裁（同 Verifier 路共用此一处闸门，零分叉）。
+      const gate = await assertNcExactEvidence(deps.db, {
+        ruledAgainstClaimId: adj.loserId,
+        reverseEvidenceClaimId: adj.winnerId, // Arbiter 路：反向命题在胜者的 exact 出处上。
+        rulingKind: 'refuted',
+        path: 'arbiter',
+        byRole,
+      })
+      if (gate.ok) {
+        const persisted = await resolveConflict(deps.db, { a, b, adjudication: adj, byRole })
+        const outcome: ArbiterOutcome = {
+          a,
+          b,
+          outcome: 'resolved',
+          ...(persisted.winnerId !== undefined ? { winnerId: persisted.winnerId } : {}),
+          ...(persisted.loserId !== undefined ? { loserId: persisted.loserId } : {}),
+          rung: adj.rung,
+          reason: adj.reason,
+        }
+        result.resolved += 1
+        result.outcomes.push(outcome)
+        return outcome
+      }
+      // 拒判：不落采信标记，升级主编（ruling_refused 已写）。改记一条 escalated 入主编队列，
+      // 让人用同一张优先级表 + ① 人工裁定手裁（红线#3：agent 缺 exact 反向证据无权把败者判负）。
+      const refuseReason =
+        `NC-exact red line refused machine adjudication: winner ${adj.winnerId} lacks a relevance='exact' ` +
+        `reverse proposition to rule loser ${adj.loserId} refuted (ladder rung '${adj.rung}'). Escalated to editor-in-chief.`
+      await escalateConflict(deps.db, { a, b, rung: 'human', reason: refuseReason, byRole })
       const outcome: ArbiterOutcome = {
         a,
         b,
-        outcome: 'resolved',
-        ...(persisted.winnerId !== undefined ? { winnerId: persisted.winnerId } : {}),
-        ...(persisted.loserId !== undefined ? { loserId: persisted.loserId } : {}),
-        rung: adj.rung,
-        reason: adj.reason,
+        outcome: 'escalated',
+        rung: 'human',
+        reason: refuseReason,
       }
-      result.resolved += 1
+      result.escalated += 1
       result.outcomes.push(outcome)
       return outcome
     }

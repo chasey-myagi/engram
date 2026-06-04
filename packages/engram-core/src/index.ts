@@ -208,3 +208,15 @@ export {
   type ConflictAdjudication,
   type ConflictPersistResult,
 } from './spi/conflict-arbiter.js'
+// S21 · NC-exact 红线统一闸门（红线#3 / A.6）：判 non_compliant/refuted 须 ≥1 条 relevance='exact' 反向证据，
+// 否则拒判 + 强制升级主编。Verifier 与 Arbiter 共用此一处闸门（无分叉）。
+export {
+  assertNcExactEvidence,
+  countExactProvenances,
+  getRefusedRulings,
+  RULING_REFUSED,
+  type NcExactGateResult,
+  type RefusedRulingKind,
+  type RulingRefusedPayload,
+  type RefusedRuling,
+} from './spi/nc-exact-gate.js'

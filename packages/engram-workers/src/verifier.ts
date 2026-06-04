@@ -20,6 +20,7 @@
  * 下一轮 cron 再来。整轮的非预期异常也不向上抛（返回部分结果）。
  */
 import {
+  assertNcExactEvidence,
   getSource,
   halfLifeDaysForKind,
   transitionClaim,
@@ -64,6 +65,11 @@ export interface PatrolOutcome {
   stale: boolean
   /** 本次状态迁移（无迁移则 null）。 */
   transition: { from: schema.ClaimStatus; to: schema.ClaimStatus } | null
+  /**
+   * 负判（fail/not_co_true 的收紧）被 NC-exact 红线（红线#3 / A.6）拒判：缺 ≥1 条 relevance='exact' 反向证据 →
+   * 拒判 + 强制升级主编（生成 ruling_refused 事件），收紧**未落**。记下事件 id 供审计。
+   */
+  ncExactRefused?: { eventId: string; exactCount: number }
   /** 跳过/异常原因（若有）。 */
   note?: string
 }
@@ -76,6 +82,8 @@ export interface VerifierResult {
   skipped: number
   /** 本轮触发的状态迁移数（晋升 / flag / quarantine）。 */
   transitions: number
+  /** 本轮因 NC-exact 红线拒判（缺 exact 反向证据）而**未落**的负判数 = 升级主编的 ruling_refused 事件数。 */
+  ncExactRefusals: number
   outcomes: PatrolOutcome[]
 }
 
@@ -194,9 +202,25 @@ async function findContradictingPeer(db: DB, claimId: string): Promise<string | 
   return alive.length > 0 ? alive[0]! : null
 }
 
+/** applyTransition 的结果：要么落了迁移（transition），要么负判被 NC-exact 红线拒判（refused），要么无事（都 null）。 */
+interface TransitionResult {
+  transition: { from: schema.ClaimStatus; to: schema.ClaimStatus } | null
+  /** 负判被红线#3 拒判（缺 exact 反向证据）→ 升级主编（ruling_refused），收紧未落。 */
+  refused: { eventId: string; exactCount: number } | null
+}
+
+const NO_OP: TransitionResult = { transition: null, refused: null }
+
 /**
- * 据 entailment 裁决 + 时效 + 当前状态，按 A.4 收紧/晋升一条 claim。返回迁移结果（无迁移 → null）。
+ * 据 entailment 裁决 + 时效 + 当前状态，按 A.4 收紧/晋升一条 claim。
  * 全经 transitionClaim（蓝边收紧由内核放行，放松边内核拒）。conf 门由 transitionClaim 自校（draft→active 需 conf≥0.5）。
+ *
+ * **NC-exact 红线（红线#3 / A.6）**：把 claim 判为负（entailment fail/not_co_true 驱动的收紧 active→flagged /
+ * flagged→quarantined）前**必过统一闸门 assertNcExactEvidence** —— 该 claim 须有 ≥1 条 relevance='exact' 反向证据
+ * （原文明确反向命题，含定量否定）。无则**拒判 + 强制升级主编**（写 ruling_refused），收紧**不落**。
+ *   - fail（疑似幻觉，出处推不出/与出处冲突）→ non_compliant 性质的负判。
+ *   - not_co_true（与他 claim 不可同真）→ refuted 性质的负判。
+ *   - **仅时效**驱动的收紧（entailment pass 但 stale）不是「判 claim 为负」，是时效衰减 flag，**不**过红线闸门。
  */
 async function applyTransition(
   db: DB,
@@ -204,38 +228,48 @@ async function applyTransition(
   entailment: EntailmentVerdict,
   stale: boolean,
   byRole: string,
-): Promise<{ from: schema.ClaimStatus; to: schema.ClaimStatus } | null> {
+): Promise<TransitionResult> {
   const supported = entailment === 'pass'
-  const tighten = entailment === 'fail' || entailment === 'not_co_true' || stale
+  const negativeRuling = entailment === 'fail' || entailment === 'not_co_true'
+  const tighten = negativeRuling || stale
 
   if (c.status === 'draft') {
     // draft：只有 entailment pass 才尝试晋升（真 entailmentPass 生产者，闭合 S13 合成桩）。conf<0.5 由 transitionClaim 拒（仍 draft）。
     // entailment fail 的 draft 不能 draft→flagged（A.4 非法）；留 draft 影子区，下轮再巡或交人。
-    if (!supported) return null
+    if (!supported) return NO_OP
     try {
-      return await transitionClaim(db, c.id, 'active', { by: byRole, entailmentPass: true })
+      const t = await transitionClaim(db, c.id, 'active', { by: byRole, entailmentPass: true })
+      return { transition: t, refused: null }
     } catch {
       // conf 未达门 / 并发已被改动 → 维持 draft，下轮再来（不崩）。
-      return null
+      return NO_OP
     }
   }
 
-  if (c.status === 'active') {
-    if (tighten) {
-      return transitionClaim(db, c.id, 'flagged', { by: byRole })
+  if (c.status !== 'active' && c.status !== 'flagged') return NO_OP
+
+  if (!tighten) return NO_OP // pass 且不 stale → 保持现状（放松仅人可做）
+
+  // 负判（fail/not_co_true）：先过 NC-exact 统一闸门——无 exact 反向证据则拒判 + 升级主编，收紧不落。
+  // 仅时效（pass+stale）跳过闸门：时效衰减不是「判 claim 为负」。
+  if (negativeRuling) {
+    const gate = await assertNcExactEvidence(db, {
+      ruledAgainstClaimId: c.id,
+      // Verifier 路：反向命题在目标 claim 自己的 exact 出处上（A.6：exact 含定量否定）。
+      rulingKind: entailment === 'not_co_true' ? 'refuted' : 'non_compliant',
+      path: 'verifier',
+      byRole,
+    })
+    if (!gate.ok) {
+      // 拒判：收紧不落，升级主编（事件已由闸门写）。红线#3：agent 拿不到 exact 反向证据，无权把 claim 判负。
+      return { transition: null, refused: { eventId: gate.eventId, exactCount: gate.exactCount } }
     }
-    return null // pass 且不 stale → 保持 active
   }
 
-  if (c.status === 'flagged') {
-    // 已被 flag 的 claim 再巡仍无支撑（fail/not_co_true/stale）→ 收紧到 quarantined。pass 则保持 flagged（放松仅人可做）。
-    if (tighten) {
-      return transitionClaim(db, c.id, 'quarantined', { by: byRole })
-    }
-    return null
-  }
-
-  return null
+  // 闸门放行（或仅时效）→ 落收紧：active→flagged / flagged→quarantined。
+  const to: schema.ClaimStatus = c.status === 'active' ? 'flagged' : 'quarantined'
+  const t = await transitionClaim(db, c.id, to, { by: byRole })
+  return { transition: t, refused: null }
 }
 
 /**
@@ -253,6 +287,7 @@ export async function runVerifier(
     patrolled: 0,
     skipped: 0,
     transitions: 0,
+    ncExactRefusals: 0,
     outcomes: [],
   }
 
@@ -309,9 +344,16 @@ export async function runVerifier(
       await writePatrolVerdict(deps.db, { claimId: c.id, byRole, verdict })
       result.patrolled += 1
 
-      const transition = await applyTransition(deps.db, c, entailment, stale, byRole)
+      const { transition, refused } = await applyTransition(deps.db, c, entailment, stale, byRole)
       if (transition) result.transitions += 1
-      result.outcomes.push({ claimId: c.id, entailment, stale, transition })
+      if (refused) result.ncExactRefusals += 1
+      result.outcomes.push({
+        claimId: c.id,
+        entailment,
+        stale,
+        transition,
+        ...(refused != null ? { ncExactRefused: refused } : {}),
+      })
     } catch (err) {
       // 单条失败（LLM 异常 / 事务冲突）→ 跳过本条，下轮重试。不崩、不阻塞其它 claim。
       result.skipped += 1

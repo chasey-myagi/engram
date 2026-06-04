@@ -1,0 +1,1 @@
+ALTER TYPE "public"."metrics_event_kind" ADD VALUE 'ruling_refused';
