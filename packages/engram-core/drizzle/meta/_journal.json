@@ -22,6 +22,13 @@
       "when": 1780542359113,
       "tag": "0002_dry_sir_ram",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1780544399993,
+      "tag": "0003_naive_nextwave",
+      "breakpoints": true
     }
   ]
 }
