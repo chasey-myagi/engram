@@ -27,6 +27,7 @@ import { applyG, rawFromStoredFactors, type StoredConfidence } from '../confiden
 import type { DB } from '../db/client.js'
 import { claim, claimProvenance, type ClaimStatus } from '../db/schema.js'
 import { computeEntailmentFactor } from '../verifier/patrol-verdict.js'
+import { computeHumanReviewFactor } from '../editor/human-review.js'
 import { isHumanRole } from './reflux.js'
 
 /** draft→active 的连续 confidence 晋升门（A.4）：蓝边 promote 需 conf≥此值 ∧ entailment 通过。 */
@@ -104,8 +105,15 @@ export async function transitionClaim(
         // 活值冲突一致性留作后续与 recall 的 S8 实时口径对齐）。
         // S17：f2 entailment 按 recall 同款实时口径——接到该 claim 最新 patrol 裁决（Verifier 在调本迁移前刚写入），
         // 让「entailment pass 抬 f2」真正参与 conf≥0.5 判据（闭合 S13 合成桩；无 patrol 则中性 0.5，与存档一致、行为不变）。
+        // S22：f1 humanReview 同款实时口径——接到该 claim 最新主编人审。蓝边 promote 通常发生在人审之前（f1=中性 0、
+        // 与存档一致、行为不变）；接它只为与 recall 重算口径一致，绝不让 agent 借它放松（红线#2：人审只人能投）。
+        const liveHumanReview = await computeHumanReviewFactor(tx, claimId)
         const liveEntailment = await computeEntailmentFactor(tx, claimId)
-        const factors = { ...stored.factors, entailment: liveEntailment }
+        const factors = {
+          ...stored.factors,
+          humanReview: liveHumanReview,
+          entailment: liveEntailment,
+        }
         const conf = applyG(
           rawFromStoredFactors(factors, std.factorWeights),
           stored.calibrationVersion,

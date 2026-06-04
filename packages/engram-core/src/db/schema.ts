@@ -62,14 +62,17 @@ export const verificationKind = pgEnum('verification_kind', [
  * 「escalated（升级主编队列，待人用同一张优先级表 + ① 人工裁定）」。
  * ruling_refused=NC-exact 红线拒判(S21)：判 claim 为 non_compliant/refuted 但缺 ≥1 条 relevance='exact' 反向证据 →
  * 拒判 + 强制升级主编（红线#3）；payload 记被拒的负判 + 承载反向命题的 claim + 路径(verifier/arbiter)，待人核验后才落终判。
- * 沿 source_human_pending/conflict_adjudicated 的「事件即标记」式样，不新增 claim_status（A.1 冻结），
- * 故拒判/升级**不**改 claim 状态——红线#2「只人能放松」由此天然守住。
+ * human_overturn=主编翻案留痕(S22)：主编放松了 agent 的判决（解隔离/赦免/回滚，或驳回 agent 晋升的 claim），
+ * append-only 事件——S26 恒温器的 falseQuarantineRate（人工翻案的误隔离率）由它聚合而来，绝不进任何在线计分。
+ * 全沿 source_human_pending/conflict_adjudicated 的「事件即标记」式样，不新增 claim_status（A.1 冻结），
+ * 故这些留痕**不**改 claim 状态——红线#2「只人能放松」由此天然守住。
  */
 export const metricsEventKind = pgEnum('metrics_event_kind', [
   'gap_recorded',
   'source_human_pending',
   'conflict_adjudicated',
   'ruling_refused',
+  'human_overturn',
 ])
 /** L5 缺口候选状态：queued（S11 入队）→ promoted（过 A1 免疫晋升 golden）/ rejected（毒株被免疫拒，终态）。 */
 export const l5CandidateStatus = pgEnum('l5_candidate_status', ['queued', 'promoted', 'rejected'])

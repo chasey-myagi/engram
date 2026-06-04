@@ -43,6 +43,7 @@ import {
 } from '../db/schema.js'
 import { latestEntailmentFactors } from '../verifier/patrol-verdict.js'
 import { latestUsageCorrectFactors } from '../harvest/usage-correct.js'
+import { latestHumanReviewFactors } from '../editor/human-review.js'
 import { recordGap } from './metrics.js'
 
 // 内核消费门常量定义在命门模块；这里 re-export 保持既有 import 路径（index / adapter / bidding）不变。
@@ -216,6 +217,9 @@ export async function recallClaims(
   // S19 f4 实时口径：召回时把 usageCorrect 因子接到候选 claim 的 usage_truth 独立门控统计（observed_correctness→f4；
   // 无 usage 则不覆盖、沿用存档值），与 f2 同款实时口径（不吃写时快照、反映最新使用真值）。一次批量查回。
   const usageCorrectByClaim = await latestUsageCorrectFactors(db, candidateIds)
+  // S22 f1 实时口径：召回时把 humanReview 因子接到候选 claim 的最新主编人审（Approve→1 / Reject→0；
+  // 无人审则不覆盖、沿用存档值），与 f2/f4 同款实时口径（不吃写时快照、反映最新人审）。一次批量查回。
+  const humanReviewByClaim = await latestHumanReviewFactors(db, candidateIds)
 
   // 召回瞬间：用活动权重对存档因子重算 raw（配置态变更即刻生效）+ 实时 conflictDecay，再现算 g → value。
   const takenAt = new Date()
@@ -226,14 +230,18 @@ export async function recallClaims(
       const contra = contradictsByClaim.get(c.id)
       const activeContradicts = contra ? contra.size : 0
       const cDecay = conflictDecay(activeContradicts) // 实时矛盾边数 → 惩罚
-      // f2/f4 实时覆盖：有 patrol/usage 则用其值，否则沿用存档因子（其余因子不动）。
+      // f1/f2/f4 实时覆盖：有人审/patrol/usage 则用其值，否则沿用存档因子（其余因子不动）。
+      const liveHumanReview = humanReviewByClaim.get(c.id)
       const liveEntailment = entailmentByClaim.get(c.id)
       const liveUsageCorrect = usageCorrectByClaim.get(c.id)
       const factors: ConfidenceFactorBreakdown =
-        liveEntailment === undefined && liveUsageCorrect === undefined
+        liveHumanReview === undefined &&
+        liveEntailment === undefined &&
+        liveUsageCorrect === undefined
           ? stored.factors
           : {
               ...stored.factors,
+              ...(liveHumanReview === undefined ? {} : { humanReview: liveHumanReview }),
               ...(liveEntailment === undefined ? {} : { entailment: liveEntailment }),
               ...(liveUsageCorrect === undefined ? {} : { usageCorrect: liveUsageCorrect }),
             }
