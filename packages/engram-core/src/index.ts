@@ -75,6 +75,7 @@ export {
   METRICS_EVENT_KINDS,
   type GapPayload,
   type MetricsEvent,
+  type GapEvent,
 } from './spi/metrics.js'
 export {
   runGapQuestion,

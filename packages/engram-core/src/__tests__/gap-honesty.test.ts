@@ -6,13 +6,17 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { CALIBRATION_IDENTITY, DEFAULT_WEIGHTS } from '../confidence/confidence.js'
+import {
+  CALIBRATION_IDENTITY,
+  DEFAULT_WEIGHTS,
+  KERNEL_CONFIDENCE_FLOOR,
+} from '../confidence/confidence.js'
 import { createDb, type DB } from '../db/client.js'
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { claim, claimProvenance } from '../db/schema.js'
 import { addSource } from '../spi/append-claim.js'
 import { recallClaims } from '../spi/recall-claims.js'
-import { GAP_RECORDED, getGapEvents, getMetricsEvents, type GapPayload } from '../spi/metrics.js'
+import { GAP_RECORDED, getGapEvents, getMetricsEvents } from '../spi/metrics.js'
 import { L5_GAP_NAMESPACE, L5_GAP_QUESTIONS, runGapQuestion, runL5Suite } from '../eval/l5-gap.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
@@ -72,8 +76,8 @@ const JUST_BELOW_FLOOR = {
   usageCorrect: 0,
 } // base = 0.3·0.55 + 0.3·0.5 + 0.15·0.5 = 0.39 ⇒ value 0.39 (just under the 0.4 floor)
 
-/** Seed a recallable active claim with an explicit embedding vector + factor profile + one exact provenance. */
-async function seedActive(
+/** Insert an active claim with an explicit embedding vector + factor profile (no provenance attached). */
+async function seedActiveClaimRow(
   text: string,
   vector: number[],
   profile: typeof ABOVE_FLOOR,
@@ -96,6 +100,16 @@ async function seedActive(
     embedding: vector,
     embeddingVersion: embedder.version,
   })
+  return id
+}
+
+/** Seed a recallable active claim with an explicit embedding vector + factor profile + one exact provenance. */
+async function seedActive(
+  text: string,
+  vector: number[],
+  profile: typeof ABOVE_FLOOR,
+): Promise<string> {
+  const id = await seedActiveClaimRow(text, vector, profile)
   const { sourceId } = await aSource()
   await db
     .insert(claimProvenance)
@@ -122,11 +136,13 @@ describe('S10 gap honesty signal + L5 blind-spot suite (A.9)', () => {
     const q = 'totally unknown subject with no claims in the kb'
     const hits = await recallClaims(db, embedder, q)
     expect(hits).toHaveLength(0)
-    const [gap] = await getGapEvents(db, q)
-    expect(gap!.queryText).toBe(q)
-    const p = gap!.payload as unknown as GapPayload
+    const gaps = await getGapEvents(db, q)
+    expect(gaps).toHaveLength(1) // exactly one gap per recall — no double-write
+    const p = gaps[0]!.payload
+    expect(gaps[0]!.queryText).toBe(q)
     expect(p.candidateCount).toBe(0)
     expect(p.gatedCount).toBe(0)
+    expect(p.floor).toBe(KERNEL_CONFIDENCE_FLOOR) // default consumption floor faithfully recorded
     expect(p.embedderVersion).toBe(embedder.version)
   })
 
@@ -139,11 +155,52 @@ describe('S10 gap honesty signal + L5 blind-spot suite (A.9)', () => {
     const hits = await recallClaims(db, embedder, q)
     expect(hits).toHaveLength(0) // door is behind the floor, not absent
 
-    const [gap] = await getGapEvents(db, q)
-    expect(gap).toBeDefined()
-    const p = gap!.payload as unknown as GapPayload
+    const gaps = await getGapEvents(db, q)
+    expect(gaps).toHaveLength(1)
+    const p = gaps[0]!.payload
     expect(p.candidateCount).toBeGreaterThanOrEqual(1) // similarity DID surface it
-    expect(p.gatedCount).toBe(0) // …but nothing cleared the floor ⇒ honest gap
+    expect(p.gatedCount).toBe(0) // …but nothing cleared the floor ⇒ honest gap (door-behind sub-kind)
+  })
+
+  it('D1 fallback gap: an above-floor candidate with NO provenance is dropped and yields an honest gap with gatedCount ≥ 1 (distinct from door-behind)', async () => {
+    const q = 'spec lookup whose only answer lacks any provenance'
+    const qVec = await embedder.embed(q, 'query')
+    // above the floor AND a similarity candidate, but deliberately zero provenance rows ⇒ recall drops it (D1 兜底)
+    await seedActiveClaimRow('the answer exists but has no provenance', qVec, ABOVE_FLOOR)
+
+    const hits = await recallClaims(db, embedder, q)
+    expect(hits).toHaveLength(0) // no-provenance claim never surfaces (D1)
+
+    const gaps = await getGapEvents(db, q)
+    expect(gaps).toHaveLength(1)
+    const p = gaps[0]!.payload
+    expect(p.candidateCount).toBeGreaterThanOrEqual(1)
+    expect(p.gatedCount).toBeGreaterThanOrEqual(1) // it CLEARED the floor (gated) but was dropped for no provenance
+  })
+
+  it('the recorded floor reflects a consumer-tightened ctx.confidenceFloor (the blind-spot stream attributes the actual gate)', async () => {
+    const q = 'unanswerable query asked under a tightened floor'
+    await recallClaims(db, embedder, q, { confidenceFloor: 0.7 })
+    const gaps = await getGapEvents(db, q)
+    expect(gaps).toHaveLength(1)
+    expect(gaps[0]!.payload.floor).toBe(0.7) // not the kernel 0.4 — the consumer raised it and that is what was applied
+  })
+
+  it('mixed population still recalls (no gap): one above-floor + one below-floor candidate ⇒ a hit, no whiteout', async () => {
+    const q = 'mixed population query'
+    const qVec = await embedder.embed(q, 'query')
+    const good = await seedActive('mixed population strong answer', qVec, ABOVE_FLOOR)
+    await seedActive('mixed population weak answer', qVec, JUST_BELOW_FLOOR)
+
+    const hits = await recallClaims(db, embedder, q)
+    expect(hits.map((r) => r.claim.id)).toEqual([good]) // only the above-floor one
+    expect(await getGapEvents(db, q)).toHaveLength(0) // gap fires only on total whiteout, not partial
+  })
+
+  it('a very long query records its gap without throwing (hash index, not the 8191-byte btree limit)', async () => {
+    const q = 'x'.repeat(20_000) // far past the btree single-entry limit; agent-native KBs pass long context as query
+    await expect(recallClaims(db, embedder, q)).resolves.toHaveLength(0) // must not throw on the metrics write
+    expect(await getGapEvents(db, q)).toHaveLength(1) // the blind-spot signal still lands on the extreme input
   })
 
   it('control: a real above-floor answer recalls normally and records NO gap', async () => {
@@ -211,7 +268,9 @@ describe('S10 gap honesty signal + L5 blind-spot suite (A.9)', () => {
     const desc = await getGapEvents(db)
     expect(asc).toHaveLength(3)
     expect(desc).toHaveLength(3)
-    // a dropped/reversed orderBy on either side breaks this: desc must be asc reversed
+    // A dropped/reversed orderBy on either side breaks this: desc must be asc reversed. The secondary
+    // id tiebreaker (both sides) is what makes "asc reversed === desc" deterministic even if two inserts
+    // share a created_at — don't simplify the orderBy to created_at alone or this reintroduces flakiness.
     expect(desc.map((e) => e.id)).toEqual(asc.map((e) => e.id).reverse())
     // and ascending really is non-decreasing in time
     expect(asc[0]!.createdAt.getTime()).toBeLessThanOrEqual(asc[2]!.createdAt.getTime())

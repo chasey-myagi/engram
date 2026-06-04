@@ -8,4 +8,4 @@ CREATE TABLE "metrics_events" (
 );
 --> statement-breakpoint
 CREATE INDEX "idx_metrics_events_kind_created" ON "metrics_events" USING btree ("kind","created_at");--> statement-breakpoint
-CREATE INDEX "idx_metrics_events_query" ON "metrics_events" USING btree ("query_text");
+CREATE INDEX "idx_metrics_events_query" ON "metrics_events" USING hash ("query_text");

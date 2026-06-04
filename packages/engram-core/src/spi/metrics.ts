@@ -12,10 +12,11 @@ import { randomUUID } from 'node:crypto'
 import { and, asc, desc, eq } from 'drizzle-orm'
 
 import type { DB } from '../db/client.js'
-import { metricsEvents, type MetricsEventKind } from '../db/schema.js'
+import { metricsEvents, metricsEventKind, type MetricsEventKind } from '../db/schema.js'
 
 export const GAP_RECORDED = 'gap_recorded' as const satisfies MetricsEventKind
-export const METRICS_EVENT_KINDS = ['gap_recorded'] as const satisfies readonly MetricsEventKind[]
+/** 全部事件类别，从 pgEnum 的单一真相源派生 —— 将来加新 kind 不会与此常量悄悄漂移。 */
+export const METRICS_EVENT_KINDS: readonly MetricsEventKind[] = metricsEventKind.enumValues
 
 /** gap_recorded 的诊断负载：区分「门后」(候选有、全在门下) 与「无候选」两种盲点，纯离线分析、不计分。 */
 export interface GapPayload {
@@ -46,6 +47,41 @@ function toMetricsEvent(row: typeof metricsEvents.$inferSelect): MetricsEvent {
     payload: (row.payload ?? {}) as Record<string, unknown>,
     createdAt: row.createdAt,
   }
+}
+
+/** gap_recorded 一行的强类型读出形状（payload 已校验为 GapPayload，queryText 必非空）。 */
+export interface GapEvent {
+  id: string
+  queryText: string
+  payload: GapPayload
+  createdAt: Date
+}
+
+function isGapPayload(p: unknown): p is GapPayload {
+  if (typeof p !== 'object' || p === null) return false
+  const o = p as Record<string, unknown>
+  return (
+    typeof o.candidateCount === 'number' &&
+    typeof o.gatedCount === 'number' &&
+    typeof o.floor === 'number' &&
+    typeof o.embedderVersion === 'string'
+  )
+}
+
+/**
+ * 向 usage_truth 读法看齐的 fail-loud 解读：gap_recorded 的写者唯一（recall→recordGap）、形状锁定，
+ * 但读侧仍兜一道——万一混入坏行/手工行，宁可炸，也绝不吐出 candidateCount=undefined 的坏事件污染 L5 评分。
+ */
+function toGapEvent(row: typeof metricsEvents.$inferSelect): GapEvent {
+  if (row.queryText == null) {
+    throw new Error(`metrics: gap_recorded row ${row.id} has a null query_text`)
+  }
+  if (!isGapPayload(row.payload)) {
+    throw new Error(
+      `metrics: gap_recorded row ${row.id} carries a malformed payload ${JSON.stringify(row.payload)}`,
+    )
+  }
+  return { id: row.id, queryText: row.queryText, payload: row.payload, createdAt: row.createdAt }
 }
 
 /**
@@ -81,7 +117,7 @@ export async function getMetricsEvents(db: DB, kind?: MetricsEventKind): Promise
  * 取某条 query 的 gap 事件（不传 query 则取全部 gap），按时间**降序**（最新在前）。
  * 评测谐波用「召回前后该 query 的 gap 计数是否增加」来判定本次召回是否落了盲点信号。
  */
-export async function getGapEvents(db: DB, queryText?: string): Promise<MetricsEvent[]> {
+export async function getGapEvents(db: DB, queryText?: string): Promise<GapEvent[]> {
   const where =
     queryText === undefined
       ? eq(metricsEvents.kind, GAP_RECORDED)
@@ -91,5 +127,5 @@ export async function getGapEvents(db: DB, queryText?: string): Promise<MetricsE
     .from(metricsEvents)
     .where(where)
     .orderBy(desc(metricsEvents.createdAt), desc(metricsEvents.id))
-  return rows.map(toMetricsEvent)
+  return rows.map(toGapEvent)
 }

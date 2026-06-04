@@ -2,8 +2,9 @@
  * A1/L5 盲点考卷（A.9，S10）—— 给知识库的「不知道」打分。评测=消费：每题只走 Consumer SPI 的 recall_claims，
  * **没有任何评测专用代码路径**。一题的金标准答案恰是 {recall 返回 [] 且落了一条 gap_recorded 事件}。
  *
- * 隔离命名空间：L5 题是冻结的评测夹具、**绝不**作为 claim 写进库，故 recall 结构上不可能召回它们
- * （命名空间隔离 = 题不在 claim 存储里）。题是「库该不知道」的问题；真有了越门答案，该题即从 gap 翻成正常召回
+ * 隔离来自「从不写入」而非某个字符串：L5 题是冻结的评测夹具、**绝不**经写路径落成 claim，runGapQuestion 只调
+ * recallClaims（召回只读 claim 存储）—— 故 recall 结构上不可能召回它们。L5_GAP_NAMESPACE 只是给这批夹具的
+ * 标签（留作将来用），不承重隔离。题是「库该不知道」的问题；真有了越门答案，该题即从 gap 翻成正常召回
  * （活的考卷、非硬编码）—— 见 runGapQuestion。
  */
 import type { Embedder } from '../embedding/embedder.js'
@@ -11,7 +12,7 @@ import type { DB } from '../db/client.js'
 import { getGapEvents } from '../spi/metrics.js'
 import { recallClaims, type RecallContext } from '../spi/recall-claims.js'
 
-/** 评测题所在的隔离命名空间标识（题是夹具、永不进 claim 存储 ⇒ recall 永不召回）。 */
+/** 这批 L5 夹具的命名空间标签（纯标注、不承重隔离；真正的隔离 = 它们从不被写成 claim ⇒ recall 永不召回）。 */
 export const L5_GAP_NAMESPACE = 'eval:l5-gap' as const
 
 export interface L5Question {
@@ -97,6 +98,9 @@ export interface L5SuiteReport {
  * 跑一道题：只调 recall_claims（真 SPI、零专用路径），用「召回前后该 query 的 gap 计数增量」判定本次
  * 是否落了诚实信号。recalled===0 且 gapRecorded ⇒ 答对（库正确交白卷）。
  * 一旦库里有了越门答案，recalled≥1 且本次不再落 gap ⇒ 该题从 gap 翻成正常召回（AC5：活考卷）。
+ *
+ * 注意：增量判定假设**同一 query 无并发召回**（否则别处的 gap 写入会抬高计数、误判本次落了信号）。
+ * 评测按 runL5Suite 顺序跑，满足此前提；若将来并发跑同题，需让 recall 直接回传本次 gap id 而非靠计数差。
  */
 export async function runGapQuestion(
   db: DB,

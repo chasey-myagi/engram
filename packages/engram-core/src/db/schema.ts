@@ -190,10 +190,13 @@ export const metricsEvents = pgTable(
       .default(sql`'{}'::jsonb`),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  // 离线聚合按 kind + 时间扫；按 query 反查盲点频次按 query_text。
+  // 离线聚合按 kind + 时间扫（btree）；按 query 反查盲点频次按 query_text。
+  // query_text 用 **hash** 索引而非 btree：query 是 agent 原生输入、长度无界，btree 单项上限 ~8191B
+  // 会让够长的 query 在 recordGap 处 INSERT 直接抛错、连带打断正常召回（盲点信号恰在最该记录时记不下）。
+  // hash 只索引哈希码、无大小限制，且 getGapEvents 只做等值反查（= 命中），正合 hash 的能力边界。
   (t) => [
     index('idx_metrics_events_kind_created').on(t.kind, t.createdAt),
-    index('idx_metrics_events_query').on(t.queryText),
+    index('idx_metrics_events_query').using('hash', t.queryText),
   ],
 )
 
