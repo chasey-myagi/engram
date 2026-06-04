@@ -215,12 +215,14 @@ const NO_OP: TransitionResult = { transition: null, refused: null }
  * 据 entailment 裁决 + 时效 + 当前状态，按 A.4 收紧/晋升一条 claim。
  * 全经 transitionClaim（蓝边收紧由内核放行，放松边内核拒）。conf 门由 transitionClaim 自校（draft→active 需 conf≥0.5）。
  *
- * **NC-exact 红线（红线#3 / A.6）**：把 claim 判为负（entailment fail/not_co_true 驱动的收紧 active→flagged /
- * flagged→quarantined）前**必过统一闸门 assertNcExactEvidence** —— 该 claim 须有 ≥1 条 relevance='exact' 反向证据
- * （原文明确反向命题，含定量否定）。无则**拒判 + 强制升级主编**（写 ruling_refused），收紧**不落**。
- *   - fail（疑似幻觉，出处推不出/与出处冲突）→ non_compliant 性质的负判。
- *   - not_co_true（与他 claim 不可同真）→ refuted 性质的负判。
- *   - **仅时效**驱动的收紧（entailment pass 但 stale）不是「判 claim 为负」，是时效衰减 flag，**不**过红线闸门。
+ * **NC-exact 红线（红线#3 / A.6）—— 只管 `not_co_true`，且反向证据在**矛盾对端 peer**上，绝非目标自身**：
+ *   - `not_co_true`（与某条 peer 不可同真）= 把目标判 **refuted** —— 必过统一闸门 assertNcExactEvidence：
+ *     反向命题在**矛盾对端 peer**（contradictingPeerId）的 exact 出处上（A.6：exact 含定量否定）。
+ *     peer 无 exact / 根本找不到 peer（null）→ **拒判 + 强制升级主编**（写 ruling_refused），收紧**不落**。
+ *     （目标 claim 自己的 exact 出处是「支持它」的证据，永远不是「反对它」的反向证据 —— 故绝不拿自身过闸门。）
+ *   - `fail`（疑似幻觉，出处推不出/缺自身支撑）→ **不过闸门**：它不是「有反向命题在反对 claim」，而是缺支撑的
+ *     可疑 flag（蓝边收紧、可被人放松）。active→flagged / flagged→quarantined 直接落，无需反向证据。
+ *   - **仅时效**驱动的收紧（entailment pass 但 stale）也不过闸门：时效衰减不是「判 claim 为负」。
  */
 async function applyTransition(
   db: DB,
@@ -228,10 +230,14 @@ async function applyTransition(
   entailment: EntailmentVerdict,
   stale: boolean,
   byRole: string,
+  /** not_co_true 的矛盾对端 peer（承载反向命题者）；非 not_co_true / 找不到对端 → null。 */
+  contradictingPeerId: string | null,
 ): Promise<TransitionResult> {
   const supported = entailment === 'pass'
-  const negativeRuling = entailment === 'fail' || entailment === 'not_co_true'
-  const tighten = negativeRuling || stale
+  // counterAssertion = 唯一需「反向命题」的负判：与某条 peer 不可同真 → 判目标 refuted（反向证据在 peer 上）。
+  // fail（幻觉/缺支撑）不是反向命题判负，是缺支撑 flag；纯时效是衰减。两者都不过闸门。
+  const counterAssertion = entailment === 'not_co_true'
+  const tighten = entailment === 'fail' || counterAssertion || stale
 
   if (c.status === 'draft') {
     // draft：只有 entailment pass 才尝试晋升（真 entailmentPass 生产者，闭合 S13 合成桩）。conf<0.5 由 transitionClaim 拒（仍 draft）。
@@ -250,23 +256,24 @@ async function applyTransition(
 
   if (!tighten) return NO_OP // pass 且不 stale → 保持现状（放松仅人可做）
 
-  // 负判（fail/not_co_true）：先过 NC-exact 统一闸门——无 exact 反向证据则拒判 + 升级主编，收紧不落。
-  // 仅时效（pass+stale）跳过闸门：时效衰减不是「判 claim 为负」。
-  if (negativeRuling) {
+  // not_co_true：判目标与 peer 不可同真 = 判目标 refuted —— 先过 NC-exact 统一闸门。
+  // 反向证据在**矛盾对端 peer**上：peer 无 exact / 无 peer（null）则拒判 + 升级主编，收紧不落。
+  // fail（缺支撑 flag）与仅时效（衰减）不过闸门：它们不是「反向命题判负」。
+  if (counterAssertion) {
     const gate = await assertNcExactEvidence(db, {
       ruledAgainstClaimId: c.id,
-      // Verifier 路：反向命题在目标 claim 自己的 exact 出处上（A.6：exact 含定量否定）。
-      rulingKind: entailment === 'not_co_true' ? 'refuted' : 'non_compliant',
+      reverseEvidenceClaimId: contradictingPeerId, // 反向命题在矛盾对端；无对端 → null → 闸门拒判升级人
+      rulingKind: 'refuted',
       path: 'verifier',
       byRole,
     })
     if (!gate.ok) {
-      // 拒判：收紧不落，升级主编（事件已由闸门写）。红线#3：agent 拿不到 exact 反向证据，无权把 claim 判负。
+      // 拒判：收紧不落，升级主编（事件已由闸门写）。红线#3：拿不到对端 exact 反向证据，无权把 claim 判 refuted。
       return { transition: null, refused: { eventId: gate.eventId, exactCount: gate.exactCount } }
     }
   }
 
-  // 闸门放行（或仅时效）→ 落收紧：active→flagged / flagged→quarantined。
+  // 闸门放行（not_co_true 有对端 exact）/ fail / 仅时效 → 落收紧：active→flagged / flagged→quarantined。
   const to: schema.ClaimStatus = c.status === 'active' ? 'flagged' : 'quarantined'
   const t = await transitionClaim(db, c.id, to, { by: byRole })
   return { transition: t, refused: null }
@@ -344,7 +351,16 @@ export async function runVerifier(
       await writePatrolVerdict(deps.db, { claimId: c.id, byRole, verdict })
       result.patrolled += 1
 
-      const { transition, refused } = await applyTransition(deps.db, c, entailment, stale, byRole)
+      // not_co_true 的反向证据落在矛盾对端 peer（conflictsWith）的 exact 出处上 —— 同一个 peer 既进 patrol 信号、
+      // 又作 NC-exact 闸门的 reverseEvidenceClaimId（绝不拿目标自身当反向证据）。fail/纯时效不需 peer（不过闸门）。
+      const { transition, refused } = await applyTransition(
+        deps.db,
+        c,
+        entailment,
+        stale,
+        byRole,
+        conflictsWith,
+      )
       if (transition) result.transitions += 1
       if (refused) result.ncExactRefusals += 1
       result.outcomes.push({

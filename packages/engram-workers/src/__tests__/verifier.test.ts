@@ -326,60 +326,97 @@ describe('S17 Verifier worker (D3 patrol: 函数/统计 + 点状一次 LLM) — 
     expect(verdict.conflictsWith).toBeUndefined()
   })
 
-  // S21 · NC-exact 红线（红线#3 / A.6）在 Verifier 路：fail/not_co_true 的收紧 = 把 claim 判为负 —— 须 ≥1 条
-  // relevance='exact' 反向证据，否则拒判（收紧不落）+ 强制升级主编（ruling_refused）。仅时效不受此门约束。
-  it('NC-exact red line: a fail ruling on a claim with only SUPPORTING reverse evidence is REFUSED — no active→flagged, an escalation is generated, status stays active', async () => {
-    const { claimId } = await mkClaim({ status: 'active', relevance: 'supporting' })
+  // S21 · NC-exact 红线（红线#3 / A.6）在 Verifier 路 —— 反向证据落在**矛盾对端 peer**上，绝非目标自身：
+  //   not_co_true（与某 peer 不可同真）= 判目标 refuted → 须该 peer 有 ≥1 条 relevance='exact' 反向命题，
+  //     否则拒判（收紧不落）+ 强制升级主编（ruling_refused）。找不到对端（无 contradicts 边）同样拒判。
+  //   fail（幻觉/缺自身支撑）不是反向命题判负，是缺支撑的可疑 flag → 不过闸门，直接收紧。纯时效同理不过闸门。
+  it('NC-exact: a fail (hallucination) ruling is NOT gated — it is an absence-of-support flag, not a counter-assertion; active→flagged proceeds with NO exact reverse evidence and NO escalation', async () => {
+    const { claimId } = await mkClaim({ status: 'active', relevance: 'supporting' }) // own tier irrelevant for fail
     const judge = makeFakeEntailmentJudge({ verdictOf: () => 'fail' })
     const res = await runVerifier({ db, judge })
 
-    // patrol verdict still recorded (the judge ran), but the negative ruling did NOT tighten the claim.
     expect(res.patrolled).toBe(1)
+    expect(res.transitions).toBe(1) // a hallucination is suspect → blue-edge tighten flags it freely
+    expect(res.ncExactRefusals).toBe(0) // NOT a non_compliant/refuted counter-assertion → ungated
+    expect(await statusOf(claimId)).toBe('flagged')
+    expect(await getRefusedRulings(db)).toHaveLength(0)
+  })
+
+  it('NC-exact: a not_co_true ruling whose contradicting PEER carries only SUPPORTING (no exact) reverse evidence is REFUSED + escalated (refuted-kind); target stays active', async () => {
+    const target = await mkClaim({ status: 'active', claimText: 'k p A', relevance: 'supporting' })
+    // the reverse proposition lives on the PEER — but it is only supporting, so the ruling must be refused.
+    const peer = await mkClaim({ status: 'active', claimText: 'k p B', relevance: 'supporting' })
+    await db.insert(schema.relation).values({
+      id: randomUUID(),
+      fromClaim: target.claimId,
+      toClaim: peer.claimId,
+      type: 'contradicts',
+    })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'not_co_true' })
+    const res = await verifyEnqueued({ db, judge }, [target.claimId]) // patrol only the target
+
     expect(res.transitions).toBe(0)
     expect(res.ncExactRefusals).toBe(1)
-    expect(await statusOf(claimId)).toBe('active') // refused → NOT flagged
-
+    expect(await statusOf(target.claimId)).toBe('active') // refused → NOT flagged
     const refused = await getRefusedRulings(db)
     expect(refused).toHaveLength(1)
-    expect(refused[0]!.payload.ruledAgainstClaimId).toBe(claimId)
-    expect(refused[0]!.payload.rulingKind).toBe('non_compliant') // fail → non_compliant
+    expect(refused[0]!.payload.ruledAgainstClaimId).toBe(target.claimId)
+    expect(refused[0]!.payload.reverseEvidenceClaimId).toBe(peer.claimId) // the PEER was checked, NEVER self
+    expect(refused[0]!.payload.rulingKind).toBe('refuted') // not_co_true → refuted
     expect(refused[0]!.payload.path).toBe('verifier')
     expect(res.outcomes[0]!.ncExactRefused?.eventId).toBe(refused[0]!.eventId)
   })
 
-  it('NC-exact red line: a not_co_true ruling with only TANGENTIAL reverse evidence is REFUSED + escalated (refuted-kind)', async () => {
-    const { claimId } = await mkClaim({ status: 'active', relevance: 'tangential' })
+  it('NC-exact: a not_co_true ruling whose contradicting PEER carries an EXACT reverse proposition PROCEEDS — active→flagged, no escalation', async () => {
+    // Discriminator: the TARGET has only supporting provenance; the EXACT lives on the peer. Under the old
+    // (inverted) gate this would refuse (target has no own-exact); under the fix it proceeds.
+    const target = await mkClaim({ status: 'active', claimText: 'k p A', relevance: 'supporting' })
+    const peer = await mkClaim({ status: 'active', claimText: 'k p B', relevance: 'exact' })
+    await db.insert(schema.relation).values({
+      id: randomUUID(),
+      fromClaim: target.claimId,
+      toClaim: peer.claimId,
+      type: 'contradicts',
+    })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'not_co_true' })
+    const res = await verifyEnqueued({ db, judge }, [target.claimId])
+
+    expect(res.transitions).toBe(1)
+    expect(res.ncExactRefusals).toBe(0)
+    expect(await statusOf(target.claimId)).toBe('flagged') // peer's exact reverse evidence → ruling proceeds
+    expect(await getRefusedRulings(db)).toHaveLength(0)
+  })
+
+  it('NC-exact: a not_co_true ruling with NO identifiable contradicting peer (no contradicts edge) is REFUSED — the claim has its OWN exact support, yet that is not reverse evidence; it escalates instead of tightening', async () => {
+    // The sharpest anti-inversion test: own exact support must NOT let the claim be ruled refuted.
+    const { claimId } = await mkClaim({ status: 'active', relevance: 'exact' })
     const judge = makeFakeEntailmentJudge({ verdictOf: () => 'not_co_true' })
     const res = await runVerifier({ db, judge })
 
     expect(res.transitions).toBe(0)
     expect(res.ncExactRefusals).toBe(1)
-    expect(await statusOf(claimId)).toBe('active')
+    expect(await statusOf(claimId)).toBe('active') // own exact does NOT enable negation
     const refused = await getRefusedRulings(db)
     expect(refused).toHaveLength(1)
-    expect(refused[0]!.payload.rulingKind).toBe('refuted') // not_co_true → refuted
+    expect(refused[0]!.payload.reverseEvidenceClaimId).toBeNull() // no peer identified
+    expect(refused[0]!.payload.rulingKind).toBe('refuted')
   })
 
-  it('NC-exact red line: supplying an EXACT reverse proposition lets the same fail ruling PROCEED (active→flagged, no escalation)', async () => {
-    const { claimId } = await mkClaim({ status: 'active', relevance: 'exact' })
-    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'fail' })
-    const res = await runVerifier({ db, judge })
-
-    expect(res.transitions).toBe(1)
-    expect(res.ncExactRefusals).toBe(0)
-    expect(await statusOf(claimId)).toBe('flagged') // exact reverse evidence → ruling proceeds
-    expect(await getRefusedRulings(db)).toHaveLength(0)
-  })
-
-  it('NC-exact red line: a flagged claim with only supporting evidence is NOT tightened to quarantined (refused) — only humans relax, agents only tighten WITH exact evidence', async () => {
-    const { claimId } = await mkClaim({ status: 'flagged', relevance: 'supporting' })
-    const res = await runVerifier({
-      db,
-      judge: makeFakeEntailmentJudge({ verdictOf: () => 'fail' }),
+  it('NC-exact: a flagged claim ruled not_co_true is NOT tightened to quarantined when its peer lacks exact (refused) — agents only tighten WITH exact reverse evidence', async () => {
+    const target = await mkClaim({ status: 'flagged', claimText: 'k p A', relevance: 'exact' })
+    const peer = await mkClaim({ status: 'active', claimText: 'k p B', relevance: 'supporting' }) // peer only supporting
+    await db.insert(schema.relation).values({
+      id: randomUUID(),
+      fromClaim: target.claimId,
+      toClaim: peer.claimId,
+      type: 'contradicts',
     })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'not_co_true' })
+    const res = await verifyEnqueued({ db, judge }, [target.claimId])
+
     expect(res.transitions).toBe(0)
     expect(res.ncExactRefusals).toBe(1)
-    expect(await statusOf(claimId)).toBe('flagged') // stays flagged — quarantine refused for lack of exact
+    expect(await statusOf(target.claimId)).toBe('flagged') // stays flagged — quarantine refused for lack of exact
     expect(await getRefusedRulings(db)).toHaveLength(1)
   })
 

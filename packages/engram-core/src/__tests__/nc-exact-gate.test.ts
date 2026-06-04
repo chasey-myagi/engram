@@ -98,28 +98,33 @@ describe('S21 NC-exact unified gate — RED LINE #3 / A.6', () => {
     expect(await countExactProvenances(db, irrelevant)).toBe(0)
   })
 
-  it('exact reverse proposition present → ruling PROCEEDS (ok=true), no escalation written', async () => {
-    const claimId = await mkClaim('exact')
+  it('a DISTINCT peer carrying an exact reverse proposition → ruling PROCEEDS (ok=true), no escalation', async () => {
+    const ruledAgainst = await mkClaim('supporting') // the claim being negated — its OWN tier is irrelevant
+    const peer = await mkClaim('exact') // a distinct contradicting peer carries the exact reverse proposition
     const res = await assertNcExactEvidence(db, {
-      ruledAgainstClaimId: claimId,
-      rulingKind: 'non_compliant',
-      path: 'verifier',
-      byRole: 'agent:verifier',
+      ruledAgainstClaimId: ruledAgainst,
+      reverseEvidenceClaimId: peer,
+      rulingKind: 'refuted',
+      path: 'arbiter',
+      byRole: 'agent:arbiter',
     })
     expect(res.ok).toBe(true)
     if (res.ok) expect(res.exactCount).toBe(1)
-    expect(await getRefusedRulings(db)).toHaveLength(0) // nothing escalated when evidence is exact
+    expect(await getRefusedRulings(db)).toHaveLength(0) // nothing escalated when the peer is exact
   })
 
   it.each(['supporting', 'tangential', 'irrelevant'] as const)(
-    'only %s (no exact) reverse evidence → ruling REFUSED (ok=false) + a ruling_refused escalation generated',
+    'a peer carrying only %s (no exact) reverse evidence → ruling REFUSED (ok=false) + a ruling_refused escalation',
     async (tier) => {
-      const claimId = await mkClaim(tier)
+      // Even though the ruled-against claim has its OWN exact support, the PEER (the reverse proposition) is weak.
+      const ruledAgainst = await mkClaim('exact')
+      const peer = await mkClaim(tier)
       const res = await assertNcExactEvidence(db, {
-        ruledAgainstClaimId: claimId,
+        ruledAgainstClaimId: ruledAgainst,
+        reverseEvidenceClaimId: peer,
         rulingKind: 'refuted',
-        path: 'verifier',
-        byRole: 'agent:verifier',
+        path: 'arbiter',
+        byRole: 'agent:arbiter',
       })
       expect(res.ok).toBe(false)
       if (!res.ok) {
@@ -129,21 +134,71 @@ describe('S21 NC-exact unified gate — RED LINE #3 / A.6', () => {
       // escalation event recorded to the editor-in-chief queue with a faithful payload
       const refused = await getRefusedRulings(db)
       expect(refused).toHaveLength(1)
-      expect(refused[0]!.payload.ruledAgainstClaimId).toBe(claimId)
-      expect(refused[0]!.payload.reverseEvidenceClaimId).toBe(claimId)
+      expect(refused[0]!.payload.ruledAgainstClaimId).toBe(ruledAgainst)
+      expect(refused[0]!.payload.reverseEvidenceClaimId).toBe(peer) // the PEER was checked, NEVER self
       expect(refused[0]!.payload.rulingKind).toBe('refuted')
-      expect(refused[0]!.payload.path).toBe('verifier')
+      expect(refused[0]!.payload.path).toBe('arbiter')
       expect(refused[0]!.payload.exactCount).toBe(0)
     },
   )
 
-  it('a claim with supporting+tangential but NO exact is still refused (mere semantic support ≠ exact reverse)', async () => {
-    const claimId = await mkClaim('supporting')
-    await addProv(claimId, 'tangential')
-    await addProv(claimId, 'irrelevant')
-    expect(await countExactProvenances(db, claimId)).toBe(0)
+  it("a claim's OWN exact support is NEVER its own reverse evidence: a well-supported claim is not easier to negate", async () => {
+    // The core anti-inversion guarantee. A strongly self-supported claim must NOT become easier to rule negative.
+    const wellSupported = await mkClaim('exact')
+    await addProv(wellSupported, 'exact') // two exact SUPPORTING provenances on itself
+    expect(await countExactProvenances(db, wellSupported)).toBe(2)
+    const peer = await mkClaim('supporting') // the reverse proposition (a distinct peer) is only weak
     const res = await assertNcExactEvidence(db, {
-      ruledAgainstClaimId: claimId,
+      ruledAgainstClaimId: wellSupported,
+      reverseEvidenceClaimId: peer,
+      rulingKind: 'non_compliant',
+      path: 'verifier',
+      byRole: 'agent:verifier',
+    })
+    expect(res.ok).toBe(false) // its own (even doubled) exact support does NOT let it be negated
+    expect(await getRefusedRulings(db)).toHaveLength(1)
+  })
+
+  it('no contradicting peer (reverseEvidenceClaimId=null) → REFUSED: nothing carries a reverse proposition', async () => {
+    const ruledAgainst = await mkClaim('exact') // own exact is support, not reverse evidence
+    const res = await assertNcExactEvidence(db, {
+      ruledAgainstClaimId: ruledAgainst,
+      reverseEvidenceClaimId: null,
+      rulingKind: 'refuted',
+      path: 'verifier',
+      byRole: 'agent:verifier',
+    })
+    expect(res.ok).toBe(false)
+    if (!res.ok) expect(res.exactCount).toBe(0)
+    const refused = await getRefusedRulings(db)
+    expect(refused).toHaveLength(1)
+    expect(refused[0]!.payload.reverseEvidenceClaimId).toBeNull()
+    expect(refused[0]!.payload.exactCount).toBe(0)
+  })
+
+  it('passing reverseEvidenceClaimId === ruledAgainstClaimId THROWS (contract misuse: a claim cannot be its own reverse evidence)', async () => {
+    const claimId = await mkClaim('exact')
+    await expect(
+      assertNcExactEvidence(db, {
+        ruledAgainstClaimId: claimId,
+        reverseEvidenceClaimId: claimId, // the inversion — structurally rejected before any DB write
+        rulingKind: 'refuted',
+        path: 'verifier',
+        byRole: 'agent:verifier',
+      }),
+    ).rejects.toThrow(/DISTINCT contradicting peer/)
+    expect(await getRefusedRulings(db)).toHaveLength(0) // threw before writing any escalation event
+  })
+
+  it('a peer with supporting+tangential but NO exact is still refused (mere semantic support ≠ exact reverse)', async () => {
+    const ruledAgainst = await mkClaim('exact')
+    const peer = await mkClaim('supporting')
+    await addProv(peer, 'tangential')
+    await addProv(peer, 'irrelevant')
+    expect(await countExactProvenances(db, peer)).toBe(0)
+    const res = await assertNcExactEvidence(db, {
+      ruledAgainstClaimId: ruledAgainst,
+      reverseEvidenceClaimId: peer,
       rulingKind: 'non_compliant',
       path: 'arbiter',
       byRole: 'agent:arbiter',
@@ -152,7 +207,7 @@ describe('S21 NC-exact unified gate — RED LINE #3 / A.6', () => {
     expect(await getRefusedRulings(db)).toHaveLength(1)
   })
 
-  it('reverseEvidenceClaimId can differ from ruledAgainstClaimId (Arbiter path: exact lives on the WINNER)', async () => {
+  it('reverseEvidenceClaimId differs from ruledAgainstClaimId (Arbiter path: exact lives on the WINNER)', async () => {
     const loser = await mkClaim('supporting') // loser itself has no exact
     const winner = await mkClaim('exact') // the reverse proposition lives on the winner
     const res = await assertNcExactEvidence(db, {
@@ -167,15 +222,16 @@ describe('S21 NC-exact unified gate — RED LINE #3 / A.6', () => {
   })
 
   it('gate NEVER mutates claim.status (red line #2: only humans relax; refuse only escalates)', async () => {
-    const claimId = await mkClaim('supporting')
+    const ruledAgainst = await mkClaim('supporting')
     const before = (
       await db
         .select({ s: schema.claim.status })
         .from(schema.claim)
-        .where(eq(schema.claim.id, claimId))
+        .where(eq(schema.claim.id, ruledAgainst))
     )[0]!.s
     await assertNcExactEvidence(db, {
-      ruledAgainstClaimId: claimId,
+      ruledAgainstClaimId: ruledAgainst,
+      reverseEvidenceClaimId: null, // refused for lack of any reverse proposition
       rulingKind: 'refuted',
       path: 'verifier',
       byRole: 'agent:verifier',
@@ -184,7 +240,7 @@ describe('S21 NC-exact unified gate — RED LINE #3 / A.6', () => {
       await db
         .select({ s: schema.claim.status })
         .from(schema.claim)
-        .where(eq(schema.claim.id, claimId))
+        .where(eq(schema.claim.id, ruledAgainst))
     )[0]!.s
     expect(after).toBe(before) // untouched — gate only writes a metrics event, never a status edge
   })
