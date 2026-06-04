@@ -16,6 +16,7 @@ import { createDb, type DB } from '../db/client.js'
 import { addSource } from '../spi/append-claim.js'
 import { claim, claimProvenance, claimVerification } from '../db/schema.js'
 import { recallClaims } from '../spi/recall-claims.js'
+import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import {
   FAILURE_OUTCOMES,
   USAGE_OUTCOMES,
@@ -26,6 +27,7 @@ import {
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
 const migrationsFolder = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'drizzle')
+const embedder = makeFakeEmbedder()
 
 let admin: pg.Pool
 let pool: pg.Pool
@@ -85,6 +87,8 @@ async function seedActiveClaim(text: string, raw = 0.8): Promise<string> {
     confidence: raw,
     confidenceRaw: raw,
     confidenceFactors: factorsBlob(),
+    embedding: await embedder.embed(text),
+    embeddingVersion: embedder.version,
     lineageId: randomUUID(),
     asOf: new Date(),
     createdBy: 'test',
@@ -324,13 +328,13 @@ describe('S4 report_usage — append-only usage_truth events (A.2)', () => {
     const id = await seedActiveClaim('no usage yet')
     expect(await getUsageEvents(db, id)).toEqual([])
 
-    const [r] = await recallClaims(db, 'no usage yet')
+    const [r] = await recallClaims(db, embedder, 'no usage yet')
     expect(r!.confidence.factors.usageCorrect).toBe(0) // f4 neutral; Harvester (S19) is the only feeder
   })
 
   it('end-to-end: recall → report corrected → event is queryable (failure pool) and confidence is unchanged', async () => {
     const id = await seedActiveClaim('engram usage seam')
-    const [recalled] = await recallClaims(db, 'engram usage seam')
+    const [recalled] = await recallClaims(db, embedder, 'engram usage seam')
     expect(recalled!.claim.id).toBe(id)
     const confBefore = recalled!.confidence.value
 
@@ -341,7 +345,7 @@ describe('S4 report_usage — append-only usage_truth events (A.2)', () => {
     expect(events[0]).toMatchObject({ outcome: 'corrected', taskId: 'bid-99' })
     expect((await getFailurePool(db)).map((e) => e.claimId)).toContain(id)
 
-    const [recalledAfter] = await recallClaims(db, 'engram usage seam')
+    const [recalledAfter] = await recallClaims(db, embedder, 'engram usage seam')
     expect(recalledAfter!.confidence.value).toBe(confBefore) // report_usage left confidence untouched
     expect(recalledAfter!.confidence.factors.usageCorrect).toBe(0) // f4 still neutral (not fed until S19)
   })

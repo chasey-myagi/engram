@@ -1,7 +1,7 @@
 /**
  * 召回路径（Consumer SPI 的读半边，附录 A.2）—— 最高测试缝。评测=消费，同走这条缝。
  *
- * recallClaims(db, query, ctx) 返回 RecallResult[]，每行带：
+ * recallClaims(db, embedder, query, ctx) 返回 RecallResult[]，每行带：
  *   - claim 本体
  *   - 召回瞬间拍下的 ConfidenceSnapshot（value=g(raw) / raw / 因子 / 权重 / 校准版本 / takenAt）
  *   - provenances[]（每个结果至少 1 条出处；无出处的 claim 绝不出现）
@@ -13,11 +13,16 @@
  *
  * 关键设计：raw 召回时用**活动权重**对存档因子现算（rawFromStoredFactors，S7 配置态变更即刻生效），
  * 再 value=applyG(raw, 版本)（g 现算，S27/S28 换 g 即时生效）。存档的 confidence_raw 自 S7 起是写时审计快照、
- * 召回不再读它。检索匹配 S3 用确定性子串（text/subject）；语义向量是 S9。
+ * 召回不再读它。S9：候选源 = claim_text 嵌入的 HNSW 近邻 top-k（只嵌 claim_text，不再匹配 subject/谓/宾）。
  */
-import { and, eq, ilike, inArray, or } from 'drizzle-orm'
+import { and, cosineDistance, eq, inArray, isNotNull, or } from 'drizzle-orm'
 
 import { getActiveStandards } from '../config/standards.js'
+import {
+  DEFAULT_RECALL_MIN_SIMILARITY,
+  DEFAULT_RECALL_TOPK,
+  type Embedder,
+} from '../embedding/embedder.js'
 import {
   KERNEL_CONFIDENCE_FLOOR,
   MUST_VERIFY_THRESHOLD,
@@ -82,24 +87,22 @@ export interface RecallResult {
    * 其长度（去重后的 active 对端数，非底层边数）即喂 conflictDecay 的活跃矛盾计数 —— 冲突双方实时各吃惩罚。
    */
   contradicts: string[]
+  /** 该 claim 向量的 embedding_version 锚（S9）；用于识别 stale 向量。无嵌入则 null。 */
+  embeddingVersion: string | null
 }
 
 export interface RecallContext {
   /** 抬高消费门槛；只能 ≥ 内核 floor (0.4)，更低会被夹到 0.4，绝不放松内核底线。 */
   confidenceFloor?: number
   /**
-   * 返回上限（默认 50）。S7 起召回用活动权重重算 value，故取全部 active 子串命中候选 → 重算 → 过门 →
-   * 按 value 降序(平手 id 升序)排序 → 最后 slice(limit)。所以结果是 min(过门数, N)，无"窗口/不回填"语义。
+   * 返回上限（默认 50）。S9 候选源 = HNSW 近邻 top-k；之后用活动权重重算 value → 过门 →
+   * 按 value 降序(平手 id 升序)排序 → 最后 slice(limit)。结果是 min(过门数, N)。
    */
   limit?: number
-}
-
-/**
- * 把 LIKE 元字符（% _ \）转义成字面量，让 query 是确定性子串匹配而非通配。
- * 用反斜杠转义 —— 对齐 Postgres LIKE/ILIKE 的默认 escape 字符（无需显式 ESCAPE 子句）。
- */
-function escapeLike(s: string): string {
-  return s.replace(/[\\%_]/g, (ch) => `\\${ch}`)
+  /** HNSW 近邻候选数（默认 50，A.6 top-k）。 */
+  topK?: number
+  /** 候选 cosine 相似度下界（默认见 DEFAULT_RECALL_MIN_SIMILARITY）；低于此的近邻视为不相关。 */
+  minSimilarity?: number
 }
 
 /** 解析消费门下界：consumer 只能抬高。无效/未给 → 内核 floor；低于内核 floor → 夹到内核 floor。 */
@@ -116,6 +119,7 @@ function resolveFloor(confidenceFloor: number | undefined): number {
  */
 export async function recallClaims(
   db: DB,
+  embedder: Embedder,
   query: string,
   ctx: RecallContext = {},
 ): Promise<RecallResult[]> {
@@ -126,14 +130,19 @@ export async function recallClaims(
   // 消费下界取最严：配置态 consumeFloor 与请求态 ctx.confidenceFloor 都 ≥ 内核 0.4，取二者较大。
   const floor = Math.max(std.consumeFloor, resolveFloor(ctx.confidenceFloor))
   const limit = typeof ctx.limit === 'number' && ctx.limit > 0 ? ctx.limit : DEFAULT_RECALL_LIMIT
-  const pattern = `%${escapeLike(query)}%`
+  const topK = typeof ctx.topK === 'number' && ctx.topK > 0 ? ctx.topK : DEFAULT_RECALL_TOPK
+  // 相似度下界：ctx 显式 > 嵌入器推荐（真模型语义空间更高）> 内核默认（适配 fake 子串空间）。
+  const minSimilarity =
+    typeof ctx.minSimilarity === 'number'
+      ? ctx.minSimilarity
+      : (embedder.minSimilarity ?? DEFAULT_RECALL_MIN_SIMILARITY)
 
   // 消费门第一层 = 状态可消费：只放 status=active（draft 影子区 / quarantined / superseded / flagged 全硬排除，
-  // PRD A.4 状态表 / 设计稿消费门；晋升 draft→active 是 S13，在它到位前 append 的 claim 都是 draft，召回为空是正确的）。
-  // ② 确定性子串命中 claim_text 或 subject。注意：召回用**活动权重重算** value（≠存档 confidence_raw），
-  // 故不能在 SQL 里按 confidence_raw 排序/截断——排序与 limit 在 JS 侧按重算后的 value 做
-  // （候选量由 query 子串匹配收敛；S9 向量召回会进一步收敛）。
-  const candidates = await db
+  // PRD A.4 状态表 / 设计稿消费门；晋升 draft→active 是 S13）。② 候选源（S9）= claim_text 嵌入的 HNSW 近邻
+  // top-k（替代 S3 子串匹配；gate 不变）。NULL 向量行排除。重算/排序/limit 仍在 JS 侧（见下）。
+  const queryVector = await embedder.embed(query, 'query')
+  const distance = cosineDistance(claim.embedding, queryVector)
+  const nn = await db
     .select({
       id: claim.id,
       claimText: claim.claimText,
@@ -144,14 +153,15 @@ export async function recallClaims(
       lineageId: claim.lineageId,
       asOf: claim.asOf,
       confidenceFactors: claim.confidenceFactors,
+      embeddingVersion: claim.embeddingVersion,
+      distance,
     })
     .from(claim)
-    .where(
-      and(
-        eq(claim.status, 'active'),
-        or(ilike(claim.claimText, pattern), ilike(claim.subject, pattern)),
-      ),
-    )
+    .where(and(eq(claim.status, 'active'), isNotNull(claim.embedding)))
+    .orderBy(distance)
+    .limit(topK)
+  // 相似度下界：剔除 cosine 太低的近邻（小库下 top-k 会把无关项也带出；空查询/无相关 → 候选空 → 召回空）。
+  const candidates = nn.filter((c) => 1 - Number(c.distance) >= minSimilarity)
 
   // S8 矛盾显式：数每个候选的 active contradicts 边（对端仍 active 才算活跃矛盾），喂实时 conflictDecay。
   const candidateIds = candidates.map((c) => c.id)
@@ -278,6 +288,7 @@ export async function recallClaims(
       provenances,
       mustVerify: g.value < std.mustVerifyThreshold, // 配置态信任门
       contradicts: g.contradicts,
+      embeddingVersion: g.c.embeddingVersion, // S9 版本锚随快照
     })
   }
 

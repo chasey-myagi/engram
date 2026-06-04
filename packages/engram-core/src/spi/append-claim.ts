@@ -21,6 +21,7 @@ import {
   type StoredConfidence,
 } from '../confidence/confidence.js'
 import type { DB, Tx } from '../db/client.js'
+import type { Embedder } from '../embedding/embedder.js'
 import {
   claim,
   claimProvenance,
@@ -104,6 +105,8 @@ async function insertClaim(
   draft: DraftClaim,
   lineageId: string,
   conf: ComputedConfidence,
+  embedding: number[],
+  embeddingVersion: string,
 ): Promise<string> {
   const id = randomUUID()
   // 存 raw + 因子/权重/校准版本（不存 value：召回时按当前 g 现算）。类型锁定读写两端一致。
@@ -125,6 +128,8 @@ async function insertClaim(
     lineageId,
     asOf: draft.asOf ?? new Date(),
     createdBy: draft.createdBy ?? 'agent:unknown',
+    embedding, // S9：claim_text 的嵌入 + 版本锚
+    embeddingVersion,
   })
   return id
 }
@@ -195,16 +200,21 @@ export async function addSource(db: DB, input: SourceInput): Promise<{ sourceId:
   return { sourceId: rows[0]!.id }
 }
 
-/** 乐观写入：默认 draft，强制 ≥1 出处，连续 confidence + claim + 出处单事务原子写入。新 claim 起一个新 lineage。 */
+/**
+ * 乐观写入：默认 draft，强制 ≥1 出处，连续 confidence + claim + 出处单事务原子写入。新 claim 起一个新 lineage。
+ * S9：用 embedder 对 claim_text 算嵌入、随 claim 落库（向量 + embedding_version）。
+ */
 export async function appendClaim(
   db: DB,
+  embedder: Embedder,
   draft: DraftClaim,
   provenances: ProvenanceInput[],
 ): Promise<{ claimId: string }> {
   requireProvenance(provenances)
+  const embedding = await embedder.embed(draft.claimText, 'document') // 嵌入在事务外算（纯计算/远程调用，不持锁）
   return db.transaction(async (tx) => {
     const conf = await computeClaimConfidence(tx, draft, provenances)
-    const claimId = await insertClaim(tx, draft, randomUUID(), conf)
+    const claimId = await insertClaim(tx, draft, randomUUID(), conf, embedding, embedder.version)
     await insertProvenances(tx, claimId, provenances)
     await recordContradictions(tx, claimId, draft) // 乐观：记矛盾边、保留双方、绝不因冲突拒写
     return { claimId }
@@ -214,11 +224,13 @@ export async function appendClaim(
 /** append-only 取代：新版本沿用旧 claim 的 lineage_id，加一条 supersedes 边，旧版标 superseded（不物理删）。 */
 export async function supersedeClaim(
   db: DB,
+  embedder: Embedder,
   oldClaimId: string,
   draft: DraftClaim,
   provenances: ProvenanceInput[],
 ): Promise<{ claimId: string }> {
   requireProvenance(provenances)
+  const embedding = await embedder.embed(draft.claimText, 'document')
   return db.transaction(async (tx) => {
     const old = await tx
       .select({ lineageId: claim.lineageId, status: claim.status })
@@ -235,7 +247,14 @@ export async function supersedeClaim(
       )
     }
     const conf = await computeClaimConfidence(tx, draft, provenances)
-    const claimId = await insertClaim(tx, draft, old[0]!.lineageId, conf)
+    const claimId = await insertClaim(
+      tx,
+      draft,
+      old[0]!.lineageId,
+      conf,
+      embedding,
+      embedder.version,
+    )
     await insertProvenances(tx, claimId, provenances)
     await tx
       .insert(relation)

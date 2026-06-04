@@ -17,9 +17,11 @@ import { createDb, type DB } from '../db/client.js'
 import { addSource, appendClaim } from '../spi/append-claim.js'
 import { claim, claimProvenance, relation, type ClaimStatus } from '../db/schema.js'
 import { recallClaims } from '../spi/recall-claims.js'
+import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
 const migrationsFolder = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'drizzle')
+const embedder = makeFakeEmbedder()
 
 let admin: pg.Pool
 let pool: pg.Pool
@@ -105,6 +107,8 @@ async function seedClaim(opts: {
     confidence: opts.raw,
     confidenceRaw: opts.raw,
     confidenceFactors: factorsBlob(opts.raw, opts.calibrationVersion),
+    embedding: await embedder.embed(opts.text),
+    embeddingVersion: embedder.version,
     lineageId: randomUUID(),
     asOf: new Date(),
     createdBy: 'test',
@@ -124,7 +128,7 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     await seedClaim({ raw: 0.5, text: 'widget mid band' })
     await seedClaim({ raw: 0.8, text: 'widget high band' })
 
-    const results = await recallClaims(db, 'widget')
+    const results = await recallClaims(db, embedder, 'widget')
     // key by claimText (recomputed value carries tiny FP error → exact-value map keys are fragile)
     const byText = new Map(results.map((r) => [r.claim.claimText, r]))
 
@@ -141,7 +145,7 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     await seedClaim({ raw: 0.59, text: 'edge just below verify' }) // [0.4,0.6) → mustVerify
     await seedClaim({ raw: 0.61, text: 'edge above verify' }) // ≥0.6 → usable
 
-    const results = await recallClaims(db, 'edge')
+    const results = await recallClaims(db, embedder, 'edge')
     const byText = new Map(results.map((r) => [r.claim.claimText, r]))
     expect(byText.has('edge below floor')).toBe(false) // floor excludes < 0.4
     expect(byText.get('edge just above floor')!.mustVerify).toBe(true)
@@ -153,7 +157,7 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     await seedClaim({ raw: 0.8, text: 'orphan no-prov', provenance: false })
     await seedClaim({ raw: 0.8, text: 'grounded with-prov', provenance: true })
 
-    const results = await recallClaims(db, 'prov')
+    const results = await recallClaims(db, embedder, 'prov')
     expect(results).toHaveLength(1)
     expect(results[0]!.claim.claimText).toBe('grounded with-prov')
     for (const r of results) {
@@ -168,7 +172,7 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
   it('takes the ConfidenceSnapshot at recall instant (takenAt) with value=g(raw), raw, factors, weights, calibrationVersion', async () => {
     await seedClaim({ raw: 0.8, text: 'snapshot claim' })
     const before = new Date()
-    const [r] = await recallClaims(db, 'snapshot')
+    const [r] = await recallClaims(db, embedder, 'snapshot')
     const after = new Date()
 
     const snap = r!.confidence
@@ -183,7 +187,7 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
 
   it('an already-returned snapshot is frozen — later mutation of the claim does not change it', async () => {
     const id = await seedClaim({ raw: 0.8, text: 'mutate me' })
-    const [r] = await recallClaims(db, 'mutate')
+    const [r] = await recallClaims(db, embedder, 'mutate')
     expect(r!.confidence.value).toBe(0.8)
 
     // mutate the underlying claim's factors after recall returned (recall recomputes from factors now)
@@ -195,7 +199,7 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     expect(r!.confidence.value).toBe(0.8) // held snapshot unchanged (value copy, not a live view)
     expect(r!.confidence.raw).toBe(0.8) // nested fields detached too, not just the value primitive
     expect(r!.confidence.factors.entailment).toBe(0.8)
-    const again = await recallClaims(db, 'mutate')
+    const again = await recallClaims(db, embedder, 'mutate')
     expect(again).toHaveLength(0) // a fresh recall recomputes from the new factors (0.05 < floor)
   })
 
@@ -203,7 +207,7 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     await seedClaim({ raw: 0.2, text: 'floor below' })
     await seedClaim({ raw: 0.5, text: 'floor mid' })
 
-    const results = await recallClaims(db, 'floor', { confidenceFloor: 0.1 })
+    const results = await recallClaims(db, embedder, 'floor', { confidenceFloor: 0.1 })
     expect(results).toHaveLength(1) // 0.2 still excluded — floor clamped to 0.4, not lowered to 0.1
     expect(results[0]!.confidence.value).toBe(0.5)
   })
@@ -212,14 +216,14 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     await seedClaim({ raw: 0.5, text: 'raise mid' })
     await seedClaim({ raw: 0.8, text: 'raise high' })
 
-    const results = await recallClaims(db, 'raise', { confidenceFloor: 0.7 })
+    const results = await recallClaims(db, embedder, 'raise', { confidenceFloor: 0.7 })
     expect(results).toHaveLength(1)
     expect(results[0]!.confidence.value).toBe(0.8)
   })
 
   it('mustVerify follows the kernel 0.6 bar, not the consumer floor', async () => {
     await seedClaim({ raw: 0.55, text: 'kernel-relative verify' })
-    const [r] = await recallClaims(db, 'kernel-relative', { confidenceFloor: 0.5 })
+    const [r] = await recallClaims(db, embedder, 'kernel-relative', { confidenceFloor: 0.5 })
     expect(r!.confidence.value).toBe(0.55)
     expect(r!.mustVerify).toBe(true) // 0.55 < 0.6 kernel bar even though it cleared the 0.5 floor
   })
@@ -228,7 +232,7 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     await seedClaim({ raw: 0.8, text: 'sku spec', status: 'active' })
     await seedClaim({ raw: 0.8, text: 'sku spec', status: 'superseded' })
 
-    const results = await recallClaims(db, 'sku spec')
+    const results = await recallClaims(db, embedder, 'sku spec')
     expect(results).toHaveLength(1)
     expect(results[0]!.claim.status).toBe('active')
   })
@@ -238,37 +242,24 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     await seedClaim({ raw: 0.9, text: 'rank claim b' })
     await seedClaim({ raw: 0.7, text: 'rank claim c' })
 
-    const all = await recallClaims(db, 'rank claim')
+    const all = await recallClaims(db, embedder, 'rank claim')
     expect(all.map((r) => r.confidence.value)).toEqual([0.9, 0.7, 0.5])
 
-    const top2 = await recallClaims(db, 'rank claim', { limit: 2 })
+    const top2 = await recallClaims(db, embedder, 'rank claim', { limit: 2 })
     expect(top2.map((r) => r.confidence.value)).toEqual([0.9, 0.7])
   })
 
-  it('matches subject as well as claim_text, with deterministic literal substring (LIKE metachars escaped)', async () => {
-    await seedClaim({ raw: 0.8, text: 'discount a%b literal', subject: null })
-    await seedClaim({ raw: 0.8, text: 'discount axxb wildcard', subject: null })
-    await seedClaim({ raw: 0.8, text: 'unrelated body', subject: 'SKU-42' })
-
-    const literal = await recallClaims(db, 'a%b')
-    expect(literal).toHaveLength(1) // % is literal, not a wildcard matching axxb
-    expect(literal[0]!.claim.claimText).toBe('discount a%b literal')
-
-    await seedClaim({ raw: 0.8, text: 'code a_b underscore', subject: null })
-    await seedClaim({ raw: 0.8, text: 'code axb underscore', subject: null })
-    const underscore = await recallClaims(db, 'a_b')
-    expect(underscore).toHaveLength(1) // _ is literal, not a single-char wildcard matching axb
-    expect(underscore[0]!.claim.claimText).toBe('code a_b underscore')
-
-    const bySubject = await recallClaims(db, 'SKU-42')
-    expect(bySubject).toHaveLength(1)
-    expect(bySubject[0]!.claim.subject).toBe('SKU-42')
+  it('retrieves case-insensitively via claim_text embedding (semantic NN, not literal/subject match)', async () => {
+    await seedClaim({ raw: 0.8, text: 'widget high band' })
+    // S9 embeds claim_text only (lowercased); a differently-cased query still lands near it
+    const hit = await recallClaims(db, embedder, 'WIDGET high')
+    expect(hit.map((r) => r.claim.claimText)).toContain('widget high band')
   })
 
-  it('returns [] for an empty query or no match', async () => {
-    await seedClaim({ raw: 0.8, text: 'present' })
-    expect(await recallClaims(db, '')).toEqual([])
-    expect(await recallClaims(db, 'absent-token')).toEqual([])
+  it('returns [] for an empty query or a semantically-disjoint query (below the similarity floor)', async () => {
+    await seedClaim({ raw: 0.8, text: 'banana split dessert' })
+    expect(await recallClaims(db, embedder, '')).toEqual([]) // empty query short-circuits
+    expect(await recallClaims(db, embedder, 'rocket fuel telemetry')).toEqual([]) // no shared content → below minSimilarity
   })
 
   it('never surfaces non-active claims — draft (shadow zone), quarantined, or flagged (status gate, layer ①)', async () => {
@@ -278,7 +269,7 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     await seedClaim({ raw: 0.8, text: 'gate quarantined', status: 'quarantined' })
     await seedClaim({ raw: 0.8, text: 'gate flagged', status: 'flagged' })
 
-    const results = await recallClaims(db, 'gate')
+    const results = await recallClaims(db, embedder, 'gate')
     expect(results).toHaveLength(1)
     expect(results[0]!.claim.status).toBe('active')
     expect(results[0]!.claim.claimText).toBe('gate active')
@@ -286,7 +277,7 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
 
   it('matches case-insensitively (ilike)', async () => {
     await seedClaim({ raw: 0.8, text: 'widget high band' })
-    const results = await recallClaims(db, 'WIDGET')
+    const results = await recallClaims(db, embedder, 'WIDGET')
     expect(results).toHaveLength(1)
     expect(results[0]!.claim.claimText).toBe('widget high band')
   })
@@ -296,7 +287,7 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     await seedClaim({ raw: 0.5, text: 'nf mid' })
 
     for (const bad of [NaN, Infinity, -Infinity]) {
-      const results = await recallClaims(db, 'nf', { confidenceFloor: bad })
+      const results = await recallClaims(db, embedder, 'nf', { confidenceFloor: bad })
       expect(results.map((r) => r.confidence.value)).toEqual([0.5]) // kernel floor 0.4: 0.2 out, 0.5 in
     }
   })
@@ -304,7 +295,7 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
   it('breaks ties deterministically by claim id ascending at equal confidence', async () => {
     const a = await seedClaim({ raw: 0.8, text: 'tie one' })
     const b = await seedClaim({ raw: 0.8, text: 'tie two' })
-    const results = await recallClaims(db, 'tie')
+    const results = await recallClaims(db, embedder, 'tie')
     expect(results.map((r) => r.claim.id)).toEqual([a, b].sort()) // id-ascending, not insertion order
   })
 
@@ -324,6 +315,8 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
       confidence: 0.8,
       confidenceRaw: 0.8,
       confidenceFactors: factorsBlob(0.8),
+      embedding: await embedder.embed('passthrough body'),
+      embeddingVersion: embedder.version,
       lineageId,
       asOf,
       createdBy: 'test',
@@ -333,7 +326,7 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
       .insert(claimProvenance)
       .values({ id: randomUUID(), claimId: id, sourceId, locator: 'p1', relevance: 'exact' })
 
-    const [r] = await recallClaims(db, 'passthrough')
+    const [r] = await recallClaims(db, embedder, 'passthrough')
     expect(r!.claim).toMatchObject({
       id,
       subject: 'subj-x',
@@ -365,7 +358,7 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
         relevance: 'supporting',
       },
     ])
-    const [r] = await recallClaims(db, 'multi prov')
+    const [r] = await recallClaims(db, embedder, 'multi prov')
     expect(r!.provenances).toHaveLength(2)
     expect(r!.provenances.map((p) => p.locator).sort()).toEqual(['loc-1', 'loc-2'])
     expect(new Set(r!.provenances.map((p) => p.sourceId))).toEqual(
@@ -394,7 +387,7 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
         relevance: 'exact',
       },
     ])
-    const byId = new Map((await recallClaims(db, 'iso')).map((r) => [r.claim.id, r]))
+    const byId = new Map((await recallClaims(db, embedder, 'iso')).map((r) => [r.claim.id, r]))
     expect(byId.get(idA)!.provenances.map((p) => p.sourceId)).toEqual([sa.sourceId]) // no B leakage
     expect(byId.get(idB)!.provenances.map((p) => p.sourceId)).toEqual([sb.sourceId]) // no A leakage
   })
@@ -404,16 +397,16 @@ describe('S3 recall_claims — consumption gate (A.2)', () => {
     // Even a well-corroborated claim sits in the shadow zone and must not be consumable.
     const s1 = await seedSource(0.9)
     const s2 = await seedSource(0.9)
-    await appendClaim(db, { claimText: 'engram corroborated fact' }, [
+    await appendClaim(db, embedder, { claimText: 'engram corroborated fact' }, [
       { sourceId: s1.sourceId, locator: 'l1' },
       { sourceId: s2.sourceId, locator: 'l2' },
     ])
     const lone = await seedSource(0.9)
-    await appendClaim(db, { claimText: 'engram lone-source fact' }, [
+    await appendClaim(db, embedder, { claimText: 'engram lone-source fact' }, [
       { sourceId: lone.sourceId, locator: 'l' },
     ])
 
-    expect(await recallClaims(db, 'engram')).toHaveLength(0) // both draft → shadow zone, not recalled
+    expect(await recallClaims(db, embedder, 'engram')).toHaveLength(0) // both draft → shadow zone, not recalled
   })
 })
 
@@ -447,7 +440,7 @@ describe('S8 contradicts — dual-return + real-time conflictDecay (A.3/A.5)', (
     const b = await seedClaim({ raw: 0.8, text: 'sky color green' })
     await contradict(a, b)
 
-    const results = await recallClaims(db, 'sky color')
+    const results = await recallClaims(db, embedder, 'sky color')
     expect(results).toHaveLength(2)
     const byId = new Map(results.map((r) => [r.claim.id, r]))
     expect(byId.get(a)!.contradicts).toEqual([b]) // each tagged with its contradicts edge
@@ -459,13 +452,17 @@ describe('S8 contradicts — dual-return + real-time conflictDecay (A.3/A.5)', (
     const b = await seedClaim({ raw: 0.8, text: 'engram conflict b' })
 
     // before the edge: full confidence, conflictDecay = 1
-    const before = new Map((await recallClaims(db, 'engram conflict')).map((r) => [r.claim.id, r]))
+    const before = new Map(
+      (await recallClaims(db, embedder, 'engram conflict')).map((r) => [r.claim.id, r]),
+    )
     expect(before.get(a)!.confidence.value).toBeCloseTo(0.8, 6)
     expect(before.get(a)!.confidence.factors.conflictDecay).toBe(1)
 
     await contradict(a, b) // one active contradiction each → conflictDecay(1) = 1/1.5
 
-    const after = new Map((await recallClaims(db, 'engram conflict')).map((r) => [r.claim.id, r]))
+    const after = new Map(
+      (await recallClaims(db, embedder, 'engram conflict')).map((r) => [r.claim.id, r]),
+    )
     for (const id of [a, b]) {
       expect(after.get(id)!.confidence.value).toBeCloseTo(0.8 / 1.5, 6) // measurably reduced, both sides
       expect(after.get(id)!.confidence.factors.activeContradicts).toBe(1)
@@ -475,7 +472,7 @@ describe('S8 contradicts — dual-return + real-time conflictDecay (A.3/A.5)', (
 
   it('a claim with no contradictions is unaffected (conflictDecay = 1, contradicts = [])', async () => {
     await seedClaim({ raw: 0.8, text: 'lonely fact' })
-    const [r] = await recallClaims(db, 'lonely fact')
+    const [r] = await recallClaims(db, embedder, 'lonely fact')
     expect(r!.confidence.value).toBeCloseTo(0.8, 6)
     expect(r!.confidence.factors.conflictDecay).toBe(1)
     expect(r!.confidence.factors.activeContradicts).toBe(0)
@@ -488,7 +485,7 @@ describe('S8 contradicts — dual-return + real-time conflictDecay (A.3/A.5)', (
       const a = await seedClaim({ raw: 0.8, text: `nonactive opp ${status} head` })
       const b = await seedClaim({ raw: 0.8, text: `opp ${status} other`, status })
       await contradict(a, b)
-      const [r] = await recallClaims(db, `nonactive opp ${status} head`)
+      const [r] = await recallClaims(db, embedder, `nonactive opp ${status} head`)
       expect(r!.confidence.value).toBeCloseTo(0.8, 6) // opponent not active → no live conflict
       expect(r!.confidence.factors.conflictDecay).toBe(1)
       expect(r!.contradicts).toEqual([])
@@ -502,7 +499,7 @@ describe('S8 contradicts — dual-return + real-time conflictDecay (A.3/A.5)', (
     await contradict(b, a)
     await contradict(c, a) // 2 active contradictions → conflictDecay(2) = 0.5
     // 0.5 × 0.5 = 0.25 < 0.4 floor → the target disappears entirely (conflict gates, not merely annotates)
-    expect(await recallClaims(db, 'gated by conflict target')).toHaveLength(0)
+    expect(await recallClaims(db, embedder, 'gated by conflict target')).toHaveLength(0)
   })
 
   it('append→recall seam: a contradiction recorded by append surfaces in recall.contradicts (one real edge, read both ways)', async () => {
@@ -515,11 +512,13 @@ describe('S8 contradicts — dual-return + real-time conflictDecay (A.3/A.5)', (
     ]
     const { claimId: a } = await appendClaim(
       db,
+      embedder,
       { claimText: 'seam sku maxres 4k', subject: 'sku', predicate: 'maxres', object: '4k' },
       prov,
     )
     const { claimId: b } = await appendClaim(
       db,
+      embedder,
       { claimText: 'seam sku maxres 1080p', subject: 'sku', predicate: 'maxres', object: '1080p' },
       prov,
     )
@@ -530,7 +529,9 @@ describe('S8 contradicts — dual-return + real-time conflictDecay (A.3/A.5)', (
         .set({ status: 'active', confidenceFactors: factorsBlob(0.9) })
         .where(eq(claim.id, id))
     }
-    const byId = new Map((await recallClaims(db, 'seam sku maxres')).map((r) => [r.claim.id, r]))
+    const byId = new Map(
+      (await recallClaims(db, embedder, 'seam sku maxres')).map((r) => [r.claim.id, r]),
+    )
     expect(byId.get(a)!.contradicts).toEqual([b]) // the single append-written edge is read from both sides
     expect(byId.get(b)!.contradicts).toEqual([a])
     expect(byId.get(a)!.confidence.factors.activeContradicts).toBe(1)
@@ -542,7 +543,8 @@ describe('S8 contradicts — dual-return + real-time conflictDecay (A.3/A.5)', (
     const c = await seedClaim({ raw: 0.9, text: 'multi rival two' })
     await contradict(b, a)
     await contradict(c, a)
-    const [r] = await recallClaims(db, 'multi target')
+    // NN may also surface the rivals (shared 'multi' token); find the target by id rather than [0]
+    const r = (await recallClaims(db, embedder, 'multi target')).find((x) => x.claim.id === a)
     expect(r!.confidence.factors.activeContradicts).toBe(2)
     expect(r!.confidence.value).toBeCloseTo(0.9 * 0.5, 6) // conflictDecay(2) = 0.5
     expect(new Set(r!.contradicts)).toEqual(new Set([b, c]))
@@ -551,7 +553,7 @@ describe('S8 contradicts — dual-return + real-time conflictDecay (A.3/A.5)', (
   it('a self-referential contradicts edge does not make a claim conflict with itself (defensive)', async () => {
     const a = await seedClaim({ raw: 0.8, text: 'self edge claim' })
     await contradict(a, a) // from == to (write path blocks this; direct insert bottoms it out)
-    const [r] = await recallClaims(db, 'self edge claim')
+    const [r] = await recallClaims(db, embedder, 'self edge claim')
     expect(r!.contradicts).toEqual([])
     expect(r!.confidence.factors.conflictDecay).toBe(1)
   })

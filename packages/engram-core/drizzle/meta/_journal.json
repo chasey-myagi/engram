@@ -15,6 +15,13 @@
       "when": 1780489641434,
       "tag": "0001_orange_wild_child",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1780542359113,
+      "tag": "0002_dry_sir_ram",
+      "breakpoints": true
     }
   ]
 }

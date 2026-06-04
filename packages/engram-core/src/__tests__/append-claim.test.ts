@@ -20,10 +20,12 @@ import {
   verificationKind,
 } from '../db/schema.js'
 import { addSource, appendClaim, supersedeClaim } from '../spi/append-claim.js'
+import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { DEFAULT_WEIGHTS } from '../confidence/confidence.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
 const migrationsFolder = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'drizzle')
+const embedder = makeFakeEmbedder() // deterministic, offline — same instance produces/queries vectors
 
 let admin: pg.Pool // connected to the base db; creates/drops the per-run db
 let pool: pg.Pool // connected to this run's throwaway db
@@ -69,7 +71,7 @@ async function seedSource(meta: Record<string, unknown> = {}) {
 describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
   it('persists a draft claim plus exactly its provenance in one atomic transaction', async () => {
     const { sourceId } = await seedSource()
-    const { claimId } = await appendClaim(db, { claimText: 'SKU-123 supports 4K@120' }, [
+    const { claimId } = await appendClaim(db, embedder, { claimText: 'SKU-123 supports 4K@120' }, [
       { sourceId, locator: 'page 4, table 2', relevance: 'exact' },
     ])
     const claims = await db.select().from(claim).where(eq(claim.id, claimId))
@@ -87,14 +89,18 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
   })
 
   it('throws and writes NOTHING when provenance is empty (D1 hard gate)', async () => {
-    await expect(appendClaim(db, { claimText: 'orphan' }, [])).rejects.toThrow(/D1|provenance/i)
+    await expect(appendClaim(db, embedder, { claimText: 'orphan' }, [])).rejects.toThrow(
+      /D1|provenance/i,
+    )
     expect(await db.select().from(claim)).toHaveLength(0)
     expect(await db.select().from(claimProvenance)).toHaveLength(0)
   })
 
   it('rolls back the whole append when a provenance points at a nonexistent source (NOT NULL FK)', async () => {
     await expect(
-      appendClaim(db, { claimText: 'bad-prov' }, [{ sourceId: randomUUID(), locator: 'x' }]),
+      appendClaim(db, embedder, { claimText: 'bad-prov' }, [
+        { sourceId: randomUUID(), locator: 'x' },
+      ]),
     ).rejects.toThrow()
     // atomic: neither the claim nor any provenance survived
     expect(await db.select().from(claim)).toHaveLength(0)
@@ -142,12 +148,12 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
 
   it('supersede appends a new claim under the SAME lineage_id, marks old superseded, no physical delete', async () => {
     const { sourceId } = await seedSource()
-    const { claimId: oldId } = await appendClaim(db, { claimText: 'v1' }, [
+    const { claimId: oldId } = await appendClaim(db, embedder, { claimText: 'v1' }, [
       { sourceId, locator: 'l' },
     ])
     const oldBefore = (await db.select().from(claim).where(eq(claim.id, oldId)))[0]!
 
-    const { claimId: newId } = await supersedeClaim(db, oldId, { claimText: 'v2' }, [
+    const { claimId: newId } = await supersedeClaim(db, embedder, oldId, { claimText: 'v2' }, [
       { sourceId, locator: 'l' },
     ])
     const newRow = (await db.select().from(claim).where(eq(claim.id, newId)))[0]!
@@ -164,7 +170,7 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
   it('persists multiple provenances for one claim in a single transaction', async () => {
     const s1 = await seedSource()
     const s2 = await seedSource()
-    const { claimId } = await appendClaim(db, { claimText: 'multi-src fact' }, [
+    const { claimId } = await appendClaim(db, embedder, { claimText: 'multi-src fact' }, [
       { sourceId: s1.sourceId, locator: 'a', relevance: 'exact' },
       { sourceId: s2.sourceId, locator: 'b', relevance: 'supporting' },
     ])
@@ -180,7 +186,7 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
   it('rolls back the WHOLE append when one of several provenances has a bad source (atomic across rows)', async () => {
     const { sourceId } = await seedSource()
     await expect(
-      appendClaim(db, { claimText: 'partial' }, [
+      appendClaim(db, embedder, { claimText: 'partial' }, [
         { sourceId, locator: 'good' },
         { sourceId: randomUUID(), locator: 'bad' }, // nonexistent source → FK fails after prov #1 inserted
       ]),
@@ -191,7 +197,9 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
 
   it('defaults provenance relevance to "supporting" when omitted', async () => {
     const { sourceId } = await seedSource()
-    const { claimId } = await appendClaim(db, { claimText: 'def' }, [{ sourceId, locator: 'l' }])
+    const { claimId } = await appendClaim(db, embedder, { claimText: 'def' }, [
+      { sourceId, locator: 'l' },
+    ])
     const provs = await db
       .select()
       .from(claimProvenance)
@@ -201,7 +209,9 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
 
   it('append() stamps a continuous computed confidence + factor snapshot (命门 — replaces the 0/0/{} placeholder)', async () => {
     const { sourceId } = await seedSource()
-    const { claimId } = await appendClaim(db, { claimText: 'c' }, [{ sourceId, locator: 'l' }])
+    const { claimId } = await appendClaim(db, embedder, { claimText: 'c' }, [
+      { sourceId, locator: 'l' },
+    ])
     const row = (await db.select().from(claim).where(eq(claim.id, claimId)))[0]!
     expect(row.confidence).toBeGreaterThan(0) // no longer the 0 placeholder
     expect(row.confidence).toBeLessThanOrEqual(1)
@@ -219,11 +229,11 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
 
   it('keeps one stable lineage across a supersede chain (v1 -> v2 -> v3), append-only', async () => {
     const { sourceId } = await seedSource()
-    const v1 = await appendClaim(db, { claimText: 'v1' }, [{ sourceId, locator: 'l' }])
-    const v2 = await supersedeClaim(db, v1.claimId, { claimText: 'v2' }, [
+    const v1 = await appendClaim(db, embedder, { claimText: 'v1' }, [{ sourceId, locator: 'l' }])
+    const v2 = await supersedeClaim(db, embedder, v1.claimId, { claimText: 'v2' }, [
       { sourceId, locator: 'l' },
     ])
-    const v3 = await supersedeClaim(db, v2.claimId, { claimText: 'v3' }, [
+    const v3 = await supersedeClaim(db, embedder, v2.claimId, { claimText: 'v3' }, [
       { sourceId, locator: 'l' },
     ])
 
@@ -240,8 +250,12 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
 
   it('supersedeClaim enforces D1 — empty provenance throws and writes no new version', async () => {
     const { sourceId } = await seedSource()
-    const { claimId: v1 } = await appendClaim(db, { claimText: 'v1' }, [{ sourceId, locator: 'l' }])
-    await expect(supersedeClaim(db, v1, { claimText: 'v2' }, [])).rejects.toThrow(/D1|provenance/i)
+    const { claimId: v1 } = await appendClaim(db, embedder, { claimText: 'v1' }, [
+      { sourceId, locator: 'l' },
+    ])
+    await expect(supersedeClaim(db, embedder, v1, { claimText: 'v2' }, [])).rejects.toThrow(
+      /D1|provenance/i,
+    )
     expect(await db.select().from(claim)).toHaveLength(1) // only v1; no v2 written
     expect(await db.select().from(relation)).toHaveLength(0) // no supersedes edge
   })
@@ -249,7 +263,7 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
   it('supersedeClaim throws and writes nothing when the target claim does not exist', async () => {
     const { sourceId } = await seedSource()
     await expect(
-      supersedeClaim(db, randomUUID(), { claimText: 'v2' }, [{ sourceId, locator: 'l' }]),
+      supersedeClaim(db, embedder, randomUUID(), { claimText: 'v2' }, [{ sourceId, locator: 'l' }]),
     ).rejects.toThrow(/not found/i)
     expect(await db.select().from(claim)).toHaveLength(0)
     expect(await db.select().from(relation)).toHaveLength(0)
@@ -257,20 +271,24 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
 
   it('supersedeClaim refuses to supersede an already-superseded claim (sequential no-fork)', async () => {
     const { sourceId } = await seedSource()
-    const { claimId: v1 } = await appendClaim(db, { claimText: 'v1' }, [{ sourceId, locator: 'l' }])
-    await supersedeClaim(db, v1, { claimText: 'v2' }, [{ sourceId, locator: 'l' }]) // v1 -> superseded
+    const { claimId: v1 } = await appendClaim(db, embedder, { claimText: 'v1' }, [
+      { sourceId, locator: 'l' },
+    ])
+    await supersedeClaim(db, embedder, v1, { claimText: 'v2' }, [{ sourceId, locator: 'l' }]) // v1 -> superseded
     await expect(
-      supersedeClaim(db, v1, { claimText: 'v2-fork' }, [{ sourceId, locator: 'l' }]),
+      supersedeClaim(db, embedder, v1, { claimText: 'v2-fork' }, [{ sourceId, locator: 'l' }]),
     ).rejects.toThrow(/already superseded/i)
     expect(await db.select().from(claim)).toHaveLength(2) // v1, v2 only — no forked head
   })
 
   it('serializes concurrent supersedes of the same head — single-head invariant (SELECT FOR UPDATE)', async () => {
     const { sourceId } = await seedSource()
-    const { claimId: v1 } = await appendClaim(db, { claimText: 'v1' }, [{ sourceId, locator: 'l' }])
+    const { claimId: v1 } = await appendClaim(db, embedder, { claimText: 'v1' }, [
+      { sourceId, locator: 'l' },
+    ])
     const results = await Promise.allSettled([
-      supersedeClaim(db, v1, { claimText: 'A' }, [{ sourceId, locator: 'l' }]),
-      supersedeClaim(db, v1, { claimText: 'B' }, [{ sourceId, locator: 'l' }]),
+      supersedeClaim(db, embedder, v1, { claimText: 'A' }, [{ sourceId, locator: 'l' }]),
+      supersedeClaim(db, embedder, v1, { claimText: 'B' }, [{ sourceId, locator: 'l' }]),
     ])
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1) // exactly one wins
     expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1) // the other is rejected
@@ -281,7 +299,9 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
 
   it('D1 DB-layer backstop: a provenance with NULL source_id is physically rejected (NOT NULL)', async () => {
     const { sourceId } = await seedSource()
-    const { claimId } = await appendClaim(db, { claimText: 'real' }, [{ sourceId, locator: 'l' }])
+    const { claimId } = await appendClaim(db, embedder, { claimText: 'real' }, [
+      { sourceId, locator: 'l' },
+    ])
     // bypass the SPI guard, hit the table directly: a NULL source_id must be rejected by the DB (Story 36)
     await expect(
       pool.query(
@@ -293,14 +313,14 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
 
   it('命门 end-to-end: 1 source vs 3 independent sources vs a stale source → three distinct continuous confidences', async () => {
     const s1 = await seedSource()
-    const single = await appendClaim(db, { claimText: 'fact' }, [
+    const single = await appendClaim(db, embedder, { claimText: 'fact' }, [
       { sourceId: s1.sourceId, locator: 'l' },
     ])
 
     const a = await seedSource()
     const b = await seedSource()
     const c = await seedSource()
-    const triple = await appendClaim(db, { claimText: 'fact' }, [
+    const triple = await appendClaim(db, embedder, { claimText: 'fact' }, [
       { sourceId: a.sourceId, locator: 'l' },
       { sourceId: b.sourceId, locator: 'l' },
       { sourceId: c.sourceId, locator: 'l' },
@@ -308,7 +328,7 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
 
     const sStale = await seedSource()
     const twoYearsAgo = new Date(Date.now() - 730 * 86_400_000) // one half-life for structured_spec
-    const stale = await appendClaim(db, { claimText: 'fact', asOf: twoYearsAgo }, [
+    const stale = await appendClaim(db, embedder, { claimText: 'fact', asOf: twoYearsAgo }, [
       { sourceId: sStale.sourceId, locator: 'l' },
     ])
 
@@ -329,13 +349,13 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
 
   it('supersede recomputes confidence from the NEW version provenances (v1 single < v2 three independent)', async () => {
     const s1 = await seedSource()
-    const v1 = await appendClaim(db, { claimText: 'fact' }, [
+    const v1 = await appendClaim(db, embedder, { claimText: 'fact' }, [
       { sourceId: s1.sourceId, locator: 'l' },
     ])
     const a = await seedSource()
     const b = await seedSource()
     const c = await seedSource()
-    const v2 = await supersedeClaim(db, v1.claimId, { claimText: 'fact' }, [
+    const v2 = await supersedeClaim(db, embedder, v1.claimId, { claimText: 'fact' }, [
       { sourceId: a.sourceId, locator: 'l' },
       { sourceId: b.sourceId, locator: 'l' },
       { sourceId: c.sourceId, locator: 'l' },
@@ -363,7 +383,7 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
       authorityScore: 0.2,
     })
     const oneYearAgo = new Date(Date.now() - 365 * 86_400_000)
-    const { claimId } = await appendClaim(db, { claimText: 'mixed', asOf: oneYearAgo }, [
+    const { claimId } = await appendClaim(db, embedder, { claimText: 'mixed', asOf: oneYearAgo }, [
       { sourceId: strong.sourceId, locator: 'l' },
       { sourceId: weak.sourceId, locator: 'l' },
     ])
@@ -376,7 +396,7 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
 
   it('indepSupport counts DISTINCT sources — citing one source twice does not inflate corroboration (命门 red line)', async () => {
     const { sourceId } = await seedSource()
-    const { claimId } = await appendClaim(db, { claimText: 'dup' }, [
+    const { claimId } = await appendClaim(db, embedder, { claimText: 'dup' }, [
       { sourceId, locator: 'p1' },
       { sourceId, locator: 'p2' }, // same source, different locator
     ])
@@ -422,7 +442,7 @@ describe('S8 contradiction detection (append, optimistic — record both, never 
     text: string,
   ) {
     const { sourceId } = await seedSource()
-    return appendClaim(db, { claimText: text, subject, predicate, object }, [
+    return appendClaim(db, embedder, { claimText: text, subject, predicate, object }, [
       { sourceId, locator: 'l', relevance: 'exact' },
     ])
   }
@@ -458,15 +478,15 @@ describe('S8 contradiction detection (append, optimistic — record both, never 
 
   it('does not detect contradictions for unstructured claims (no subject/predicate/object)', async () => {
     const { sourceId } = await seedSource()
-    await appendClaim(db, { claimText: 'unstructured one' }, [{ sourceId, locator: 'l' }])
-    await appendClaim(db, { claimText: 'unstructured two' }, [{ sourceId, locator: 'l' }])
+    await appendClaim(db, embedder, { claimText: 'unstructured one' }, [{ sourceId, locator: 'l' }])
+    await appendClaim(db, embedder, { claimText: 'unstructured two' }, [{ sourceId, locator: 'l' }])
     expect(await contradictsEdges()).toHaveLength(0)
   })
 
   it('records no contradiction when the new claim lacks an object, or when the existing object is null', async () => {
     const s = await seedSource()
     // new claim partially structured (object null) → recordContradictions early-returns, no detection
-    await appendClaim(db, { claimText: 'partial', subject: 'sku-x', predicate: 'p' }, [
+    await appendClaim(db, embedder, { claimText: 'partial', subject: 'sku-x', predicate: 'p' }, [
       { sourceId: s.sourceId, locator: 'l' },
     ])
     // now a fully-structured claim on the same subject+predicate: the existing null-object row is NOT a contradiction

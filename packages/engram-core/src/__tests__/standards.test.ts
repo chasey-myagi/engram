@@ -14,6 +14,7 @@ import {
 } from '../confidence/confidence.js'
 import { DEFAULT_STANDARDS, getActiveStandards, setStandards } from '../config/standards.js'
 import { applyAdapter } from '../spi/adapter.js'
+import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { createDb, type DB } from '../db/client.js'
 import { addSource } from '../spi/append-claim.js'
 import { claim, claimProvenance, standards } from '../db/schema.js'
@@ -21,6 +22,7 @@ import { recallClaims } from '../spi/recall-claims.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
 const migrationsFolder = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'drizzle')
+const embedder = makeFakeEmbedder()
 
 let admin: pg.Pool
 let pool: pg.Pool
@@ -70,6 +72,8 @@ async function seedClaimWithFactors(factors: AdditiveFactors, text: string): Pro
       weights: DEFAULT_WEIGHTS,
       calibrationVersion: CALIBRATION_IDENTITY,
     },
+    embedding: await embedder.embed(text),
+    embeddingVersion: embedder.version,
     lineageId: randomUUID(),
     asOf: new Date(),
     createdBy: 'test',
@@ -163,12 +167,18 @@ describe('S7 config-state Standards (A.2/A.3)', () => {
       'engram floor combo',
     )
     // baseline: default config floor 0.4, ctx floor 0.4 → 0.5 surfaces
-    expect(await recallClaims(db, 'engram floor combo', { confidenceFloor: 0.4 })).toHaveLength(1)
+    expect(
+      await recallClaims(db, embedder, 'engram floor combo', { confidenceFloor: 0.4 }),
+    ).toHaveLength(1)
     // request wins: config 0.4 (default), ctx 0.7 → effective 0.7 → 0.5 dropped
-    expect(await recallClaims(db, 'engram floor combo', { confidenceFloor: 0.7 })).toHaveLength(0)
+    expect(
+      await recallClaims(db, embedder, 'engram floor combo', { confidenceFloor: 0.7 }),
+    ).toHaveLength(0)
     // config wins: config 0.6, ctx 0.4 → effective 0.6 → 0.5 dropped
     await setStandards(db, { factorWeights: FULL, consumeFloor: 0.6 })
-    expect(await recallClaims(db, 'engram floor combo', { confidenceFloor: 0.4 })).toHaveLength(0)
+    expect(
+      await recallClaims(db, embedder, 'engram floor combo', { confidenceFloor: 0.4 }),
+    ).toHaveLength(0)
   })
 
   it('is append-only: each setStandards adds a row; getActiveStandards returns the latest', async () => {
@@ -191,7 +201,7 @@ describe('S7 config-state Standards (A.2/A.3)', () => {
       factors({ authority: 1, entailment: 0.5, indepSupport: 1 }),
       'engram weight demo',
     )
-    const [r1] = await recallClaims(db, 'engram weight demo')
+    const [r1] = await recallClaims(db, embedder, 'engram weight demo')
     // DEFAULT: 0.3·1 + 0.15·0.5 + 0.15·1 = 0.525
     expect(r1!.confidence.value).toBeCloseTo(0.525, 6)
     expect(r1!.confidence.weights).toEqual(DEFAULT_WEIGHTS)
@@ -207,7 +217,7 @@ describe('S7 config-state Standards (A.2/A.3)', () => {
       createdBy: 'editor:test',
     })
 
-    const [r2] = await recallClaims(db, 'engram weight demo')
+    const [r2] = await recallClaims(db, embedder, 'engram weight demo')
     // heavy-authority: 0.6·1 + 0.1·0.5 + 0.1·1 = 0.75 — recomputed for the new request
     expect(r2!.confidence.value).toBeCloseTo(0.75, 6)
     expect(r2!.claim.id).toBe(id)
@@ -224,10 +234,10 @@ describe('S7 config-state Standards (A.2/A.3)', () => {
       factors({ authority: 1, entailment: 0.5, indepSupport: 1 }),
       'engram floor demo',
     )
-    expect(await recallClaims(db, 'engram floor demo')).toHaveLength(1) // default floor 0.4
+    expect(await recallClaims(db, embedder, 'engram floor demo')).toHaveLength(1) // default floor 0.4
 
     await setStandards(db, { factorWeights: FULL, consumeFloor: 0.6 }) // raise the consume floor above 0.525
-    expect(await recallClaims(db, 'engram floor demo')).toHaveLength(0) // now below the active floor
+    expect(await recallClaims(db, embedder, 'engram floor demo')).toHaveLength(0) // now below the active floor
   })
 
   it('a mustVerifyThreshold change flips mustVerify on the next recall', async () => {
@@ -236,12 +246,12 @@ describe('S7 config-state Standards (A.2/A.3)', () => {
       factors({ authority: 1, humanReview: 1, entailment: 0.5 }),
       'engram verify demo',
     )
-    const [before] = await recallClaims(db, 'engram verify demo')
+    const [before] = await recallClaims(db, embedder, 'engram verify demo')
     expect(before!.confidence.value).toBeCloseTo(0.675, 6)
     expect(before!.mustVerify).toBe(false) // 0.675 ≥ default 0.6
 
     await setStandards(db, { factorWeights: FULL, mustVerifyThreshold: 0.8 }) // raise the trust bar above 0.675
-    const [after] = await recallClaims(db, 'engram verify demo')
+    const [after] = await recallClaims(db, embedder, 'engram verify demo')
     expect(after!.mustVerify).toBe(true) // 0.675 < 0.8 now ⇒ must verify
   })
 
@@ -259,7 +269,7 @@ describe('S7 config-state Standards (A.2/A.3)', () => {
       }), // base = 0.7
       'engram adapter seam',
     )
-    const results = await recallClaims(db, 'engram adapter seam')
+    const results = await recallClaims(db, embedder, 'engram adapter seam')
     expect(results[0]!.confidence.value).toBeCloseTo(0.7, 6)
     expect(results[0]!.mustVerify).toBe(true) // 0.7 < config 0.8
 
