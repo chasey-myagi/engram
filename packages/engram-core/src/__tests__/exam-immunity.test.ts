@@ -235,6 +235,29 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     expect(res.result.noSelfContradiction).toBe(false) // …but the question self-contradicts the KB
     expect(res.promoted).toBe(false)
     expect(await getGoldenQuestions(db)).toHaveLength(0)
+    const [cand] = await db.select().from(l5Candidates).where(eq(l5Candidates.id, candidateId))
+    expect(cand!.status).toBe('rejected')
+
+    // "fail ⇒ logged": the poison-authoring rejection path STILL records an auditable rejection
+    const audit = await getPromotionAudit(db, candidateId)
+    expect(audit).toHaveLength(1)
+    expect(audit[0]!.decision).toBe('rejected')
+    expect(audit[0]!.decidedBy).toBe('human:judge')
+    expect(audit[0]!.basis.passed).toBe(false)
+
+    // the rejected poison claim persists as the immune-system artifact, with its patrol verdict explaining why
+    expect(res.poisonClaimId).toBeDefined()
+    const patrol = await db
+      .select()
+      .from(claimVerification)
+      .where(
+        and(
+          eq(claimVerification.claimId, res.poisonClaimId!),
+          eq(claimVerification.kind, 'patrol'),
+        ),
+      )
+    expect(patrol).toHaveLength(1)
+    expect((patrol[0]!.verdict as { noSelfContradiction: boolean }).noSelfContradiction).toBe(false)
   })
 
   it('only a human can promote: an agent-confirmed attempt is rejected, audited, and does NOT burn the candidate (stays queued)', async () => {
@@ -296,5 +319,49 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     await expect(
       promoteCandidate(db, embedder, randomUUID(), { confirmedBy: 'human:judge' }),
     ).rejects.toThrow(/not found/)
+  })
+
+  it('rejection is terminal: a rejected candidate cannot be re-promoted (a burned poison can never sneak back)', async () => {
+    const q = 'rejected-then-retried query'
+    const answer = await seedClaim({
+      claimText: 'kb can answer this',
+      embedQuery: q,
+      status: 'active',
+    })
+    const candidateId = await seedCandidate(q, answer)
+    await promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:judge' }) // → rejected (KB answers)
+
+    await expect(
+      promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:judge' }),
+    ).rejects.toThrow(/only queued candidates/)
+  })
+
+  it('getGoldenQuestions and the unfiltered getPromotionAudit return rows in created_at-ascending order across multiple candidates', async () => {
+    const mk = async (n: number) => {
+      const q = `gap question number ${n}`
+      const origin = await seedClaim({
+        claimText: `origin ${n}`,
+        embedQuery: q,
+        status: 'quarantined',
+      })
+      const cid = await seedCandidate(q, origin)
+      await promoteCandidate(db, embedder, cid, { confirmedBy: 'human:judge' })
+      return q
+    }
+    const q1 = await mk(1)
+    const q2 = await mk(2)
+    const q3 = await mk(3)
+
+    const golden = await getGoldenQuestions(db)
+    expect(golden.map((g) => g.query)).toEqual([q1, q2, q3]) // promotion order preserved (feeds runL5Suite stably)
+
+    const audit = await getPromotionAudit(db) // unfiltered (no candidateId) branch
+    expect(audit).toHaveLength(3)
+    expect(audit.every((a) => a.decision === 'promoted')).toBe(true)
+    for (let i = 1; i < audit.length; i++) {
+      expect(audit[i]!.createdAt.getTime()).toBeGreaterThanOrEqual(
+        audit[i - 1]!.createdAt.getTime(),
+      )
+    }
   })
 })
