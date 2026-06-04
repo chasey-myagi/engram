@@ -2,11 +2,7 @@
  * 确定性 fake entailment 判官（测试/CI 用，不联网）。默认一律判 'pass'；可注入 verdictOf 定制
  * （如按 claimText 命中合成幻觉判 'fail'）。暴露 callCount() 以便断言「每条 claim 恰调用一次 LLM」。
  */
-import type {
-  EntailmentJudge,
-  EntailmentQuery,
-  EntailmentVerdict,
-} from './entailment-judge.js'
+import type { EntailmentJudge, EntailmentQuery, EntailmentVerdict } from './entailment-judge.js'
 
 export interface FakeEntailmentJudgeOptions {
   version?: string

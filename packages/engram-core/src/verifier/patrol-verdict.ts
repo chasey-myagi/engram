@@ -115,9 +115,7 @@ export async function latestEntailmentFactors(
       verdict: claimVerification.verdict,
     })
     .from(claimVerification)
-    .where(
-      and(eq(claimVerification.kind, 'patrol'), inArray(claimVerification.claimId, claimIds)),
-    )
+    .where(and(eq(claimVerification.kind, 'patrol'), inArray(claimVerification.claimId, claimIds)))
     .orderBy(desc(claimVerification.createdAt), desc(claimVerification.id))
   for (const r of rows) {
     if (out.has(r.claimId)) continue // 已倒序：每个 claim 第一次见到的即最新一条

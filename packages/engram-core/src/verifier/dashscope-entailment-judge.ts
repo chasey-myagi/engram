@@ -4,11 +4,7 @@
  * 点状一次 LLM：claim 文本 + 全部出处 → 强制返回 {pass|fail|not_co_true} 之一；非法/异常 → 抛
  * （Verifier 据「失败跳过本轮、下轮重试」吞掉，不崩、不无限重试）。
  */
-import type {
-  EntailmentJudge,
-  EntailmentQuery,
-  EntailmentVerdict,
-} from './entailment-judge.js'
+import type { EntailmentJudge, EntailmentQuery, EntailmentVerdict } from './entailment-judge.js'
 
 const DASHSCOPE_CHAT_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
 

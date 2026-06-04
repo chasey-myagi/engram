@@ -26,6 +26,7 @@ import { getActiveStandards } from '../config/standards.js'
 import { applyG, rawFromStoredFactors, type StoredConfidence } from '../confidence/confidence.js'
 import type { DB } from '../db/client.js'
 import { claim, claimProvenance, type ClaimStatus } from '../db/schema.js'
+import { computeEntailmentFactor } from '../verifier/patrol-verdict.js'
 import { isHumanRole } from './reflux.js'
 
 /** draft→active 的连续 confidence 晋升门（A.4）：蓝边 promote 需 conf≥此值 ∧ entailment 通过。 */
@@ -101,8 +102,12 @@ export async function transitionClaim(
         const stored = row.factors as StoredConfidence
         // conf 用存档因子 × 活动权重现算（与 recall 一致）；conflictDecay 取存档快照（draft 通常尚无矛盾，
         // 活值冲突一致性留作后续与 recall 的 S8 实时口径对齐）。
+        // S17：f2 entailment 按 recall 同款实时口径——接到该 claim 最新 patrol 裁决（Verifier 在调本迁移前刚写入），
+        // 让「entailment pass 抬 f2」真正参与 conf≥0.5 判据（闭合 S13 合成桩；无 patrol 则中性 0.5，与存档一致、行为不变）。
+        const liveEntailment = await computeEntailmentFactor(tx, claimId)
+        const factors = { ...stored.factors, entailment: liveEntailment }
         const conf = applyG(
-          rawFromStoredFactors(stored.factors, std.factorWeights),
+          rawFromStoredFactors(factors, std.factorWeights),
           stored.calibrationVersion,
         )
         if (!(conf >= PROMOTE_CONFIDENCE_FLOOR)) {
