@@ -21,6 +21,7 @@ import {
   type StoredConfidence,
 } from '../confidence/confidence.js'
 import { countIndependentSupports } from '../same-fact/independent.js'
+import { computeEntailmentFactor } from '../verifier/patrol-verdict.js'
 import type { DB, Tx } from '../db/client.js'
 import type { Embedder } from '../embedding/embedder.js'
 import {
@@ -88,11 +89,15 @@ function isSupporting(relevance: ProvRelevance | null | undefined): boolean {
  * halfLife 看最强源 kind、indepSupport 数**独立** supports 源（A.6：hash 去重 + derived_from 折叠 + agent_synthesis
  * 0.5 折扣，S14）。tangential/irrelevant 出处既不抬 authority 也不计印证（防拿无关源刷 f3）。
  * 既给 appendClaim 写新 claim 用，也给 commitClaim 合并后按全量出处重算用（单一真相源）。
+ *
+ * opts.claimId（S17 起）：给了**已存在** claim 的 id，则把 f2 entailment 因子接到该 claim 最新 patrol 裁决上
+ * （pass→1 / fail→0 / 未跑→中性 0.5）；没给（如 appendClaim 新建、claim 尚不存在）则 entailment 留中性。
  */
 export async function computeConfidenceFromProvenances(
   tx: Tx,
   provenances: ProvenanceRef[],
   asOf?: Date,
+  opts: { claimId?: string } = {},
 ): Promise<ComputedConfidence> {
   const ids = [
     ...new Set(provenances.filter((p) => isSupporting(p.relevance)).map((p) => p.sourceId)),
@@ -119,10 +124,14 @@ export async function computeConfidenceFromProvenances(
   const indepSupport = independentSupportScore(countIndependentSupports(sources)) // A.6 独立印证数
   const resolvedAsOf = asOf ?? new Date()
   const ageDays = Math.max(0, (Date.now() - resolvedAsOf.getTime()) / MS_PER_DAY)
-  return computeConfidence(
-    { ...NEUTRAL_FACTORS, authority, indepSupport },
-    { ageDays, halfLifeDays, activeContradicts: 0 },
-  )
+  // ── 因子接线单一标注点（S17/S19 在此抬可计算因子；不要散落别处）──
+  // f2 entailment（S17）：已存在 claim 取其最新 patrol 裁决；新建 claim（无 id）留 NEUTRAL_FACTORS.entailment(0.5)。
+  // 兄弟切片 S19 在同处加 f4 usageCorrect（读 usage_truth），保持本处最小、易扩展。
+  const liveFactors = { ...NEUTRAL_FACTORS, authority, indepSupport }
+  if (opts.claimId !== undefined) {
+    liveFactors.entailment = await computeEntailmentFactor(tx, opts.claimId)
+  }
+  return computeConfidence(liveFactors, { ageDays, halfLifeDays, activeContradicts: 0 })
 }
 
 async function computeClaimConfidence(

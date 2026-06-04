@@ -41,6 +41,7 @@ import {
   type ClaimStatus,
   type ProvRelevance,
 } from '../db/schema.js'
+import { latestEntailmentFactors } from '../verifier/patrol-verdict.js'
 import { recordGap } from './metrics.js'
 
 // 内核消费门常量定义在命门模块；这里 re-export 保持既有 import 路径（index / adapter / bidding）不变。
@@ -208,6 +209,10 @@ export async function recallClaims(
     if (candidateSet.has(e.to) && activeIds.has(e.from)) addContra(e.to, e.from)
   }
 
+  // S17 f2 实时口径：召回时把 entailment 因子接到候选 claim **最新 patrol 裁决**（pass→1 / fail/not_co_true→0；
+  // 无 patrol 则不覆盖、沿用存档值），与 conflictDecay 的实时重算同款（不吃写时快照、反映最新巡查）。一次批量查回。
+  const entailmentByClaim = await latestEntailmentFactors(db, candidateIds)
+
   // 召回瞬间：用活动权重对存档因子重算 raw（配置态变更即刻生效）+ 实时 conflictDecay，再现算 g → value。
   const takenAt = new Date()
   const gated = candidates
@@ -217,7 +222,13 @@ export async function recallClaims(
       const contra = contradictsByClaim.get(c.id)
       const activeContradicts = contra ? contra.size : 0
       const cDecay = conflictDecay(activeContradicts) // 实时矛盾边数 → 惩罚
-      const raw = rawFromStoredFactors(stored.factors, std.factorWeights, { conflictDecay: cDecay })
+      // f2 实时覆盖：有 patrol 则用其值，否则沿用存档 entailment（其余因子不动）。
+      const liveEntailment = entailmentByClaim.get(c.id)
+      const factors: ConfidenceFactorBreakdown =
+        liveEntailment === undefined
+          ? stored.factors
+          : { ...stored.factors, entailment: liveEntailment }
+      const raw = rawFromStoredFactors(factors, std.factorWeights, { conflictDecay: cDecay })
       // S7 阶段 g 仍只有 'identity'（g 是统计态、S28 接管，与配置态 w 分离）。未知版本 applyG 会抛 → S27/S28 处理。
       const value = applyG(raw, stored.calibrationVersion)
       return {
@@ -225,6 +236,7 @@ export async function recallClaims(
         raw,
         value,
         stored,
+        factors,
         activeContradicts,
         cDecay,
         contradicts: contra ? [...contra] : [],
@@ -277,9 +289,10 @@ export async function recallClaims(
       confidence: {
         value: g.value,
         raw: g.raw,
-        // 快照里 activeContradicts / conflictDecay 反映**实时**矛盾边数（其余因子取存档值）。
+        // 快照里 entailment 反映**最新 patrol**（S17）、activeContradicts/conflictDecay 反映**实时**矛盾边数；
+        // 其余因子取存档值。g.factors 已是「存档因子 + 实时 entailment 覆盖」。
         factors: {
-          ...g.stored.factors,
+          ...g.factors,
           activeContradicts: g.activeContradicts,
           conflictDecay: g.cDecay,
         },

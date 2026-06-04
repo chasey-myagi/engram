@@ -8,6 +8,7 @@ export const ENGRAM_VERSION = '0.0.0' as const
 export * as schema from './db/schema.js'
 export type { SourceKind } from './db/schema.js'
 export { createPool, createDb, type DB } from './db/client.js'
+export { halfLifeDaysForKind } from './confidence/confidence.js'
 export {
   addSource,
   getSource,
@@ -143,3 +144,22 @@ export {
   independentSupportFactor,
   type SourceIndep,
 } from './same-fact/independent.js'
+export {
+  type EntailmentJudge,
+  type EntailmentQuery,
+  type EntailmentEvidence,
+  type EntailmentVerdict,
+} from './verifier/entailment-judge.js'
+export {
+  makeFakeEntailmentJudge,
+  type FakeEntailmentJudgeOptions,
+} from './verifier/fake-entailment-judge.js'
+export { makeDashScopeEntailmentJudge } from './verifier/dashscope-entailment-judge.js'
+export {
+  writePatrolVerdict,
+  latestPatrolVerdict,
+  computeEntailmentFactor,
+  latestEntailmentFactors,
+  entailmentVerdictToFactor,
+  type PatrolVerdict,
+} from './verifier/patrol-verdict.js'
