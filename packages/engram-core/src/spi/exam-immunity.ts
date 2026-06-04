@@ -1,0 +1,282 @@
+/**
+ * A1 考卷免疫流水线（S12，A.9 永久红线）——「题=毒株」：带 reward 的造题是最强真值污染源，
+ * 每道 L5/回归候选必须先过免疫流水线才能晋升 golden。HITL：晋升判断是**人的架构权威面**。
+ *
+ * 全程复用真路径（评测=消费，零评测专用代码路径）：出题 = 真 appendClaim 造一颗毒株 claim（draft、永不召回），
+ * 巡查 = claim_verification(kind='patrol')，验「库确无答案」= 真 recall_claims。四检全过才晋升：
+ *   ① humanConfirmed —— 晋升人是人（by_role 'human…'）；非人尝试不烧候选（留 queued）、只记审计。
+ *   ② kbTrulyLacks   —— recall(query) 当下确实空（库真没答案）；非空 ⇒ 这是带毒考题（库本能答却要它判「不知道」）。
+ *   ③ noSelfContradiction —— 把题造成毒株 claim 时没和库产生 contradicts 边（S8）；有 ⇒ 题自相矛盾/自败。
+ *   ④ locatorsTraceable —— 候选可溯到具体来源 claim（claim_id 非空），毒株 claim 带出处（D1）。
+ * pass ⇒ 进独立 golden_questions 表（只判分、recall 结构上永不召回）；fail ⇒ 记审计、候选转 rejected（终态）、绝不晋升。
+ * 每次尝试都落 promotion_audit（谁/何时/凭何）—— append-only 可审计。
+ */
+import { randomUUID } from 'node:crypto'
+
+import { and, asc, eq, or } from 'drizzle-orm'
+
+import type { DB } from '../db/client.js'
+import type { Embedder } from '../embedding/embedder.js'
+import {
+  claimProvenance,
+  claimVerification,
+  goldenQuestions,
+  l5Candidates,
+  promotionAudit,
+  relation,
+  type PromotionDecision,
+} from '../db/schema.js'
+import { appendClaim } from './append-claim.js'
+import { recallClaims } from './recall-claims.js'
+import { isHumanRole } from './reflux.js'
+
+/** 四项免疫检查 + 总判 + 失败原因（落进 basis 快照，可审计）。 */
+export interface ImmunityResult {
+  /** 晋升人是人（HITL 权威门）。 */
+  humanConfirmed: boolean
+  /** recall(query) 当下确实空 —— 库真没答案。 */
+  kbTrulyLacks: boolean
+  /** 造成毒株 claim 时没产生 contradicts 边 —— 题不自相矛盾。 */
+  noSelfContradiction: boolean
+  /** 候选可溯到具体来源 claim。 */
+  locatorsTraceable: boolean
+  passed: boolean
+  /** 失败原因（人读，留审计）。 */
+  reasons: string[]
+}
+
+export interface PromoteOptions {
+  /** 晋升人身份（人的架构权威，必须 'human…' 前缀，否则不授权）。 */
+  confirmedBy: string
+  /** 可选：给毒株 claim 的结构化框架（S/P/O），让自相矛盾检查（S8）能被触发。缺省则毒株仅有 claimText。 */
+  poison?: { subject?: string; predicate?: string; object?: string }
+}
+
+export interface PromoteResult {
+  promoted: boolean
+  result: ImmunityResult
+  /** 晋升成功时的 golden_questions.id。 */
+  goldenId?: string | undefined
+  /** 免疫造的毒株 claim id（人确认通过、进了造题步才有）。 */
+  poisonClaimId?: string | undefined
+}
+
+/** golden_questions 一行的读出形状。{id, query} 可直接当 L5Question 喂 S10 的 runL5Suite 打分。 */
+export interface GoldenQuestion {
+  id: string
+  candidateId: string
+  query: string
+  poisonClaimId: string
+  promotedBy: string
+  basis: ImmunityResult
+  createdAt: Date
+}
+
+export interface PromotionAuditRow {
+  id: string
+  candidateId: string
+  decision: PromotionDecision
+  decidedBy: string
+  basis: ImmunityResult
+  createdAt: Date
+}
+
+/**
+ * 把一条 queued 的 L5 候选过 A1 免疫流水线、决定是否晋升 golden。
+ * 候选不存在 / 非 queued ⇒ 抛（只晋升排队中的候选）。
+ */
+export async function promoteCandidate(
+  db: DB,
+  embedder: Embedder,
+  candidateId: string,
+  opts: PromoteOptions,
+): Promise<PromoteResult> {
+  const [cand] = await db.select().from(l5Candidates).where(eq(l5Candidates.id, candidateId))
+  if (!cand) {
+    throw new Error(`promoteCandidate: candidate ${candidateId} not found`)
+  }
+  if (cand.status !== 'queued') {
+    throw new Error(
+      `promoteCandidate: candidate ${candidateId} is '${cand.status}', only queued candidates can be promoted`,
+    )
+  }
+
+  const reasons: string[] = []
+
+  // ① HITL 权威门：非人尝试不授权 —— 记审计、**不烧候选**（留 queued，可后续由人重试），直接返回。
+  if (!isHumanRole(opts.confirmedBy)) {
+    reasons.push(`not human-confirmed (by_role '${opts.confirmedBy}')`)
+    const result: ImmunityResult = {
+      humanConfirmed: false,
+      kbTrulyLacks: false,
+      noSelfContradiction: false,
+      locatorsTraceable: false,
+      passed: false,
+      reasons,
+    }
+    await db.insert(promotionAudit).values({
+      id: randomUUID(),
+      candidateId,
+      decision: 'rejected',
+      decidedBy: opts.confirmedBy,
+      basis: result,
+    })
+    return { promoted: false, result }
+  }
+
+  // ② 库真没答案：复用真 recall_claims（评测=消费）。
+  const hits = await recallClaims(db, embedder, cand.query)
+  const kbTrulyLacks = hits.length === 0
+  if (!kbTrulyLacks) reasons.push('KB already answers the question (recall returned a claim)')
+
+  // ④ locator 可溯：候选要溯到具体来源 claim。无来源 claim ⇒ 不可溯（也无从拿出处去造毒株）。
+  let locatorsTraceable = cand.claimId != null
+  if (!locatorsTraceable) reasons.push('candidate has no traceable originating claim')
+
+  // ③ 造毒株 + 自相矛盾检查：复用真 appendClaim（毒株 draft、永不召回）+ S8 contradicts + patrol 巡查记录。
+  let poisonClaimId: string | undefined
+  let noSelfContradiction = true
+  if (locatorsTraceable) {
+    // 毒株 claim 的出处溯到来源 claim 的源（D1 保证来源 claim ≥1 出处）。
+    const [prov] = await db
+      .select({ sourceId: claimProvenance.sourceId })
+      .from(claimProvenance)
+      .where(eq(claimProvenance.claimId, cand.claimId!))
+      .limit(1)
+    if (!prov) {
+      locatorsTraceable = false
+      reasons.push('originating claim lacks provenance (not traceable)')
+    } else {
+      const appended = await appendClaim(
+        db,
+        embedder,
+        {
+          claimText: cand.query,
+          createdBy: `exam:immunity:${opts.confirmedBy}`,
+          // 仅在给了结构化框架时带 S/P/O（exactOptionalPropertyTypes：不显式塞 undefined）。
+          ...(opts.poison?.subject !== undefined ? { subject: opts.poison.subject } : {}),
+          ...(opts.poison?.predicate !== undefined ? { predicate: opts.poison.predicate } : {}),
+          ...(opts.poison?.object !== undefined ? { object: opts.poison.object } : {}),
+        },
+        [
+          {
+            sourceId: prov.sourceId,
+            locator: `exam:from-claim:${cand.claimId}`,
+            relevance: 'exact',
+          },
+        ],
+      )
+      poisonClaimId = appended.claimId
+      // S8：造毒株时是否与库产生 contradicts 边？有 ⇒ 题自败。
+      const contra = await db
+        .select({ id: relation.id })
+        .from(relation)
+        .where(
+          and(
+            eq(relation.type, 'contradicts'),
+            or(eq(relation.fromClaim, poisonClaimId), eq(relation.toClaim, poisonClaimId)),
+          ),
+        )
+      noSelfContradiction = contra.length === 0
+      if (!noSelfContradiction) {
+        reasons.push(
+          'question self-contradicts the KB (a contradicts edge was created on authoring)',
+        )
+      }
+      // 巡查记录（复用 patrol 路径）挂在毒株 claim 上。
+      await db.insert(claimVerification).values({
+        id: randomUUID(),
+        claimId: poisonClaimId,
+        kind: 'patrol',
+        verdict: { check: 'exam_immunity', noSelfContradiction, locatorsTraceable },
+        byRole: opts.confirmedBy,
+      })
+    }
+  }
+
+  const passed = kbTrulyLacks && noSelfContradiction && locatorsTraceable
+  const result: ImmunityResult = {
+    humanConfirmed: true,
+    kbTrulyLacks,
+    noSelfContradiction,
+    locatorsTraceable,
+    passed,
+    reasons,
+  }
+
+  // 决定写一把原子落：晋升 ⇒ golden + 候选 promoted + 审计；驳回 ⇒ 候选 rejected（终态）+ 审计。
+  return db.transaction(async (tx) => {
+    if (passed) {
+      const goldenId = randomUUID()
+      await tx.insert(goldenQuestions).values({
+        id: goldenId,
+        candidateId,
+        query: cand.query,
+        poisonClaimId: poisonClaimId!,
+        promotedBy: opts.confirmedBy,
+        basis: result,
+      })
+      await tx
+        .update(l5Candidates)
+        .set({ status: 'promoted' })
+        .where(eq(l5Candidates.id, candidateId))
+      await tx.insert(promotionAudit).values({
+        id: randomUUID(),
+        candidateId,
+        decision: 'promoted',
+        decidedBy: opts.confirmedBy,
+        basis: result,
+      })
+      return { promoted: true, result, goldenId, poisonClaimId }
+    }
+    await tx
+      .update(l5Candidates)
+      .set({ status: 'rejected' })
+      .where(eq(l5Candidates.id, candidateId))
+    await tx.insert(promotionAudit).values({
+      id: randomUUID(),
+      candidateId,
+      decision: 'rejected',
+      decidedBy: opts.confirmedBy,
+      basis: result,
+    })
+    return { promoted: false, result, poisonClaimId }
+  })
+}
+
+/** 读 golden 命名空间（按晋升时间升序）。{id, query} 可直接当 L5Question 喂 runL5Suite 打分。 */
+export async function getGoldenQuestions(db: DB): Promise<GoldenQuestion[]> {
+  const rows = await db
+    .select()
+    .from(goldenQuestions)
+    .orderBy(asc(goldenQuestions.createdAt), asc(goldenQuestions.id))
+  return rows.map((r) => ({
+    id: r.id,
+    candidateId: r.candidateId,
+    query: r.query,
+    poisonClaimId: r.poisonClaimId,
+    promotedBy: r.promotedBy,
+    basis: r.basis as ImmunityResult,
+    createdAt: r.createdAt,
+  }))
+}
+
+/** 读晋升审计（可按候选过滤），按时间升序。 */
+export async function getPromotionAudit(
+  db: DB,
+  candidateId?: string,
+): Promise<PromotionAuditRow[]> {
+  const rows = await db
+    .select()
+    .from(promotionAudit)
+    .where(candidateId === undefined ? undefined : eq(promotionAudit.candidateId, candidateId))
+    .orderBy(asc(promotionAudit.createdAt), asc(promotionAudit.id))
+  return rows.map((r) => ({
+    id: r.id,
+    candidateId: r.candidateId,
+    decision: r.decision,
+    decidedBy: r.decidedBy,
+    basis: r.basis as ImmunityResult,
+    createdAt: r.createdAt,
+  }))
+}
