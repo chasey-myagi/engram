@@ -19,7 +19,7 @@
  */
 import { randomUUID } from 'node:crypto'
 
-import { and, asc, eq, or } from 'drizzle-orm'
+import { and, asc, eq } from 'drizzle-orm'
 
 import type { DB } from '../db/client.js'
 import type { Embedder } from '../embedding/embedder.js'
@@ -110,6 +110,8 @@ export async function promoteCandidate(
   const reasons: string[] = []
 
   // ① HITL 权威门：非人尝试不授权 —— 记审计、**不烧候选**（留 queued，可后续由人重试），直接返回。
+  // 注：权威门先失败即短路，后三项检查**未运行**；basis 里它们为 false 表示「未评估而非判否」，
+  // 权威说明在 reasons（'not human-confirmed …'）—— reasons 才是审计「凭何」的权威半，不要把这三个 false 读成结论。
   if (!isHumanRole(opts.confirmedBy)) {
     reasons.push(`not human-confirmed (by_role '${opts.confirmedBy}')`)
     const result: ImmunityResult = {
@@ -178,16 +180,12 @@ export async function promoteCandidate(
         ],
       )
       poisonClaimId = appended.claimId
-      // S8：造毒株时是否与库产生 contradicts 边？有 ⇒ 题自败。
+      // S8：造毒株时是否与库产生 contradicts 边？有 ⇒ 题自败。recordContradictions 只从新 claim 发出边
+      // （from=新毒株），且此刻刚造完、无后续 append，故只查 from=poison 即可（to=poison 是死分支）。
       const contra = await db
         .select({ id: relation.id })
         .from(relation)
-        .where(
-          and(
-            eq(relation.type, 'contradicts'),
-            or(eq(relation.fromClaim, poisonClaimId), eq(relation.toClaim, poisonClaimId)),
-          ),
-        )
+        .where(and(eq(relation.type, 'contradicts'), eq(relation.fromClaim, poisonClaimId)))
       noSelfContradiction = contra.length === 0
       if (!noSelfContradiction) {
         reasons.push(

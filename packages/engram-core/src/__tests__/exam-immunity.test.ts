@@ -162,6 +162,16 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     const golden = await getGoldenQuestions(db)
     expect(golden).toHaveLength(1)
     expect(golden[0]!.query).toBe(q)
+    expect(golden[0]!.candidateId).toBe(candidateId)
+    expect(golden[0]!.poisonClaimId).toBe(res.poisonClaimId) // the frozen row links the authored poison claim
+    expect(golden[0]!.promotedBy).toBe('human:judge') // the human authority is recorded on the golden row (provenance)
+    expect(golden[0]!.basis).toMatchObject({
+      humanConfirmed: true,
+      kbTrulyLacks: true,
+      noSelfContradiction: true,
+      locatorsTraceable: true,
+      passed: true,
+    }) // the full immunity snapshot is frozen alongside the question
     const [cand] = await db.select().from(l5Candidates).where(eq(l5Candidates.id, candidateId))
     expect(cand!.status).toBe('promoted')
 
@@ -206,10 +216,18 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     expect(res.promoted).toBe(false)
     expect(res.result.kbTrulyLacks).toBe(false) // the poison: the KB has an answer
     expect(res.result.passed).toBe(false)
+    expect(res.result.reasons).toContain(
+      'KB already answers the question (recall returned a claim)',
+    )
     expect(await getGoldenQuestions(db)).toHaveLength(0) // never enters the golden set
 
     const [cand] = await db.select().from(l5Candidates).where(eq(l5Candidates.id, candidateId))
     expect(cand!.status).toBe('rejected') // poisoned candidate burned, terminal
+    // the auditable "凭何": the rejection reason is persisted in the audit basis, not just returned
+    const audit = await getPromotionAudit(db, candidateId)
+    expect(audit[0]!.basis.reasons).toContain(
+      'KB already answers the question (recall returned a claim)',
+    )
   })
 
   it('A1 red line: a self-contradicting candidate (its poison claim contradicts the active KB) is rejected even though the KB lacks the answer', async () => {
@@ -233,6 +251,9 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     })
     expect(res.result.kbTrulyLacks).toBe(true) // the KB indeed lacks an answer to q
     expect(res.result.noSelfContradiction).toBe(false) // …but the question self-contradicts the KB
+    expect(res.result.reasons).toContain(
+      'question self-contradicts the KB (a contradicts edge was created on authoring)',
+    )
     expect(res.promoted).toBe(false)
     expect(await getGoldenQuestions(db)).toHaveLength(0)
     const [cand] = await db.select().from(l5Candidates).where(eq(l5Candidates.id, candidateId))
@@ -268,6 +289,7 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     const res = await promoteCandidate(db, embedder, candidateId, { confirmedBy: 'agent:rogue' })
     expect(res.promoted).toBe(false)
     expect(res.result.humanConfirmed).toBe(false)
+    expect(res.result.reasons).toContain("not human-confirmed (by_role 'agent:rogue')")
     expect(res.poisonClaimId).toBeUndefined() // no poison authored on an unauthorized attempt
     expect(await getGoldenQuestions(db)).toHaveLength(0)
 
@@ -278,6 +300,7 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     expect(audit).toHaveLength(1)
     expect(audit[0]!.decision).toBe('rejected')
     expect(audit[0]!.decidedBy).toBe('agent:rogue')
+    expect(audit[0]!.basis.reasons).toContain("not human-confirmed (by_role 'agent:rogue')")
   })
 
   it('locator traceability: a candidate with no originating claim is not traceable and is rejected (no poison authored)', async () => {
@@ -285,8 +308,48 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
 
     const res = await promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:judge' })
     expect(res.result.locatorsTraceable).toBe(false)
+    expect(res.result.reasons).toContain('candidate has no traceable originating claim')
     expect(res.promoted).toBe(false)
     expect(res.poisonClaimId).toBeUndefined()
+    expect(await getGoldenQuestions(db)).toHaveLength(0)
+  })
+
+  it('locator traceability: an originating claim that exists but has NO provenance hits the !prov branch — rejected, no poison authored', async () => {
+    const q = 'gap whose origin claim carries no provenance'
+    // directly insert an origin claim with ZERO provenance rows (bypassing appendClaim's D1 guard);
+    // quarantined ⇒ recall(q) stays empty so kbTrulyLacks holds and the traceability failure is isolated
+    const originId = randomUUID()
+    await db.insert(claim).values({
+      id: originId,
+      claimText: 'origin without any provenance',
+      status: 'quarantined',
+      confidence: 0.8,
+      confidenceRaw: 0.8,
+      confidenceFactors: {
+        factors: {
+          ...ABOVE_FLOOR,
+          ageDays: 0,
+          activeContradicts: 0,
+          staleDecay: 1,
+          conflictDecay: 1,
+        },
+        weights: DEFAULT_WEIGHTS,
+        calibrationVersion: CALIBRATION_IDENTITY,
+      },
+      lineageId: randomUUID(),
+      asOf: new Date(),
+      createdBy: 'test',
+      embedding: await embedder.embed(q),
+      embeddingVersion: embedder.version,
+    })
+    const candidateId = await seedCandidate(q, originId)
+
+    const res = await promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:judge' })
+    expect(res.result.kbTrulyLacks).toBe(true) // origin is quarantined ⇒ recall(q) empty
+    expect(res.result.locatorsTraceable).toBe(false) // …but the origin claim has no provenance to trace
+    expect(res.result.reasons).toContain('originating claim lacks provenance (not traceable)')
+    expect(res.promoted).toBe(false)
+    expect(res.poisonClaimId).toBeUndefined() // authoring skipped on the !prov branch
     expect(await getGoldenQuestions(db)).toHaveLength(0)
   })
 
