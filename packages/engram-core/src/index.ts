@@ -226,6 +226,7 @@ export {
   loadConflictSide,
   resolveConflict,
   escalateConflict,
+  humanAdjudicateConflict,
   getEditorConflictQueue,
   getResolvedConflicts,
   getClaimStatus,
@@ -235,6 +236,27 @@ export {
   type ConflictAdjudication,
   type ConflictPersistResult,
 } from './spi/conflict-arbiter.js'
+// S23 · 主编工作台读半边：审阅队列（按实时 confidence 升序）+ 单条 claim 谱系视图（出处/引用 page/版本史）。
+export {
+  getEditorInbox,
+  getClaimLineage,
+  EDITOR_INBOX_STATUSES,
+  DEFAULT_INBOX_LIMIT,
+  type EditorInboxRow,
+  type EditorInboxQuery,
+  type ClaimLineage,
+  type LineageProvenance,
+  type CitingPage,
+  type LineageVersion,
+} from './editor/editor-inbox.js'
+// S23 · recall / editor-inbox 的实时 confidence 重算单一口径（抽取，防漂移）。
+export {
+  recomputeLiveConfidence,
+  loadLiveConfidence,
+  liveContradictsByClaim,
+  type LiveConfidence,
+  type RecomputeCandidate,
+} from './confidence/live-recompute.js'
 // S21 · NC-exact 红线统一闸门（红线#3 / A.6）：判 non_compliant/refuted 须 ≥1 条 relevance='exact' 反向证据，
 // 否则拒判 + 强制升级主编。Verifier 与 Arbiter 共用此一处闸门（无分叉）。
 export {
