@@ -146,7 +146,11 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
   it('human Approve promotes a sub-0.5 draft regardless of the conf/entailment gate (event-driven, not conf-alone)', async () => {
     const q = 'human-approved low-conf draft'
     const id = await seedClaim({ query: q, status: 'draft', profile: MID }) // conf 0.435: blue would be blocked
-    const res = await transitionClaim(db, id, 'active', { by: 'human:editor' }) // human Approve, no entailment
+    // human Approve bypasses BOTH halves of the blue gate: sub-0.5 conf AND an explicit entailment fail
+    const res = await transitionClaim(db, id, 'active', {
+      by: 'human:editor',
+      entailmentPass: false,
+    })
     expect(res.to).toBe('active')
     expect(await statusOf(id)).toBe('active')
     // conf 0.435 ≥ kernel floor 0.4 ⇒ recallable once promoted
@@ -163,61 +167,61 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
     expect(await statusOf(id)).toBe('quarantined')
   })
 
-  it('A.4 red line — relaxation (quarantined→active) is rejected for an agent but succeeds for a human with recorded new positive exact evidence', async () => {
-    const id = await seedClaim({ query: 'quarantined claim', status: 'quarantined', profile: HIGH })
-
-    // blue/agent cannot relax
-    await expect(transitionClaim(db, id, 'active', { by: 'agent:rogue' })).rejects.toThrow(
+  it('A.4 red line — relaxation (quarantined→active) is human-only; a human amnesty needs NO new evidence (PRD A.4 / FIG 6b)', async () => {
+    // agent/blue cannot relax — only humans
+    const amnesty = await seedClaim({
+      query: 'quarantined claim A',
+      status: 'quarantined',
+      profile: HIGH,
+    })
+    await expect(transitionClaim(db, amnesty, 'active', { by: 'agent:rogue' })).rejects.toThrow(
       /requires a human caller/,
     )
-    // a human still cannot relax WITHOUT recorded new positive exact evidence
-    await expect(transitionClaim(db, id, 'active', { by: 'human:judge' })).rejects.toThrow(
-      /new positive exact evidence/,
-    )
-    expect(await statusOf(id)).toBe('quarantined') // still tight
+    expect(await statusOf(amnesty)).toBe('quarantined')
 
-    // a human WITH new positive exact evidence succeeds, and that evidence is recorded
+    // amnesty (赦免): a human relaxes WITHOUT any new evidence — authority alone authorizes; no provenance added
+    const provBefore = (
+      await db.select().from(claimProvenance).where(eq(claimProvenance.claimId, amnesty))
+    ).length
+    const res = await transitionClaim(db, amnesty, 'active', { by: 'human:judge' })
+    expect(res).toEqual({ from: 'quarantined', to: 'active' })
+    expect(await statusOf(amnesty)).toBe('active')
+    expect(
+      (await db.select().from(claimProvenance).where(eq(claimProvenance.claimId, amnesty))).length,
+    ).toBe(provBefore) // pure amnesty records no new provenance
+
+    // the "found new positive exact evidence" path: when a human DOES cite evidence, it is recorded append-only
+    const withEv = await seedClaim({
+      query: 'quarantined claim B',
+      status: 'quarantined',
+      profile: HIGH,
+    })
     const { sourceId } = await aSource()
-    const before = (await db.select().from(claimProvenance).where(eq(claimProvenance.claimId, id)))
-      .length
-    const res = await transitionClaim(db, id, 'active', {
+    const evBefore = (
+      await db.select().from(claimProvenance).where(eq(claimProvenance.claimId, withEv))
+    ).length
+    await transitionClaim(db, withEv, 'active', {
       by: 'human:judge',
       evidence: { sourceId, locator: 'rehab-doc#1' },
     })
-    expect(res).toEqual({ from: 'quarantined', to: 'active' })
-    expect(await statusOf(id)).toBe('active')
-    const provs = await db.select().from(claimProvenance).where(eq(claimProvenance.claimId, id))
-    expect(provs.length).toBe(before + 1) // a new provenance row was recorded
+    expect(await statusOf(withEv)).toBe('active')
+    const provs = await db.select().from(claimProvenance).where(eq(claimProvenance.claimId, withEv))
+    expect(provs.length).toBe(evBefore + 1) // the supplied evidence was recorded
     expect(provs.some((p) => p.locator === 'rehab-doc#1' && p.relevance === 'exact')).toBe(true)
   })
 
-  it('A.4 red line — flagged→active and superseded→active are human-only relaxations too', async () => {
-    const { sourceId } = await aSource()
+  it('A.4 red line — flagged→active (amnesty) and superseded→active (rollback) are human-only and need no new evidence', async () => {
     const flagged = await seedClaim({ query: 'flagged claim', status: 'flagged', profile: HIGH })
     await expect(transitionClaim(db, flagged, 'active', { by: 'agent:x' })).rejects.toThrow(
       /requires a human caller/,
     )
-    expect(
-      (
-        await transitionClaim(db, flagged, 'active', {
-          by: 'human:j',
-          evidence: { sourceId, locator: 'l' },
-        })
-      ).to,
-    ).toBe('active')
+    expect((await transitionClaim(db, flagged, 'active', { by: 'human:j' })).to).toBe('active') // amnesty, no evidence
 
     const sup = await seedClaim({ query: 'superseded claim', status: 'superseded', profile: HIGH })
     await expect(transitionClaim(db, sup, 'active', { by: 'agent:x' })).rejects.toThrow(
       /requires a human caller/,
     )
-    expect(
-      (
-        await transitionClaim(db, sup, 'active', {
-          by: 'human:j',
-          evidence: { sourceId, locator: 'l2' },
-        })
-      ).to,
-    ).toBe('active')
+    expect((await transitionClaim(db, sup, 'active', { by: 'human:j' })).to).toBe('active') // rollback, no evidence
   })
 
   it('illegal transitions are rejected (draft→quarantined, superseded→flagged, active→quarantined skip); →superseded routes to supersedeClaim', async () => {
