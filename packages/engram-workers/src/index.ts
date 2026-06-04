@@ -42,6 +42,7 @@ export {
   type HarvesterResult,
   type HarvestOutcome,
 } from './harvester.js'
+export {
   runArbiter,
   arbitrateConflicts,
   ARBITER_TRIGGER,
