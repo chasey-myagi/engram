@@ -25,7 +25,6 @@ import {
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { addSource } from '../spi/append-claim.js'
 import { recallClaims } from '../spi/recall-claims.js'
-import { transitionClaim } from '../spi/transition.js'
 import { writePatrolVerdict, computeEntailmentFactor } from '../verifier/patrol-verdict.js'
 import { approveClaim, editApproveClaim, rejectClaim } from '../editor/editor-action.js'
 import {
@@ -532,5 +531,132 @@ describe('S22 Reject — tighten to quarantined (f1=0), audit-preserved, never d
     expect(res.overturnEventId).toBeUndefined()
     expect(await getHumanOverturns(db, id)).toHaveLength(0)
     expect(await latestHumanReview(db, id)).toBe(0)
+  })
+})
+
+/**
+ * 把 db 包成「事务内首个 .update() 抛错」的代理：模拟状态翻转那一步的 DB 故障。其余方法（select/insert、
+ * 以及事务外的 getActiveStandards）原样透传（绑定到真实 db/tx，避免 this 丢失）。用于证明动作的单事务原子性。
+ */
+function dbThatThrowsOnUpdate(realDb: DB): DB {
+  const wrapTx = (tx: object): object =>
+    new Proxy(tx, {
+      get(t, p, r) {
+        if (p === 'update') {
+          return () => {
+            throw new Error('injected: DB fault during status update')
+          }
+        }
+        const v = Reflect.get(t, p, r)
+        return typeof v === 'function' ? v.bind(t) : v
+      },
+    })
+  return new Proxy(realDb, {
+    get(target, prop, receiver) {
+      if (prop === 'transaction') {
+        return (fn: (tx: unknown) => Promise<unknown>, ...rest: unknown[]) =>
+          (target as DB).transaction((tx) => fn(wrapTx(tx as object)), ...(rest as []))
+      }
+      const v = Reflect.get(target, prop, receiver)
+      return typeof v === 'function' ? v.bind(target) : v
+    },
+  }) as DB
+}
+
+describe('S22 atomicity + concurrency — HITL editor actions are single-transaction (must-fix from gate#1)', () => {
+  it('concurrency: two concurrent Approves on ONE quarantined claim record EXACTLY ONE un_quarantine overturn (not two) — the FOR UPDATE lock serializes; the loser sees active and only re-endorses', async () => {
+    const id = await seedClaim({
+      query: 'concurrent un-quarantine',
+      status: 'quarantined',
+      factors: { authority: 0.9 },
+    })
+    // race two editors un-quarantining the same claim
+    const [r1, r2] = await Promise.all([
+      approveClaim(db, id, { by: 'human:editor-a' }),
+      approveClaim(db, id, { by: 'human:editor-b' }),
+    ])
+    expect(r1.status).toBe('active')
+    expect(r2.status).toBe('active')
+    expect(await statusOf(id)).toBe('active')
+    // EXACTLY ONE un_quarantine overturn — the S26 falseQuarantineRate signal is not double-counted
+    const ov = await getHumanOverturns(db, id)
+    expect(ov.filter((o) => o.payload.overturn === 'un_quarantine')).toHaveLength(1)
+    // exactly one of the two carries the overturn id; the other is a plain re-endorsement
+    expect([r1.overturnEventId, r2.overturnEventId].filter(Boolean)).toHaveLength(1)
+  })
+
+  it('concurrency: two concurrent Rejects on ONE active claim record EXACTLY ONE reject_agent_promoted overturn', async () => {
+    const id = await seedClaim({
+      query: 'concurrent reject',
+      status: 'active',
+      factors: { authority: 0.9 },
+    })
+    const [r1, r2] = await Promise.all([
+      rejectClaim(db, id, { by: 'human:editor-a' }),
+      rejectClaim(db, id, { by: 'human:editor-b' }),
+    ])
+    expect(r1.status).toBe('quarantined')
+    expect(r2.status).toBe('quarantined')
+    const ov = await getHumanOverturns(db, id)
+    expect(ov.filter((o) => o.payload.overturn === 'reject_agent_promoted')).toHaveLength(1)
+    expect([r1.overturnEventId, r2.overturnEventId].filter(Boolean)).toHaveLength(1)
+  })
+
+  it('atomicity: a fault during the status transition rolls back the WHOLE action — no orphan f1 row, no overturn event, status untouched', async () => {
+    const id = await seedClaim({
+      query: 'atomic rollback',
+      status: 'quarantined',
+      factors: { authority: 0.9 },
+    })
+    const faultyDb = dbThatThrowsOnUpdate(db)
+    // writeHumanReview (insert) runs first, THEN the transition's update throws → whole tx must roll back.
+    await expect(approveClaim(faultyDb, id, { by: EDITOR })).rejects.toThrow(/injected/)
+    expect(await statusOf(id)).toBe('quarantined') // status never moved
+    expect(await latestHumanReview(db, id)).toBeNull() // the f1 row was rolled back (no orphan endorsement)
+    expect(await getHumanOverturns(db, id)).toHaveLength(0) // no overturn ever recorded (reached after the throw)
+  })
+
+  it('atomicity: a fault during Reject rolls back the f1=0 row and any partial tighten — no orphan overturn claiming quarantined', async () => {
+    const id = await seedClaim({
+      query: 'atomic reject rollback',
+      status: 'active',
+      factors: { authority: 0.9 },
+    })
+    const faultyDb = dbThatThrowsOnUpdate(db)
+    await expect(rejectClaim(faultyDb, id, { by: EDITOR })).rejects.toThrow(/injected/)
+    expect(await statusOf(id)).toBe('active') // never reached flagged/quarantined
+    expect(await latestHumanReview(db, id)).toBeNull()
+    expect(await getHumanOverturns(db, id)).toHaveLength(0)
+  })
+
+  it('Edit-Approve records NO human_overturn (a corrected/superseded edit is not a relaxation of an agent ruling)', async () => {
+    const q = 'edit approve no overturn'
+    const oldId = await seedClaim({ query: q, status: 'active', factors: { authority: 0.9 } })
+    const { sourceId } = await aSource()
+    const res = await editApproveClaim(
+      db,
+      embedder,
+      oldId,
+      { claimText: `claim for ${q} (revised)` },
+      [{ sourceId, locator: 'r2' }],
+      { by: EDITOR },
+    )
+    expect(res.overturnEventId).toBeUndefined()
+    expect(await getHumanOverturns(db, res.claimId)).toHaveLength(0)
+    expect(await getHumanOverturns(db, oldId)).toHaveLength(0)
+  })
+
+  it('writeHumanReview clamps an out-of-range humanReview into [0,1] (a removed clamp would fail this)', async () => {
+    const id = await seedClaim({ query: 'clamp', status: 'active', factors: { authority: 0.9 } })
+    await writeHumanReview(db, { claimId: id, byRole: EDITOR, verdict: { humanReview: 2 } })
+    expect(await latestHumanReview(db, id)).toBe(1) // clamped down to the [0,1] ceiling
+    expect(await computeHumanReviewFactor(db, id)).toBe(1)
+  })
+
+  it('editor actions on a missing claim throw not-found and write nothing', async () => {
+    const ghost = randomUUID()
+    await expect(approveClaim(db, ghost, { by: EDITOR })).rejects.toThrow(/not found/)
+    await expect(rejectClaim(db, ghost, { by: EDITOR })).rejects.toThrow(/not found/)
+    expect(await getHumanOverturns(db, ghost)).toHaveLength(0)
   })
 })

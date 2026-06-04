@@ -295,7 +295,7 @@ export async function appendClaim(
   })
 }
 
-/** append-only 取代：新版本沿用旧 claim 的 lineage_id，加一条 supersedes 边，旧版标 superseded（不物理删）。 */
+/** append-only 取代（薄壳）：事务外算嵌入 → 开事务 → 委托 supersedeClaimInTx。 */
 export async function supersedeClaim(
   db: DB,
   embedder: Embedder,
@@ -304,36 +304,47 @@ export async function supersedeClaim(
   provenances: ProvenanceInput[],
 ): Promise<{ claimId: string }> {
   requireProvenance(provenances)
-  const embedding = await embedder.embed(draft.claimText, 'document')
-  return db.transaction(async (tx) => {
-    const old = await tx
-      .select({ lineageId: claim.lineageId, status: claim.status })
-      .from(claim)
-      .where(eq(claim.id, oldClaimId))
-      .for('update') // 锁住旧版行：并发取代同一 head 时序列化，第二个会看到 superseded → 拒，避免谱系分叉
-    if (old.length === 0) {
-      throw new Error(`supersede_claim: claim ${oldClaimId} not found`)
-    }
-    // 单 head 不变量：只取代当前 head；取代一个已 superseded 的旧版会让同 lineage 出现两个 head（谱系分叉）。
-    if (old[0]!.status === 'superseded') {
-      throw new Error(
-        `supersede_claim: claim ${oldClaimId} is already superseded (would fork its lineage); supersede the current head`,
-      )
-    }
-    const conf = await computeClaimConfidence(tx, draft, provenances)
-    const claimId = await insertClaim(
-      tx,
-      draft,
-      old[0]!.lineageId,
-      conf,
-      embedding,
-      embedder.version,
+  const embedding = await embedder.embed(draft.claimText, 'document') // 事务外算（纯计算/远程调用，不持锁）
+  return db.transaction((tx) =>
+    supersedeClaimInTx(tx, oldClaimId, draft, provenances, embedding, embedder.version),
+  )
+}
+
+/**
+ * append-only 取代的 **Tx 变体**：在调用方已开启的事务内取代，对旧版行加 FOR UPDATE 锁。供 HITL 编排器
+ * （editor-action.ts 的 Edit-Approve）把「append 新版本 + 投 f1 人审 + 晋升新版本」绑进**同一事务**，
+ * 任一步抛则整体回滚——杜绝半截谱系（旧版已 superseded、新版卡在 draft、事实静默掉出召回）。
+ * 嵌入由调用方在事务外先算好传入（不在持锁期间做远程嵌入）。新版本沿用旧 claim 的 lineage_id，加一条 supersedes 边。
+ */
+export async function supersedeClaimInTx(
+  tx: Tx,
+  oldClaimId: string,
+  draft: DraftClaim,
+  provenances: ProvenanceInput[],
+  embedding: number[],
+  embeddingVersion: string,
+): Promise<{ claimId: string }> {
+  requireProvenance(provenances)
+  const old = await tx
+    .select({ lineageId: claim.lineageId, status: claim.status })
+    .from(claim)
+    .where(eq(claim.id, oldClaimId))
+    .for('update') // 锁住旧版行：并发取代同一 head 时序列化，第二个会看到 superseded → 拒，避免谱系分叉
+  if (old.length === 0) {
+    throw new Error(`supersede_claim: claim ${oldClaimId} not found`)
+  }
+  // 单 head 不变量：只取代当前 head；取代一个已 superseded 的旧版会让同 lineage 出现两个 head（谱系分叉）。
+  if (old[0]!.status === 'superseded') {
+    throw new Error(
+      `supersede_claim: claim ${oldClaimId} is already superseded (would fork its lineage); supersede the current head`,
     )
-    await insertProvenances(tx, claimId, provenances)
-    await tx
-      .insert(relation)
-      .values({ id: randomUUID(), fromClaim: claimId, toClaim: oldClaimId, type: 'supersedes' })
-    await tx.update(claim).set({ status: 'superseded' }).where(eq(claim.id, oldClaimId))
-    return { claimId }
-  })
+  }
+  const conf = await computeClaimConfidence(tx, draft, provenances)
+  const claimId = await insertClaim(tx, draft, old[0]!.lineageId, conf, embedding, embeddingVersion)
+  await insertProvenances(tx, claimId, provenances)
+  await tx
+    .insert(relation)
+    .values({ id: randomUUID(), fromClaim: claimId, toClaim: oldClaimId, type: 'supersedes' })
+  await tx.update(claim).set({ status: 'superseded' }).where(eq(claim.id, oldClaimId))
+  return { claimId }
 }
