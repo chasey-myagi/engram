@@ -9,6 +9,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import {
   addSource,
+  computeEntailmentFactor,
   createDb,
   getReconcileEscalations,
   makeFakeEmbedder,
@@ -206,6 +207,9 @@ describe('S18 Reconciler worker (batch_appended: 函数 + 灰区一次 LLM) — 
     // both claims still exist (no destructive merge)
     const all = await db.select({ id: schema.claim.id }).from(schema.claim)
     expect(all.map((c) => c.id).sort()).toEqual([anchor.claimId, poison.claimId].sort())
+    // 命门 effect: the escalation presses the poisoned claim's f2 DOWN to 0 (entailment='not_co_true'), conservatively
+    // lowering its confidence. A regression writing entailment:'pass' (which would INFLATE f2) is caught here.
+    expect(await computeEntailmentFactor(db, poison.claimId)).toBe(0)
   })
 
   it('genuine refinement: A.object ⊆ B.object is linked as refines, NOT flagged or escalated', async () => {
