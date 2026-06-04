@@ -67,14 +67,25 @@ beforeEach(async () => {
   await pool.query('TRUNCATE source, claim, claim_provenance, relation, claim_verification CASCADE')
 })
 
-/** A judge that decides verdict from the claim text under test (deterministic), counting calls. */
-function judgeByText(map: Record<string, EntailmentVerdict>, fallback: EntailmentVerdict = 'pass') {
+/**
+ * Faithful ≥-bound entailment oracle (NOT a hardcoded verdict): pass ⟺ evidence ⊢ claim ⟺ evidence's
+ * lower bound ≥ claim's (stricter implies looser). Because it actually computes entailment, it would FAIL
+ * if the Reconciler's A/B (suspected/anchor) judge direction were inverted — pinning the near-dup-poison direction.
+ */
+function boundOracle() {
   let calls = 0
+  const lower = (str: string): number => {
+    const m = str.match(/(\d+(?:\.\d+)?)/)
+    return m ? parseFloat(m[1]!) : NaN
+  }
   const j: EntailmentJudge & { callCount: () => number } = {
-    version: 'fake:by-text',
+    version: 'fake:bound-oracle',
     async judge(q: EntailmentQuery): Promise<EntailmentVerdict> {
       calls += 1
-      return map[q.claimText] ?? fallback
+      const claimBound = lower(q.claimText)
+      const evidBound = lower(q.evidence[0]?.sourceContent ?? '')
+      if (Number.isNaN(claimBound) || Number.isNaN(evidBound)) return 'fail'
+      return evidBound >= claimBound ? 'pass' : 'fail'
     },
     callCount: () => calls,
   }
@@ -177,8 +188,8 @@ describe('S18 Reconciler worker (batch_appended: 函数 + 灰区一次 LLM) — 
       predicate: 'capacity',
       object: 'at least 800', // shrunk away from the anchor's 4000 → A ⊄ B
     })
-    // judge: A(=poison) does NOT entail B(=anchor) → fail ⇒ poison
-    const judge = judgeByText({ [POISON_TEXT]: 'fail' })
+    // faithful oracle: A(=poison ≥800) does NOT entail B(=anchor ≥4000) → fail ⇒ poison (direction pinned)
+    const judge = boundOracle()
     const res = await reconcileBatch({ db, judge }, [poison.claimId])
 
     expect(res.escalations).toBe(1)
@@ -210,7 +221,7 @@ describe('S18 Reconciler worker (batch_appended: 函数 + 灰区一次 LLM) — 
       predicate: 'capacity',
       object: 'at least 4500', // narrower but still satisfies ≥4000
     })
-    const judge = judgeByText({ [REFINE_TEXT]: 'pass' }) // A entails B ⇒ refines
+    const judge = boundOracle() // faithful: A(≥4500) ⊢ B(≥4000) → pass ⇒ refines (direction pinned)
     const res = await reconcileBatch({ db, judge }, [refine.claimId])
 
     expect(res.refinesLinked).toBe(1)
@@ -295,7 +306,7 @@ describe('S18 Reconciler worker (batch_appended: 函数 + 灰区一次 LLM) — 
       object: 'at least 800',
       createdBy: RECONCILER_ROLE,
     })
-    const judge = judgeByText({ [POISON_TEXT]: 'fail' }) // would flag if it were judged
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'fail' }) // would flag if it were judged
     const res = await reconcileBatch({ db, judge }, [self.claimId])
 
     expect(res.skipped).toBeGreaterThanOrEqual(1)
@@ -318,7 +329,7 @@ describe('S18 Reconciler worker (batch_appended: 函数 + 灰区一次 LLM) — 
       object: 'at least 800',
       status: 'draft',
     })
-    const judge = judgeByText({ [POISON_TEXT]: 'not_co_true' })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'not_co_true' })
     const res = await reconcileBatch({ db, judge }, [draftPoison.claimId])
 
     expect(res.escalations).toBe(1) // signal still recorded (don't drop the conflict)

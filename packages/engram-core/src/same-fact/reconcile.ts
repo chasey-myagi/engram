@@ -46,9 +46,9 @@ export function isReconcileCandidate(a: ClaimShape, b: ClaimShape, similarity: n
 
 /**
  * 判 A.object 是否 ⊆ B.object（真精炼）—— 经 EntailmentJudge 一次 LLM（灰区点状一次）。
- * 把「A 的命题能否从 B 推出」翻成 entailment：以 B.object（更宽的既有断言）当出处原文，问 A.claimText 能否被它蕴含。
- *   pass        → A ⊆ B：A 在 B 的真值域内、只是更细 → 真精炼(refines)。
- *   fail        → A ⊄ B：A 把 object 改小到 B 之外 / 与 B 矛盾 → 疑投毒(poison)。
+ * A.object ⊆ B.object ⟺ A ⊢ B：以**被审 A**（更细的新断言）当出处原文，问**既有 B**（更宽）能否被它蕴含。
+ *   pass        → A ⊢ B：A 收窄在 B 的真值域内、只是更细 → 真精炼(refines)。
+ *   fail        → A ⊬ B：A 把 object 改宽/掏空到 B 之外 / 与 B 矛盾 → 疑投毒(poison)。
  *   not_co_true → A 与 B 不可同真（object 被反向）→ 疑投毒(poison)。
  * 判官抛错由调用方接住（编排层降级保守，不崩、不无限重试）。
  */
@@ -58,16 +58,18 @@ export async function objectSubsetViaEntailment(
   b: ClaimShape,
 ): Promise<ReconcileVerdict> {
   const verdict = await judge.judge({
-    claimText: a.claimText,
-    subject: a.subject,
-    predicate: a.predicate,
-    object: a.object,
-    // 把既有（更宽）claim 当作唯一出处：A.object⊆B.object ⟺ A 可从 B 推出。
-    // relevance=exact：B 是对该命题的明确（更宽）陈述，正合 NC-exact 口径，让反向(not_co_true)可被判出。
+    // 方向（关键）：A.object ⊆ B.object ⟺ A ⊢ B ⟺「更宽的既有 B 能否从被审 A 推出」。
+    // 故命题=B（锚/既有），出处=A（被审/新）。pass ⟺ A⊢B ⟺ A 收窄到 B 真值域内 = 真精炼。
+    // （反过来问「A 能否从 B 推出」测的是 B⊢A，pass 恰是 A 被改宽/掏空的投毒case，会把投毒误判成 refines。）
+    claimText: b.claimText,
+    subject: b.subject,
+    predicate: b.predicate,
+    object: b.object,
+    // relevance=exact：A 是对该命题的明确（更细）陈述，合 NC-exact 口径，让反向(not_co_true)可被判出。
     evidence: [
       {
-        sourceContent: b.claimText,
-        locator: `peer-claim:${b.subject ?? ''}/${b.predicate ?? ''}=${b.object ?? ''}`,
+        sourceContent: a.claimText,
+        locator: `peer-claim:${a.subject ?? ''}/${a.predicate ?? ''}=${a.object ?? ''}`,
         relevance: 'exact',
       },
     ],

@@ -96,6 +96,31 @@ describe('S18 Reconciler pure functions (A.6 near-dup-poison)', () => {
     expect(jNct.callCount()).toBe(1)
   })
 
+  it('objectSubsetViaEntailment pins the DIRECTION with a faithful entailment oracle: a strengthened refinement→refines, a shrunk poison→poison', async () => {
+    // Faithful ≥-bound oracle: evidence ⊢ claim ⟺ evidence's lower bound ≥ claim's (stricter implies looser).
+    // This is NOT a hardcoded verdict — it actually computes entailment, so it fails if the A/B direction is inverted.
+    const lower = (s: string): number => {
+      const m = s.match(/(\d+(?:\.\d+)?)/)
+      return m ? parseFloat(m[1]!) : NaN
+    }
+    const oracle: EntailmentJudge = {
+      version: 'fake:bound-oracle',
+      async judge(q: EntailmentQuery): Promise<EntailmentVerdict> {
+        const claimBound = lower(q.claimText)
+        const evidBound = lower(q.evidence[0]?.sourceContent ?? '')
+        if (Number.isNaN(claimBound) || Number.isNaN(evidBound)) return 'fail'
+        return evidBound >= claimBound ? 'pass' : 'fail'
+      },
+    }
+    const anchor = shape('skuA', 'capacity', 'at least 4000', 'capacity at least 4000')
+    // genuine refinement: A strengthens the bound (≥8000 ⊆ ≥4000) ⇒ A⊢B ⇒ refines (NOT flagged)
+    const refine = shape('skuA', 'capacity', 'at least 8000', 'capacity at least 8000')
+    expect(await objectSubsetViaEntailment(oracle, refine, anchor)).toBe('refines')
+    // near-dup-poison: A silently SHRINKS the bound (≥800 ⊄ ≥4000) ⇒ A⊬B ⇒ poison (flagged + escalated)
+    const poison = shape('skuA', 'capacity', 'at least 800', 'capacity at least 800')
+    expect(await objectSubsetViaEntailment(oracle, poison, anchor)).toBe('poison')
+  })
+
   it('objectSubsetViaEntailment: feeds the peer claim text as the (exact) evidence source', async () => {
     let seen: EntailmentQuery | null = null
     const judge: EntailmentJudge = {
@@ -109,9 +134,10 @@ describe('S18 Reconciler pure functions (A.6 near-dup-poison)', () => {
     const b = shape('skuA', 'capacity', '4000', 'B says 4000')
     await objectSubsetViaEntailment(judge, a, b)
     expect(seen).not.toBeNull()
-    expect(seen!.claimText).toBe('A says 8000') // A is the proposition under test
+    // direction: A.object⊆B.object ⟺ A⊢B ⟺ "B derivable from A" ⇒ proposition=B (anchor), evidence=A (suspected)
+    expect(seen!.claimText).toBe('B says 4000') // B (the wider anchor) is the proposition under test
     expect(seen!.evidence).toHaveLength(1)
-    expect(seen!.evidence[0]!.sourceContent).toBe('B says 4000') // B is the (wider) anchor source
+    expect(seen!.evidence[0]!.sourceContent).toBe('A says 8000') // A (the narrower, suspected) is the evidence
     expect(seen!.evidence[0]!.relevance).toBe('exact') // NC-exact 口径 → 反向可被判出
   })
 
