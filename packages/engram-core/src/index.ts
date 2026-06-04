@@ -188,6 +188,33 @@ export {
   type UsageCorrectStats,
 } from './harvest/usage-correct.js'
 export { recomputeClaimConfidence, type RecomputeResult } from './harvest/recompute.js'
+// S22 · f1 humanReview 生产者（最后一个休眠因子）：主编人审 → claim_verification(kind=patrol, human) → f1。
+export {
+  writeHumanReview,
+  latestHumanReview,
+  computeHumanReviewFactor,
+  latestHumanReviewFactors,
+  HUMAN_REVIEW_APPROVE,
+  HUMAN_REVIEW_REJECT,
+  type HumanReviewVerdict,
+} from './editor/human-review.js'
+// S22 · 主编三动作（Approve / Edit-Approve / Reject）：因子-only、append-only、状态由门限重算（人的红边）。
+export {
+  approveClaim,
+  editApproveClaim,
+  rejectClaim,
+  type EditorActorContext,
+  type EditorActionResult,
+} from './editor/editor-action.js'
+// S22 · human_overturn 翻案事件（S26 恒温器 falseQuarantineRate 的生产者）。
+export {
+  recordHumanOverturn,
+  getHumanOverturns,
+  HUMAN_OVERTURN,
+  type OverturnKind,
+  type HumanOverturnPayload,
+  type HumanOverturn,
+} from './editor/human-overturn.js'
 export {
   adjudicateConflict,
   MACHINE_RUNGS,

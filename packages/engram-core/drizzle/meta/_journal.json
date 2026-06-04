@@ -71,6 +71,13 @@
       "when": 1780573187804,
       "tag": "0009_mighty_tomas",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1780591606279,
+      "tag": "0010_nervous_tyger_tiger",
+      "breakpoints": true
     }
   ]
 }

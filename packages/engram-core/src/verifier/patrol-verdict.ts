@@ -55,8 +55,12 @@ export async function writePatrolVerdict(
 }
 
 /**
- * 取一条 claim 最新一条 patrol 裁决的 entailment 态。无 patrol → null。
+ * 取一条 claim 最新一条 **entailment** 巡查裁决的 entailment 态。无 entailment 巡查 → null。
  * 接受 DB 或 Tx（recall 用前者、commit 合并重算用后者）。
+ *
+ * S22：kind='patrol' 通道与主编人审（f1，verdict 带 humanReview、无 entailment）共用，故倒序逐行扫、
+ * 取第一条**带 entailment 字段**的行（=最新 entailment 巡查）——人审行被天然跳过，绝不让一次人审 Approve/Reject
+ * 把已有的 entailment 巡查结果误清成 null（f1/f2 各读各的字段，互不串读）。
  */
 export async function latestPatrolVerdict(
   q: Queryable,
@@ -67,11 +71,11 @@ export async function latestPatrolVerdict(
     .from(claimVerification)
     .where(and(eq(claimVerification.kind, 'patrol'), eq(claimVerification.claimId, claimId)))
     .orderBy(desc(claimVerification.createdAt), desc(claimVerification.id))
-    .limit(1)
-  if (rows.length === 0) return null
-  const v = rows[0]!.verdict as Partial<PatrolVerdict> | null
-  const e = v?.entailment
-  if (e === 'pass' || e === 'fail' || e === 'not_co_true') return e
+  for (const r of rows) {
+    const v = r.verdict as Partial<PatrolVerdict> | null
+    const e = v?.entailment
+    if (e === 'pass' || e === 'fail' || e === 'not_co_true') return e
+  }
   return null
 }
 
