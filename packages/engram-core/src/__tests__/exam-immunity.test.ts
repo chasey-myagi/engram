@@ -202,6 +202,22 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     expect(report.blindSpotScore).toBe(1)
   })
 
+  it('a structured poison (S/P/O present) that does NOT contradict the KB passes the contradiction scan and promotes', async () => {
+    const q = 'which lubricant grade is specified for the idler bearing'
+    const origin = await seedClaim({ claimText: 'origin', embedQuery: q, status: 'quarantined' })
+    const candidateId = await seedCandidate(q, origin)
+
+    // S/P/O present (so recordContradictions actually runs the scan, unlike free-text) but nothing in the
+    // KB shares this subject+predicate ⇒ no contradicts edge ⇒ the contra.length===0 TRUE branch is taken
+    const res = await promoteCandidate(db, embedder, candidateId, {
+      confirmedBy: 'human:judge',
+      poison: { subject: 'idler-bearing', predicate: 'lubricant-grade', object: 'iso-vg-46' },
+    })
+    expect(res.result.noSelfContradiction).toBe(true) // the scan ran on a structured poison and found nothing
+    expect(res.promoted).toBe(true)
+    expect(await getGoldenQuestions(db)).toHaveLength(1)
+  })
+
   it('A1 red line: a deliberately-poisoned candidate (the KB actually CAN answer it) is rejected and never enters golden', async () => {
     const q = 'what is the supported maximum batch size for the ingest endpoint'
     // an ACTIVE claim answers q ⇒ recall(q) is non-empty ⇒ this gap question is poison (would mis-score the KB)
@@ -219,6 +235,7 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     expect(res.result.reasons).toContain(
       'KB already answers the question (recall returned a claim)',
     )
+    expect(res.poisonClaimId).toBeUndefined() // doomed candidate ⇒ authoring skipped (no wasted draft poison)
     expect(await getGoldenQuestions(db)).toHaveLength(0) // never enters the golden set
 
     const [cand] = await db.select().from(l5Candidates).where(eq(l5Candidates.id, candidateId))

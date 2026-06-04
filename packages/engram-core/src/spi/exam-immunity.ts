@@ -182,6 +182,8 @@ export async function promoteCandidate(
       poisonClaimId = appended.claimId
       // S8：造毒株时是否与库产生 contradicts 边？有 ⇒ 题自败。recordContradictions 只从新 claim 发出边
       // （from=新毒株），且此刻刚造完、无后续 append，故只查 from=poison 即可（to=poison 是死分支）。
+      // 口径偏保守：S8 对**非 superseded** 的对端建边（含 quarantined/draft），不止 active KB —— 免疫门宁可错拒。
+      // 完整 same_fact（active 范围、单位归一、灰区判定）是 S14；届时这条口径随之收窄。
       const contra = await db
         .select({ id: relation.id })
         .from(relation)
