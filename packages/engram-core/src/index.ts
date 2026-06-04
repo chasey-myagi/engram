@@ -108,3 +108,9 @@ export {
   type GoldenQuestion,
   type PromotionAuditRow,
 } from './spi/exam-immunity.js'
+export {
+  transitionClaim,
+  PROMOTE_CONFIDENCE_FLOOR,
+  type TransitionOptions,
+  type PositiveEvidence,
+} from './spi/transition.js'
