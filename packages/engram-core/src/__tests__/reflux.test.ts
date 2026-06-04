@@ -13,7 +13,7 @@ import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { claim, claimProvenance } from '../db/schema.js'
 import { addSource } from '../spi/append-claim.js'
 import { reportUsage } from '../spi/report-usage.js'
-import { recallClaims } from '../spi/recall-claims.js'
+import { getGapEvents } from '../spi/metrics.js'
 import {
   getL5Candidates,
   getRegressionPool,
@@ -321,11 +321,14 @@ describe('S11 production-failure reflux → live regression set (A.2/A.9)', () =
     // surface?" — and it no longer does. The orthogonal "KB still lacks the right answer" is tracked
     // elsewhere (L5 candidate queue + recall's gap signal), deliberately NOT folded into this verdict.
     await db.update(claim).set({ status: 'quarantined' }).where(eq(claim.id, c))
+    const gapsBefore = (await getGapEvents(db, q)).length
     const verdict = await replayRegressionItem(db, embedder, item!)
     expect(verdict.stillRecalled).toBe(false)
     expect(verdict.pass).toBe(true) // narrow pass: the failing claim is gone, regardless of whether a correct answer exists
-    const stillEmpty = await recallClaims(db, embedder, q)
-    expect(stillEmpty).toHaveLength(0) // …and indeed the KB now answers nothing for q
+    // replay went through the REAL recall_claims (eval == consumption, no bespoke path), so a now-empty
+    // recall records one honest gap_recorded — a deliberate, load-bearing side-effect; pin it so a
+    // refactor that bypasses or doubles the write can't pass silently.
+    expect((await getGapEvents(db, q)).length).toBe(gapsBefore + 1)
   })
 
   it('a corrected failure whose claim is still recalled replays to fail (symmetry with refuted)', async () => {
