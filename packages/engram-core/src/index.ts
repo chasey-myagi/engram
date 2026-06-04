@@ -145,6 +145,20 @@ export {
   type SourceIndep,
 } from './same-fact/independent.js'
 export {
+  reconcilePair,
+  isReconcileCandidate,
+  objectSubsetViaEntailment,
+  hasNonIndependentPair,
+  RECONCILE_PAIR_SIMILARITY,
+  type ReconcileVerdict,
+} from './same-fact/reconcile.js'
+export {
+  recordReconcileEscalation,
+  getReconcileEscalations,
+  RECONCILE_POISON_REASON,
+  type ReconcileEscalation,
+} from './spi/reconcile-signal.js'
+export {
   type EntailmentJudge,
   type EntailmentQuery,
   type EntailmentEvidence,
