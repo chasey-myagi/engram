@@ -123,7 +123,8 @@ function buildGolden(): VerifierGoldenItem[] {
         status: 'active',
         ageDays: HALFLIFE_STRUCTURED + 100,
         label: 'should_flag',
-        rationale: 'past the kind half-life → staleness patrol flags it even though entailment passes',
+        rationale:
+          'past the kind half-life → staleness patrol flags it even though entailment passes',
       }),
     )
   }

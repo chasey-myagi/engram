@@ -87,6 +87,50 @@ function pair(
   }
 }
 
+// 有上下文类型的中间常量（ReconcilerPairItem[]），让内联 L1a 字面量的 `tier` 按 ReconcileTier 枚举收窄而非 widen 到
+// string —— typo'd 一个 tier 会被编译期抓住（不用 `as` 绕过检查，这正是 golden 的价值）。
+const RECONCILER_PAIR_ITEMS: ReconcilerPairItem[] = [
+  // L1b 真精炼（更窄、仍在锚真值域内）。
+  pair('recon-L1b-1', 'L1b_refines', 'cellpack', 'capacity', 4000, 4500),
+  pair('recon-L1b-2', 'L1b_refines', 'rotor', 'speed', 1000, 1200),
+  pair('recon-L1b-3', 'L1b_refines', 'buffer', 'depth', 64, 128),
+  // L1c 等价投毒（object 被悄悄改小，A⊄B）。
+  pair('recon-L1c-1', 'L1c_poison', 'powercell', 'capacity', 4000, 800),
+  pair('recon-L1c-2', 'L1c_poison', 'turbine', 'output', 5000, 500),
+  pair('recon-L1c-3', 'L1c_poison', 'tank', 'volume', 9000, 90),
+  // L1c draft poison：A.4 下 draft→flagged 非法 → 不收紧（expectFlagged=false）但仍记 escalation。
+  pair('recon-L1c-draft', 'L1c_poison', 'reservoir', 'volume', 8000, 80, {
+    candidateStatus: 'draft',
+  }),
+  // L1a 规则可判等价（object 等价 → 非 candidate → inconclusive、不 flag、不 refines）。
+  {
+    id: 'recon-L1a-1',
+    tier: 'L1a_same',
+    subject: 'modulex',
+    predicate: 'mass',
+    anchorText: 'modulex mass is 4000 mah',
+    anchorObject: '4000mah',
+    candidateText: 'modulex mass is 4000 mah',
+    candidateObject: '4000mah',
+    expectFlagged: false,
+    expectEscalated: false,
+    expectRefines: false,
+  },
+  {
+    id: 'recon-L1a-2',
+    tier: 'L1a_same',
+    subject: 'beamline',
+    predicate: 'length',
+    anchorText: 'beamline length is 1 m',
+    anchorObject: '1m',
+    candidateText: 'beamline length is 100 cm', // 单位归一等价 → objectEquivalent → 非 candidate
+    candidateObject: '100cm',
+    expectFlagged: false,
+    expectEscalated: false,
+    expectRefines: false,
+  },
+]
+
 /**
  * 冻结的 Reconciler pair golden：每层多对（领域无关）。
  *   L1b refines：A 更窄 (candLB ≥ anchorLB) ⇒ A⊢B ⇒ pass ⇒ refines。
@@ -94,47 +138,7 @@ function pair(
  *   L1a same：object 等价对（用 anchorText==candidateText 的等价数值）⇒ isReconcileCandidate=false ⇒ inconclusive。
  */
 export const RECONCILER_PAIR_GOLDEN: readonly ReconcilerPairItem[] = Object.freeze(
-  [
-    // L1b 真精炼（更窄、仍在锚真值域内）。
-    pair('recon-L1b-1', 'L1b_refines', 'cellpack', 'capacity', 4000, 4500),
-    pair('recon-L1b-2', 'L1b_refines', 'rotor', 'speed', 1000, 1200),
-    pair('recon-L1b-3', 'L1b_refines', 'buffer', 'depth', 64, 128),
-    // L1c 等价投毒（object 被悄悄改小，A⊄B）。
-    pair('recon-L1c-1', 'L1c_poison', 'powercell', 'capacity', 4000, 800),
-    pair('recon-L1c-2', 'L1c_poison', 'turbine', 'output', 5000, 500),
-    pair('recon-L1c-3', 'L1c_poison', 'tank', 'volume', 9000, 90),
-    // L1c draft poison：A.4 下 draft→flagged 非法 → 不收紧（expectFlagged=false）但仍记 escalation。
-    pair('recon-L1c-draft', 'L1c_poison', 'reservoir', 'volume', 8000, 80, {
-      candidateStatus: 'draft',
-    }),
-    // L1a 规则可判等价（object 等价 → 非 candidate → inconclusive、不 flag、不 refines）。
-    {
-      id: 'recon-L1a-1',
-      tier: 'L1a_same',
-      subject: 'modulex',
-      predicate: 'mass',
-      anchorText: 'modulex mass is 4000 mah',
-      anchorObject: '4000mah',
-      candidateText: 'modulex mass is 4000 mah',
-      candidateObject: '4000mah',
-      expectFlagged: false,
-      expectEscalated: false,
-      expectRefines: false,
-    },
-    {
-      id: 'recon-L1a-2',
-      tier: 'L1a_same',
-      subject: 'beamline',
-      predicate: 'length',
-      anchorText: 'beamline length is 1 m',
-      anchorObject: '1m',
-      candidateText: 'beamline length is 100 cm', // 单位归一等价 → objectEquivalent → 非 candidate
-      candidateObject: '100cm',
-      expectFlagged: false,
-      expectEscalated: false,
-      expectRefines: false,
-    },
-  ].map((it) => Object.freeze(it)),
+  RECONCILER_PAIR_ITEMS.map((it) => Object.freeze(it)),
 )
 
 /** 冻结的独立印证完整性 golden。 */

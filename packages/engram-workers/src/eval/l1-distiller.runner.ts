@@ -11,12 +11,7 @@
  *
  * 故一旦 Distiller 的 render/commit/locator 接线退化（丢锚、错位、render 漏块致 commit 失败），成功数掉 → 准确率跌破门 → 红。
  */
-import {
-  schema,
-  type DB,
-  type Embedder,
-  type SameFactJudge,
-} from '@engram/core'
+import { schema, type DB, type Embedder, type SameFactJudge } from '@engram/core'
 import { eq } from 'drizzle-orm'
 
 import { runDistiller } from '../distiller.js'
@@ -147,7 +142,9 @@ export async function runDistillerGolden(
 
   const total = distillerGoldenClaimTotal(items)
   const extracted = observations.filter((o) => o.extracted).length
-  const provenanceMisaligned = observations.filter((o) => o.extracted && !o.provenanceAligned).length
+  const provenanceMisaligned = observations.filter(
+    (o) => o.extracted && !o.provenanceAligned,
+  ).length
   return {
     total,
     extracted,

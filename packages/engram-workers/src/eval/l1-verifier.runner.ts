@@ -15,10 +15,14 @@ import type { EntailmentJudge, EntailmentQuery, EntailmentVerdict } from '@engra
 import { runVerifier } from '../verifier.js'
 import { VERIFIER_GOLDEN, type VerifierGoldenItem } from './l1-verifier.golden.js'
 
-/** 从一段文本里取第一个数值（下界/标称值）。无数值 → NaN。 */
-function firstNumber(s: string): number {
-  const m = s.match(/(\d+(?:\.\d+)?)/)
-  return m ? parseFloat(m[1]!) : NaN
+/**
+ * 从一段文本里取**断言的量值**（最后一个数值）。无数值 → NaN。
+ * 取「最后一个」而非「第一个」：claim/evidence 形如 `<subject> <predicate> is <value> <unit>`，断言量是末位数；
+ * 这样含数字的标识符（如 `qx-7731`）不会污染数值比较 —— 更忠实地反映「这条 claim 断言的数对不对」。
+ */
+function assertedNumber(s: string): number {
+  const ms = s.match(/(\d+(?:\.\d+)?)/g)
+  return ms && ms.length > 0 ? parseFloat(ms[ms.length - 1]!) : NaN
 }
 
 /**
@@ -34,8 +38,8 @@ export function goldenEntailmentOracle(): EntailmentJudge & { callCount: () => n
     async judge(q: EntailmentQuery): Promise<EntailmentVerdict> {
       calls += 1
       const evidence = q.evidence.map((e) => e.sourceContent).join(' ')
-      const claimNum = firstNumber(q.claimText)
-      const evidNum = firstNumber(evidence)
+      const claimNum = assertedNumber(q.claimText)
+      const evidNum = assertedNumber(evidence)
       if (!Number.isNaN(claimNum) && !Number.isNaN(evidNum)) {
         const tol = Math.max(1e-9, Math.abs(evidNum) * 0.01)
         return Math.abs(claimNum - evidNum) <= tol ? 'pass' : 'fail'
@@ -124,7 +128,8 @@ export async function runVerifierGolden(
   let tn = 0
   for (const { item, claimId } of seedStatusById.values()) {
     const finalStatus = await deps.statusOf(claimId)
-    const tightened = (TIGHTER[finalStatus] ?? 0) > (TIGHTER[item.status] ?? 0) && finalStatus !== 'active'
+    const tightened =
+      (TIGHTER[finalStatus] ?? 0) > (TIGHTER[item.status] ?? 0) && finalStatus !== 'active'
     // 注：draft→active（晋升）TIGHTER 也 +1，但那是晋升不是收紧 → 用 finalStatus!=='active' 排除晋升被误判为收紧。
     // active→flagged / flagged→quarantined 的 finalStatus 分别是 flagged/quarantined（非 active）→ 正确计为收紧。
     const predictedFlag = tightened

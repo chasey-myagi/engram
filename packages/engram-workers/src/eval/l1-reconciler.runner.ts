@@ -85,7 +85,10 @@ export interface ReconcilerGoldenDeps {
   /** seed 一条带额外 supports 源的 claim（独立印证审计用），返回 claimId。 */
   seedIndep: (item: IndepGoldenItem) => Promise<string>
   /** 跑真 reconcileBatch（注入 judge）对本批 candidate id。 */
-  reconcileWith: (judge: EntailmentJudge, candidateIds: string[]) => ReturnType<typeof reconcileBatch>
+  reconcileWith: (
+    judge: EntailmentJudge,
+    candidateIds: string[],
+  ) => ReturnType<typeof reconcileBatch>
   /** 跑真 runReconciler 对一批 claimId（独立印证审计用）。 */
   runReconcilerWith: (
     judge: EntailmentJudge,

@@ -38,227 +38,231 @@ export interface DistillerGoldenItem {
   claims: GoldenClaim[]
 }
 
+// 先给一个**有上下文类型**的中间常量（DistillerGoldenItem[]），让内联字面量按 kind 枚举收窄而非 widen 到 string——
+// 这样 fixture 里写错一个 kind（typo）会被编译期抓住，正是这套 golden 的价值所在（不用 `as` 绕过检查）。
+const DISTILLER_GOLDEN_ITEMS: DistillerGoldenItem[] = [
+  {
+    id: 'distiller-structured-lines',
+    kind: 'structured_spec',
+    content:
+      'connector qx-7731 max sustained throughput is 480 mbps\n' +
+      'connector qx-7731 operating temperature is 70 celsius\n' +
+      'connector qx-7731 weight is 240 g',
+    claims: [
+      {
+        claimText: 'connector qx-7731 max sustained throughput is 480 mbps',
+        subject: 'qx-7731',
+        predicate: 'maxThroughput',
+        object: '480mbps',
+        locator: 'L1',
+        drillsBackTo: 'connector qx-7731 max sustained throughput is 480 mbps',
+      },
+      {
+        claimText: 'connector qx-7731 operating temperature is 70 celsius',
+        subject: 'qx-7731',
+        predicate: 'operatingTemperature',
+        object: '70celsius',
+        locator: 'L2',
+        drillsBackTo: 'connector qx-7731 operating temperature is 70 celsius',
+      },
+      {
+        claimText: 'connector qx-7731 weight is 240 g',
+        subject: 'qx-7731',
+        predicate: 'weight',
+        object: '240g',
+        locator: 'L3',
+        drillsBackTo: 'connector qx-7731 weight is 240 g',
+      },
+    ],
+  },
+  {
+    id: 'distiller-structured-table',
+    kind: 'structured_spec',
+    // TSV → cell anchors. header is row 1; values drill back to specific cells.
+    content: 'part\tcapacity\tvoltage\npump-a\t4000 mah\t12 v\npump-b\t6000 mah\t24 v',
+    claims: [
+      {
+        claimText: 'pump-a capacity is 4000 mah',
+        subject: 'pump-a',
+        predicate: 'capacity',
+        object: '4000mah',
+        locator: 'cell:R2C2',
+        drillsBackTo: '4000 mah',
+      },
+      {
+        claimText: 'pump-a voltage is 12 v',
+        subject: 'pump-a',
+        predicate: 'voltage',
+        object: '12v',
+        locator: 'cell:R2C3',
+        drillsBackTo: '12 v',
+      },
+      {
+        claimText: 'pump-b capacity is 6000 mah',
+        subject: 'pump-b',
+        predicate: 'capacity',
+        object: '6000mah',
+        locator: 'cell:R3C2',
+        drillsBackTo: '6000 mah',
+      },
+    ],
+  },
+  {
+    id: 'distiller-human-qa',
+    kind: 'human_qa',
+    content:
+      'Q: what is the warranty period?\nA: 24 months\nQ: what is the retry budget?\nA: 3 attempts',
+    claims: [
+      {
+        claimText: 'warranty period is 24 months',
+        subject: 'product',
+        predicate: 'warrantyPeriod',
+        object: '24months',
+        locator: 'qa:1',
+        drillsBackTo: 'warranty period',
+      },
+      {
+        claimText: 'retry budget is 3 attempts',
+        subject: 'gateway',
+        predicate: 'retryBudget',
+        object: '3attempts',
+        locator: 'qa:2',
+        drillsBackTo: 'retry budget',
+      },
+    ],
+  },
+  {
+    id: 'distiller-conversation',
+    kind: 'conversation_log',
+    content:
+      'ann: kickoff for the relay project\n' +
+      'bob: the dual-band failover landed in firmware revision r12\n' +
+      'carol: the mttf for the cryo pump is 50000 hours',
+    claims: [
+      {
+        claimText: 'dual-band failover landed in firmware revision r12',
+        subject: 'mesh-relay',
+        predicate: 'dualBandFailoverRevision',
+        object: 'r12',
+        locator: 'turn:2',
+        drillsBackTo: 'dual-band failover landed in firmware revision r12',
+      },
+      {
+        claimText: 'cryo pump mttf is 50000 hours',
+        subject: 'cryo-pump',
+        predicate: 'mttf',
+        object: '50000hours',
+        locator: 'turn:3',
+        drillsBackTo: 'mttf for the cryo pump is 50000 hours',
+      },
+    ],
+  },
+  {
+    id: 'distiller-historical',
+    kind: 'historical_artifact',
+    content:
+      'the clearing node was commissioned in 1998 under the original settlement regime.\n\n' +
+      'the satellite uplink scheduler tolerates packet loss up to 2 percent.',
+    claims: [
+      {
+        claimText: 'clearing node was commissioned in 1998',
+        subject: 'clearing-node',
+        predicate: 'commissionedYear',
+        object: '1998',
+        locator: 'seg:1',
+        drillsBackTo: 'commissioned in 1998',
+      },
+      {
+        claimText: 'satellite uplink scheduler tolerates packet loss up to 2 percent',
+        subject: 'uplink-scheduler',
+        predicate: 'packetLossTolerance',
+        object: '2percent',
+        locator: 'seg:2',
+        drillsBackTo: 'packet loss up to 2 percent',
+      },
+    ],
+  },
+  {
+    id: 'distiller-agent-synthesis',
+    kind: 'agent_synthesis',
+    content:
+      '## throughput\nthe sharded ledger supports 256 concurrent tenants before resharding\n' +
+      '## reliability\nthe high-torque actuator rated duty cycle is 40 percent',
+    claims: [
+      {
+        claimText: 'sharded ledger supports 256 concurrent tenants before resharding',
+        subject: 'sharded-ledger',
+        predicate: 'maxConcurrentTenants',
+        object: '256',
+        locator: 'sec:1',
+        drillsBackTo: 'supports 256 concurrent tenants',
+      },
+      {
+        claimText: 'high-torque actuator rated duty cycle is 40 percent',
+        subject: 'actuator',
+        predicate: 'dutyCycle',
+        object: '40percent',
+        locator: 'sec:2',
+        drillsBackTo: 'duty cycle is 40 percent',
+      },
+    ],
+  },
+  {
+    id: 'distiller-external-feed',
+    kind: 'external_feed',
+    content:
+      'photonics module warranty period updated to 36 months\nupstream gateway default retry budget set to 5',
+    claims: [
+      {
+        claimText: 'photonics module warranty period is 36 months',
+        subject: 'photonics-module',
+        predicate: 'warrantyPeriod',
+        object: '36months',
+        locator: 'item:1',
+        drillsBackTo: 'warranty period updated to 36 months',
+      },
+      {
+        claimText: 'upstream gateway default retry budget is 5',
+        subject: 'upstream-gateway',
+        predicate: 'retryBudget',
+        object: '5',
+        locator: 'item:2',
+        drillsBackTo: 'retry budget set to 5',
+      },
+    ],
+  },
+  {
+    id: 'distiller-formal-document',
+    kind: 'formal_document', // image-bearing by default → VLM page/line anchors
+    content:
+      'Specification Sheet\nmax load is 200 kg\f Appendix A\ncalibration gas is argon-methane',
+    claims: [
+      {
+        claimText: 'max load is 200 kg',
+        subject: 'assembly',
+        predicate: 'maxLoad',
+        object: '200kg',
+        locator: 'p1:L2',
+        drillsBackTo: 'max load is 200 kg',
+      },
+      {
+        claimText: 'calibration gas is argon-methane',
+        subject: 'analyzer',
+        predicate: 'calibrationGas',
+        object: 'argon-methane',
+        locator: 'p2:L2',
+        drillsBackTo: 'calibration gas is argon-methane',
+      },
+    ],
+  },
+]
+
 /**
  * 冻结的 Distiller golden 集：覆盖全部 7 个可读 source_kind（A.9「5 种 kind 各样本」的超集），
  * 通用事实、领域无关。每个 fixture 的 claims[].locator 都对应该 content 经 SourceReader 产出的真实分块。
  */
 export const DISTILLER_GOLDEN: readonly DistillerGoldenItem[] = Object.freeze(
-  [
-    {
-      id: 'distiller-structured-lines',
-      kind: 'structured_spec',
-      content:
-        'connector qx-7731 max sustained throughput is 480 mbps\n' +
-        'connector qx-7731 operating temperature is 70 celsius\n' +
-        'connector qx-7731 weight is 240 g',
-      claims: [
-        {
-          claimText: 'connector qx-7731 max sustained throughput is 480 mbps',
-          subject: 'qx-7731',
-          predicate: 'maxThroughput',
-          object: '480mbps',
-          locator: 'L1',
-          drillsBackTo: 'connector qx-7731 max sustained throughput is 480 mbps',
-        },
-        {
-          claimText: 'connector qx-7731 operating temperature is 70 celsius',
-          subject: 'qx-7731',
-          predicate: 'operatingTemperature',
-          object: '70celsius',
-          locator: 'L2',
-          drillsBackTo: 'connector qx-7731 operating temperature is 70 celsius',
-        },
-        {
-          claimText: 'connector qx-7731 weight is 240 g',
-          subject: 'qx-7731',
-          predicate: 'weight',
-          object: '240g',
-          locator: 'L3',
-          drillsBackTo: 'connector qx-7731 weight is 240 g',
-        },
-      ],
-    },
-    {
-      id: 'distiller-structured-table',
-      kind: 'structured_spec',
-      // TSV → cell anchors. header is row 1; values drill back to specific cells.
-      content: 'part\tcapacity\tvoltage\npump-a\t4000 mah\t12 v\npump-b\t6000 mah\t24 v',
-      claims: [
-        {
-          claimText: 'pump-a capacity is 4000 mah',
-          subject: 'pump-a',
-          predicate: 'capacity',
-          object: '4000mah',
-          locator: 'cell:R2C2',
-          drillsBackTo: '4000 mah',
-        },
-        {
-          claimText: 'pump-a voltage is 12 v',
-          subject: 'pump-a',
-          predicate: 'voltage',
-          object: '12v',
-          locator: 'cell:R2C3',
-          drillsBackTo: '12 v',
-        },
-        {
-          claimText: 'pump-b capacity is 6000 mah',
-          subject: 'pump-b',
-          predicate: 'capacity',
-          object: '6000mah',
-          locator: 'cell:R3C2',
-          drillsBackTo: '6000 mah',
-        },
-      ],
-    },
-    {
-      id: 'distiller-human-qa',
-      kind: 'human_qa',
-      content:
-        'Q: what is the warranty period?\nA: 24 months\nQ: what is the retry budget?\nA: 3 attempts',
-      claims: [
-        {
-          claimText: 'warranty period is 24 months',
-          subject: 'product',
-          predicate: 'warrantyPeriod',
-          object: '24months',
-          locator: 'qa:1',
-          drillsBackTo: 'warranty period',
-        },
-        {
-          claimText: 'retry budget is 3 attempts',
-          subject: 'gateway',
-          predicate: 'retryBudget',
-          object: '3attempts',
-          locator: 'qa:2',
-          drillsBackTo: 'retry budget',
-        },
-      ],
-    },
-    {
-      id: 'distiller-conversation',
-      kind: 'conversation_log',
-      content:
-        'ann: kickoff for the relay project\n' +
-        'bob: the dual-band failover landed in firmware revision r12\n' +
-        'carol: the mttf for the cryo pump is 50000 hours',
-      claims: [
-        {
-          claimText: 'dual-band failover landed in firmware revision r12',
-          subject: 'mesh-relay',
-          predicate: 'dualBandFailoverRevision',
-          object: 'r12',
-          locator: 'turn:2',
-          drillsBackTo: 'dual-band failover landed in firmware revision r12',
-        },
-        {
-          claimText: 'cryo pump mttf is 50000 hours',
-          subject: 'cryo-pump',
-          predicate: 'mttf',
-          object: '50000hours',
-          locator: 'turn:3',
-          drillsBackTo: 'mttf for the cryo pump is 50000 hours',
-        },
-      ],
-    },
-    {
-      id: 'distiller-historical',
-      kind: 'historical_artifact',
-      content:
-        'the clearing node was commissioned in 1998 under the original settlement regime.\n\n' +
-        'the satellite uplink scheduler tolerates packet loss up to 2 percent.',
-      claims: [
-        {
-          claimText: 'clearing node was commissioned in 1998',
-          subject: 'clearing-node',
-          predicate: 'commissionedYear',
-          object: '1998',
-          locator: 'seg:1',
-          drillsBackTo: 'commissioned in 1998',
-        },
-        {
-          claimText: 'satellite uplink scheduler tolerates packet loss up to 2 percent',
-          subject: 'uplink-scheduler',
-          predicate: 'packetLossTolerance',
-          object: '2percent',
-          locator: 'seg:2',
-          drillsBackTo: 'packet loss up to 2 percent',
-        },
-      ],
-    },
-    {
-      id: 'distiller-agent-synthesis',
-      kind: 'agent_synthesis',
-      content:
-        '## throughput\nthe sharded ledger supports 256 concurrent tenants before resharding\n' +
-        '## reliability\nthe high-torque actuator rated duty cycle is 40 percent',
-      claims: [
-        {
-          claimText: 'sharded ledger supports 256 concurrent tenants before resharding',
-          subject: 'sharded-ledger',
-          predicate: 'maxConcurrentTenants',
-          object: '256',
-          locator: 'sec:1',
-          drillsBackTo: 'supports 256 concurrent tenants',
-        },
-        {
-          claimText: 'high-torque actuator rated duty cycle is 40 percent',
-          subject: 'actuator',
-          predicate: 'dutyCycle',
-          object: '40percent',
-          locator: 'sec:2',
-          drillsBackTo: 'duty cycle is 40 percent',
-        },
-      ],
-    },
-    {
-      id: 'distiller-external-feed',
-      kind: 'external_feed',
-      content:
-        'photonics module warranty period updated to 36 months\nupstream gateway default retry budget set to 5',
-      claims: [
-        {
-          claimText: 'photonics module warranty period is 36 months',
-          subject: 'photonics-module',
-          predicate: 'warrantyPeriod',
-          object: '36months',
-          locator: 'item:1',
-          drillsBackTo: 'warranty period updated to 36 months',
-        },
-        {
-          claimText: 'upstream gateway default retry budget is 5',
-          subject: 'upstream-gateway',
-          predicate: 'retryBudget',
-          object: '5',
-          locator: 'item:2',
-          drillsBackTo: 'retry budget set to 5',
-        },
-      ],
-    },
-    {
-      id: 'distiller-formal-document',
-      kind: 'formal_document', // image-bearing by default → VLM page/line anchors
-      content:
-        'Specification Sheet\nmax load is 200 kg\f Appendix A\ncalibration gas is argon-methane',
-      claims: [
-        {
-          claimText: 'max load is 200 kg',
-          subject: 'assembly',
-          predicate: 'maxLoad',
-          object: '200kg',
-          locator: 'p1:L2',
-          drillsBackTo: 'max load is 200 kg',
-        },
-        {
-          claimText: 'calibration gas is argon-methane',
-          subject: 'analyzer',
-          predicate: 'calibrationGas',
-          object: 'argon-methane',
-          locator: 'p2:L2',
-          drillsBackTo: 'calibration gas is argon-methane',
-        },
-      ],
-    },
-  ].map((it) => Object.freeze(it)),
+  DISTILLER_GOLDEN_ITEMS.map((it) => Object.freeze(it)),
 )
 
 /** golden 里原子事实总数（分母）。 */
