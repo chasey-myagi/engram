@@ -10,10 +10,10 @@
  */
 import { randomUUID } from 'node:crypto'
 
-import { and, cosineDistance, eq, isNotNull, ne } from 'drizzle-orm'
+import { and, cosineDistance, eq, inArray, isNotNull, ne, or } from 'drizzle-orm'
 
 import type { StoredConfidence } from '../confidence/confidence.js'
-import type { DB } from '../db/client.js'
+import type { DB, Tx } from '../db/client.js'
 import type { Embedder } from '../embedding/embedder.js'
 import { claim, claimProvenance, relation, type ProvRelevance } from '../db/schema.js'
 import {
@@ -23,7 +23,7 @@ import {
   type ClaimShape,
   type SameFactJudge,
 } from '../same-fact/same-fact.js'
-import { computeConfidenceFromSourceIds } from './append-claim.js'
+import { computeConfidenceFromProvenances } from './append-claim.js'
 import type { DraftClaim, ProvenanceInput } from './append-claim.js'
 
 export interface CommitResult {
@@ -77,25 +77,66 @@ async function findCandidates(
     }
   }
   // subjectKey 串联：同 subject 的也拉进来（不卡相似度门 —— 同主语本身就是强候选信号）。
+  // 同样要求有嵌入（否则 cosineDistance(null) ⇒ similarity 1.0 假高，会把无嵌入的同主语项误送进灰区烧一次 LLM）。
   if (subject != null) {
     const subjMatches = await db
       .select(cols)
       .from(claim)
-      .where(and(ne(claim.status, 'superseded'), eq(claim.subject, subject)))
+      .where(
+        and(ne(claim.status, 'superseded'), isNotNull(claim.embedding), eq(claim.subject, subject)),
+      )
     for (const c of subjMatches) {
       if (!byId.has(c.id)) byId.set(c.id, { ...c, similarity: 1 - Number(c.distance) })
     }
   }
-  return [...byId.values()]
+  // 相似度降序：多个 same 候选时，合并目标确定地选最相似的（而非 Map 插入序）。
+  return [...byId.values()].sort((a, b) => b.similarity - a.similarity)
 }
 
 function storedFrom(
-  conf: Awaited<ReturnType<typeof computeConfidenceFromSourceIds>>,
+  conf: Awaited<ReturnType<typeof computeConfidenceFromProvenances>>,
 ): StoredConfidence {
   return {
     factors: conf.factors,
     weights: conf.weights,
     calibrationVersion: conf.calibrationVersion,
+  }
+}
+
+/**
+ * 合并后从 fromId 补记 contradicts/refines 边（去重，不漏冲突信号）。contradicts 对称：任一方向已存在即跳过；
+ * refines 取 fromId→对端方向。
+ */
+async function insertMergeEdges(
+  tx: Tx,
+  fromId: string,
+  edges: { to: string; type: 'contradicts' | 'refines' }[],
+): Promise<void> {
+  if (edges.length === 0) return
+  const present = await tx
+    .select({ from: relation.fromClaim, to: relation.toClaim, type: relation.type })
+    .from(relation)
+    .where(
+      and(
+        inArray(relation.type, ['contradicts', 'refines']),
+        or(eq(relation.fromClaim, fromId), eq(relation.toClaim, fromId)),
+      ),
+    )
+  const has = new Set<string>()
+  for (const r of present) {
+    if (r.from === fromId && r.to) has.add(`${r.type}:out:${r.to}`)
+    if (r.to === fromId) has.add(`${r.type}:in:${r.from}`)
+  }
+  for (const e of edges) {
+    const dup =
+      e.type === 'contradicts'
+        ? has.has(`contradicts:out:${e.to}`) || has.has(`contradicts:in:${e.to}`)
+        : has.has(`refines:out:${e.to}`)
+    if (dup) continue
+    await tx
+      .insert(relation)
+      .values({ id: randomUUID(), fromClaim: fromId, toClaim: e.to, type: e.type })
+    has.add(`${e.type}:out:${e.to}`)
   }
 }
 
@@ -154,16 +195,12 @@ export async function commitClaim(
         })
         have.add(p.sourceId)
       }
-      // 按全量源重算 confidence（f3 随独立印证数升；保持原 claim 的 asOf，不刷新年龄）。
+      // 按全量出处重算 confidence（只数 supports 源；f3 随独立印证数升；保持原 claim 的 asOf，不刷新年龄）。
       const all = await tx
-        .select({ sourceId: claimProvenance.sourceId })
+        .select({ sourceId: claimProvenance.sourceId, relevance: claimProvenance.relevance })
         .from(claimProvenance)
         .where(eq(claimProvenance.claimId, target.id))
-      const conf = await computeConfidenceFromSourceIds(
-        tx,
-        all.map((a) => a.sourceId),
-        target.asOf,
-      )
+      const conf = await computeConfidenceFromProvenances(tx, all, target.asOf)
       await tx
         .update(claim)
         .set({
@@ -172,15 +209,18 @@ export async function commitClaim(
           confidenceFactors: storedFrom(conf),
         })
         .where(eq(claim.id, target.id))
+      // 别把对其它候选的 contradicts/refines 信号丢在地上：本次新事实并入 target 后，这些关系归属 target。
+      // 从 target 补上缺失的边（contradicts 对称：任一方向已存在即跳过；refines 取 target→对端方向）。
+      await insertMergeEdges(tx, target.id, edges)
       return { claimId: target.id, merged: true }
     })
   }
 
   // 新建 claim（draft 影子区）+ 记 contradicts/refines 边。
   return db.transaction(async (tx) => {
-    const conf = await computeConfidenceFromSourceIds(
+    const conf = await computeConfidenceFromProvenances(
       tx,
-      provenances.map((p) => p.sourceId),
+      provenances.map((p) => ({ sourceId: p.sourceId, relevance: p.relevance ?? null })),
       draft.asOf,
     )
     const claimId = randomUUID()

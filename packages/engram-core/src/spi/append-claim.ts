@@ -71,17 +71,32 @@ function requireProvenance(provenances: ProvenanceInput[]): void {
   }
 }
 
+/** 一条出处的 sourceId + relevance（confidence 只数 supports 源，A.6）。 */
+export interface ProvenanceRef {
+  sourceId: string
+  relevance?: ProvRelevance | null
+}
+
+/** A.6：只有 exact / supporting 算「supports 源」；tangential / irrelevant 不计 authority / 印证。缺省视为 supporting。 */
+function isSupporting(relevance: ProvRelevance | null | undefined): boolean {
+  const r = relevance ?? 'supporting'
+  return r === 'exact' || r === 'supporting'
+}
+
 /**
- * 命门：从一组出处源算连续 confidence。authority 取最强源、halfLife 看最强源 kind、
- * indepSupport 数**独立** supports 源（A.6：hash 去重 + derived_from 折叠 + agent_synthesis 0.5 折扣，S14）。
- * 既给 appendClaim 写新 claim 用，也给 commitClaim 合并后按全量源重算 f3 用（单一真相源）。
+ * 命门：从一组**出处**算连续 confidence。只取 relevance∈{exact,supporting} 的 supports 源；authority 取其中最强源、
+ * halfLife 看最强源 kind、indepSupport 数**独立** supports 源（A.6：hash 去重 + derived_from 折叠 + agent_synthesis
+ * 0.5 折扣，S14）。tangential/irrelevant 出处既不抬 authority 也不计印证（防拿无关源刷 f3）。
+ * 既给 appendClaim 写新 claim 用，也给 commitClaim 合并后按全量出处重算用（单一真相源）。
  */
-export async function computeConfidenceFromSourceIds(
+export async function computeConfidenceFromProvenances(
   tx: Tx,
-  sourceIds: string[],
+  provenances: ProvenanceRef[],
   asOf?: Date,
 ): Promise<ComputedConfidence> {
-  const ids = [...new Set(sourceIds)]
+  const ids = [
+    ...new Set(provenances.filter((p) => isSupporting(p.relevance)).map((p) => p.sourceId)),
+  ]
   const sources = ids.length
     ? await tx
         .select({
@@ -115,9 +130,9 @@ async function computeClaimConfidence(
   draft: DraftClaim,
   provenances: ProvenanceInput[],
 ): Promise<ComputedConfidence> {
-  return computeConfidenceFromSourceIds(
+  return computeConfidenceFromProvenances(
     tx,
-    provenances.map((p) => p.sourceId),
+    provenances.map((p) => ({ sourceId: p.sourceId, relevance: p.relevance ?? null })),
     draft.asOf,
   )
 }

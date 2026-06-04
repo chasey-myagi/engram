@@ -7,7 +7,11 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import type { StoredConfidence } from '../confidence/confidence.js'
+import {
+  CALIBRATION_IDENTITY,
+  DEFAULT_WEIGHTS,
+  type StoredConfidence,
+} from '../confidence/confidence.js'
 import { createDb, type DB } from '../db/client.js'
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { claim, relation } from '../db/schema.js'
@@ -133,6 +137,28 @@ describe('S14 same-fact pure functions (A.6)', () => {
     expect(countIndependentSupports([A, { ...B, contentHash: 'h1' }])).toBe(1) // same content hash ⇒ deduped
     expect(countIndependentSupports([A, { ...B, derivedFromSourceId: 'A' }])).toBe(1) // B derived from A ⇒ collapsed
     expect(countIndependentSupports([A, { ...B, kind: 'agent_synthesis' }])).toBeCloseTo(1.5) // 1 + 0.5
+    // transitive chain A <- B <- C collapses to one root; a cycle terminates (visited-guard) without hanging
+    const C: SourceIndep = {
+      id: 'C',
+      contentHash: 'h3',
+      kind: 'structured_spec',
+      derivedFromSourceId: 'B',
+    }
+    expect(countIndependentSupports([A, { ...B, derivedFromSourceId: 'A' }, C])).toBe(1)
+    expect(
+      countIndependentSupports([
+        { ...A, derivedFromSourceId: 'B' },
+        { ...B, derivedFromSourceId: 'A' },
+      ]),
+    ).toBe(0) // mutual cycle: both collapse, terminates
+  })
+
+  it('adjudicate spends the gray-zone LLM exactly at the 0.65 boundary (>=)', async () => {
+    const j = makeFakeSameFactJudge({ verdictOf: () => 'same' })
+    expect(
+      await adjudicate(shape(null, null, null, 'a'), shape(null, null, null, 'b'), 0.65, j),
+    ).toBe('same')
+    expect(j.callCount()).toBe(1) // 0.65 is inclusive
   })
 })
 
@@ -187,6 +213,43 @@ async function indepSupportOf(claimId: string): Promise<number> {
     .from(claim)
     .where(eq(claim.id, claimId))
   return (row!.f as StoredConfidence).factors.indepSupport
+}
+
+/** Directly seed an active claim with S/P/O + an embedding (no contradicts/refines edges) — for racing-candidate setups. */
+async function seedActiveClaim(s: string, p: string, o: string): Promise<string> {
+  const id = randomUUID()
+  const text = `${s} ${p} ${o}`
+  await db.insert(claim).values({
+    id,
+    claimText: text,
+    subject: s,
+    predicate: p,
+    object: o,
+    status: 'active',
+    confidence: 0.8,
+    confidenceRaw: 0.8,
+    confidenceFactors: {
+      factors: {
+        authority: 0.8,
+        humanReview: 0,
+        entailment: 0.5,
+        indepSupport: 0,
+        usageCorrect: 0,
+        ageDays: 0,
+        activeContradicts: 0,
+        staleDecay: 1,
+        conflictDecay: 1,
+      },
+      weights: DEFAULT_WEIGHTS,
+      calibrationVersion: CALIBRATION_IDENTITY,
+    },
+    lineageId: randomUUID(),
+    asOf: new Date(),
+    createdBy: 'test',
+    embedding: await embedder.embed(text),
+    embeddingVersion: embedder.version,
+  })
+  return id
 }
 
 const SKU = { subject: 'sku-7', predicate: 'maxThroughput', object: '500mbps' }
@@ -352,6 +415,108 @@ describe('S14 commitClaim — same-fact dedup + un-inflatable f3 (A.6)', () => {
     // same subject ⇒ subjectKey candidate, but similarity<0.65 and no deterministic rule ⇒ unrelated, no LLM
     expect(judge.callCount()).toBe(0)
     expect(b.merged).toBe(false)
+  })
+
+  it('a tangential provenance is NOT a support and does NOT raise f3 (印证只数 supports 源)', async () => {
+    const s1 = await aSource()
+    const first = await commitClaim(
+      db,
+      embedder,
+      unrelatedJudge,
+      { claimText: 'sku-7 maxThroughput 500mbps', ...SKU },
+      [{ sourceId: s1.sourceId, locator: 'a' }],
+    )
+    expect(await indepSupportOf(first.claimId)).toBe(0)
+
+    const s2 = await aSource()
+    await commitClaim(
+      db,
+      embedder,
+      unrelatedJudge,
+      { claimText: 'sku-7 maxThroughput 500mbps', ...SKU },
+      [
+        { sourceId: s2.sourceId, locator: 'b', relevance: 'tangential' }, // not a support
+      ],
+    )
+    expect(await indepSupportOf(first.claimId)).toBe(0) // tangential ⇒ still one supporting source ⇒ f3 unchanged
+  })
+
+  it('stage-2 refines: same subject+object, different predicate ⇒ new claim + a refines edge', async () => {
+    const s1 = await aSource()
+    const a = await commitClaim(
+      db,
+      embedder,
+      unrelatedJudge,
+      { claimText: 'sku-9 maxLen 1m', subject: 'sku-9', predicate: 'maxLen', object: '1m' },
+      [{ sourceId: s1.sourceId, locator: 'a' }],
+    )
+    const s2 = await aSource()
+    const b = await commitClaim(
+      db,
+      embedder,
+      unrelatedJudge,
+      {
+        claimText: 'sku-9 ratedLen 100cm',
+        subject: 'sku-9',
+        predicate: 'ratedLen',
+        object: '100cm',
+      },
+      [{ sourceId: s2.sourceId, locator: 'b' }],
+    )
+    expect(b.merged).toBe(false) // refines ⇒ a NEW claim
+    expect(b.claimId).not.toBe(a.claimId)
+    const rows = await db.select().from(relation)
+    expect(
+      rows.some(
+        (r) => r.fromClaim === b.claimId && r.toClaim === a.claimId && r.type === 'refines',
+      ),
+    ).toBe(true)
+  })
+
+  it('a single commit that is "same" as A and "contradicts" B merges into A AND records the A↔B contradiction (no dropped conflict signal)', async () => {
+    // seed two pre-existing claims with NO edge between them: A {sku-5,color,red}, B {sku-5,color,blue}
+    const a = await seedActiveClaim('sku-5', 'color', 'red')
+    const b = await seedActiveClaim('sku-5', 'color', 'blue')
+    expect(await db.select().from(relation)).toHaveLength(0) // no contradiction recorded yet
+
+    // commit a new fact identical to A and contradicting B; both are same-subject candidates in ONE commit
+    const s = await aSource()
+    const res = await commitClaim(
+      db,
+      embedder,
+      unrelatedJudge,
+      { claimText: 'sku-5 color red', subject: 'sku-5', predicate: 'color', object: 'red' },
+      [{ sourceId: s.sourceId, locator: 'c' }],
+    )
+    expect(res.merged).toBe(true)
+    expect(res.claimId).toBe(a) // merged into A (deterministic 'same')
+    // the contradiction with B must NOT be dropped — an edge now connects A and B
+    const rows = await db.select().from(relation)
+    expect(
+      rows.some(
+        (r) =>
+          r.type === 'contradicts' &&
+          ((r.fromClaim === a && r.toClaim === b) || (r.fromClaim === b && r.toClaim === a)),
+      ),
+    ).toBe(true)
+  })
+
+  it('commitClaim is atomic: a bad provenance sourceId FK-throws and leaves no partial claim', async () => {
+    const before = (await db.select().from(claim)).length
+    const s1 = await aSource()
+    await expect(
+      commitClaim(
+        db,
+        embedder,
+        unrelatedJudge,
+        { claimText: 'atomic new fact', subject: 'sku-atomic', predicate: 'p', object: 'o' },
+        [
+          { sourceId: s1.sourceId, locator: 'good' },
+          { sourceId: randomUUID(), locator: 'ghost' }, // non-existent source ⇒ FK violation on the 2nd insert
+        ],
+      ),
+    ).rejects.toThrow()
+    expect((await db.select().from(claim)).length).toBe(before) // single transaction rolled back — no orphan claim
   })
 
   it('D1: commitClaim rejects a claim with zero provenance', async () => {
