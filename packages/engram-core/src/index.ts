@@ -6,6 +6,7 @@
 export const ENGRAM_VERSION = '0.0.0' as const
 
 export * as schema from './db/schema.js'
+export type { SourceKind } from './db/schema.js'
 export { createPool, createDb, type DB } from './db/client.js'
 export {
   addSource,
