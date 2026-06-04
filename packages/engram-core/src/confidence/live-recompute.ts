@@ -44,8 +44,11 @@ export interface LiveConfidence {
 
 /**
  * 数一批候选 claim 各自的「实时活跃矛盾」对端集合：与之有 contradicts 边、且**对端仍 active** 的 claim id。
- * 与 recall-claims.ts 原内联逻辑等价（候选必为待测集合；非候选对端需补查 status）。返回 Map<claimId, Set<对端id>>。
- * 自指边（from===to）跳过（写路径已挡，直插库兜底）；relation.to_claim 为空的半边跳过。
+ * 「对端 active」一律按**真实 status 现查**判定，**绝不**把「在候选集里」当「active」——
+ *   recall 候选恒为 active（候选查询带 status='active' 过滤），inbox 候选可含 draft/flagged/quarantined，
+ *   若盲信「候选即 active」，一条 active claim 与一条 quarantined 对端的 contradicts 边会被误算成活跃矛盾、
+ *   错误压低 conflictDecay 并把它假性冒泡到 inbox 队首（违反 A.5「矛盾显式只双返 active 对端」+ S23「升序最可疑在前」AC）。
+ * 返回 Map<claimId, Set<对端id>>。自指边（from===to）跳过（写路径已挡，直插库兜底）；relation.to_claim 为空的半边跳过。
  */
 export async function liveContradictsByClaim(
   db: DB,
@@ -63,28 +66,20 @@ export async function liveContradictsByClaim(
         or(inArray(relation.fromClaim, candidateIds), inArray(relation.toClaim, candidateIds)),
       ),
     )
-  // 非候选对端的 status 补查一遍（矛盾边对端可能不在候选集里）。
-  const otherIds = [
-    ...new Set(
-      edges
-        .flatMap((e) => [e.from, e.to])
-        .filter((id): id is string => id != null && !candidateSet.has(id)),
-    ),
+  // 矛盾边两端涉及的所有 id（候选与非候选一视同仁）现查真实 status：只有 status='active' 的才算活跃对端。
+  // 候选自身的 active 性也在此现查（recall 候选恒 active → 自然命中；inbox 候选不预设、按真实态算）。
+  const peerIds = [
+    ...new Set(edges.flatMap((e) => [e.from, e.to]).filter((id): id is string => id != null)),
   ]
-  const otherRows = otherIds.length
-    ? await db
-        .select({ id: claim.id, status: claim.status })
-        .from(claim)
-        .where(inArray(claim.id, otherIds))
-    : []
-  // 仅「仍 active」对端算活跃矛盾（候选是否 active 由调用方决定——inbox 候选可含非 active，
-  // 故这里不预设候选 active；活跃性只看**对端**是否 active，与 recall 同口径）。
-  const activeOther = new Set<string>()
-  for (const r of otherRows) if (r.status === 'active') activeOther.add(r.id)
-  const isActivePeer = (id: string): boolean => {
-    if (candidateSet.has(id)) return true // 候选集内的对端：activeness 在 candidateActiveIds 里另判
-    return activeOther.has(id)
+  const activeIds = new Set<string>()
+  if (peerIds.length) {
+    const rows = await db
+      .select({ id: claim.id })
+      .from(claim)
+      .where(and(inArray(claim.id, peerIds), eq(claim.status, 'active')))
+    for (const r of rows) activeIds.add(r.id)
   }
+  const isActivePeer = (id: string): boolean => activeIds.has(id)
   return buildContradicts(edges, candidateSet, isActivePeer, byClaim)
 }
 

@@ -230,6 +230,40 @@ describe('S23 getEditorInbox — review queue sorted by LIVE-recomputed confiden
     void b
   })
 
+  // REGRESSION (gate#1 linus): a contradicts edge to a NON-active peer must NOT count as an active conflict.
+  // The inbox loads draft/active/flagged/quarantined as candidates; peer-activeness must be REAL status, never
+  // "in the candidate set" — else an active claim contradicting a quarantined peer gets a spurious conflictDecay
+  // and falsely bubbles to the top. The peer here is in the inbox candidate set (quarantined) yet must be ignored.
+  it('a contradicts edge to a NON-active (quarantined) peer is NOT counted (activeContradicts=0, no decay, peer not double-returned)', async () => {
+    const a = await seedClaim({
+      query: 'contra-a2',
+      status: 'active',
+      subject: 's2',
+      predicate: 'p2',
+      object: 'x',
+      factors: { authority: 0.9 },
+    })
+    const beforeA = (await getEditorInbox(db)).find((r) => r.claimId === a)!.confidence.value
+
+    // a quarantined peer (IS in the inbox candidate set, but NOT active) — must be ignored as a conflict
+    const deadPeer = await seedClaim({
+      query: 'contra-dead-peer',
+      status: 'quarantined',
+      subject: 's2',
+      predicate: 'p2',
+      object: 'y',
+      factors: { authority: 0.9 },
+    })
+    await db
+      .insert(relation)
+      .values({ id: randomUUID(), fromClaim: a, toClaim: deadPeer, type: 'contradicts' })
+
+    const aRow = (await getEditorInbox(db)).find((r) => r.claimId === a)!
+    expect(aRow.confidence.activeContradicts).toBe(0) // quarantined peer is NOT an active conflict
+    expect(aRow.contradicts).toEqual([]) // not double-returned (A.5: only active peers)
+    expect(aRow.confidence.value).toBeCloseTo(beforeA, 10) // confidence unchanged → no conflictDecay, no spurious bubble-up
+  })
+
   it('includes draft / active / flagged / quarantined; EXCLUDES superseded (lineage-only)', async () => {
     const d = await seedClaim({ query: 'draft', status: 'draft', factors: { authority: 0.9 } })
     const a = await seedClaim({ query: 'active', status: 'active', factors: { authority: 0.9 } })
