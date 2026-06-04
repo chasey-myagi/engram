@@ -41,6 +41,7 @@ import {
   type ClaimStatus,
   type ProvRelevance,
 } from '../db/schema.js'
+import { recordGap } from './metrics.js'
 
 // 内核消费门常量定义在命门模块；这里 re-export 保持既有 import 路径（index / adapter / bidding）不变。
 export { KERNEL_CONFIDENCE_FLOOR, MUST_VERIFY_THRESHOLD }
@@ -231,19 +232,20 @@ export async function recallClaims(
     })
     .filter((g) => g.value >= floor)
 
-  if (gated.length === 0) return []
-
   // 出处扇出：一次查回所有过门 claim 的出处，按 claim 分组。无出处的 claim 绝不出现（D1 兜底）。
+  // gated 空时跳过查询（避免 inArray([]) 的空 IN）；空结果统一在尾部走 gap 信号。
   const ids = gated.map((g) => g.c.id)
-  const provRows = await db
-    .select({
-      claimId: claimProvenance.claimId,
-      sourceId: claimProvenance.sourceId,
-      locator: claimProvenance.locator,
-      relevance: claimProvenance.relevance,
-    })
-    .from(claimProvenance)
-    .where(inArray(claimProvenance.claimId, ids))
+  const provRows = ids.length
+    ? await db
+        .select({
+          claimId: claimProvenance.claimId,
+          sourceId: claimProvenance.sourceId,
+          locator: claimProvenance.locator,
+          relevance: claimProvenance.relevance,
+        })
+        .from(claimProvenance)
+        .where(inArray(claimProvenance.claimId, ids))
+    : []
 
   const byClaim = new Map<string, RecalledProvenance[]>()
   for (const p of provRows) {
@@ -300,5 +302,19 @@ export async function recallClaims(
         ? -1
         : 1,
   )
-  return results.slice(0, limit)
+  const final = results.slice(0, limit)
+
+  // 诚实信号（S10 / A.9）：非空 query 却交白卷 —— 无相关候选 / 候选全在门后(door-behind) / 兜底无出处 ——
+  // 都落一条引用该 query 的 gap_recorded。这是消费关键路径上的设计写：库诚实记录「被问到却答不出」什么，
+  // 喂「越用越准」的缺口回填；绝不拿门下/杜撰 claim 顶替「不知道」。空 query（开头已返回）不算提问、不记。
+  if (final.length === 0) {
+    await recordGap(db, query, {
+      candidateCount: candidates.length,
+      gatedCount: gated.length,
+      floor,
+      embedderVersion: embedder.version,
+    })
+    return []
+  }
+  return final
 }

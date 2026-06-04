@@ -55,6 +55,8 @@ export const verificationKind = pgEnum('verification_kind', [
   'usage_truth',
   'reembed_marker',
 ])
+/** metrics_events 事件类别（A.9 评测埋点）。gap_recorded = 召回交白卷的诚实信号（S10）；后续评测埋点同表扩。 */
+export const metricsEventKind = pgEnum('metrics_event_kind', ['gap_recorded'])
 
 /** source：不可变原文。content_hash 幂等去重；authority_score 连续、消费方可覆盖；meta 是领域身份注入口。 */
 export const source = pgTable('source', {
@@ -168,6 +170,36 @@ export const standards = pgTable(
   (t) => [index('idx_standards_created').on(t.createdAt)],
 )
 
+/**
+ * metrics_events：append-only 评测事件流（A.9）。沿 usage_truth 的「只记事件 + 离线聚合」式样。
+ * S10 首个用途 gap_recorded：当一次非空 recall 没有任何 claim 越过消费门（库确实没答案），
+ * recall 落一条引用该 query 的 gap 事件 —— 盲点的诚实信号，绝不拿杜撰/门下 claim 顶替。
+ * 故意挂在 recall 的消费关键路径上（不是旁路遥测）：知识库诚实记录「被问到却答不出」什么，
+ * 这正是「越用越准」要回填的缺口。kind 是 enum，后续评测埋点同表扩列即可。
+ */
+export const metricsEvents = pgTable(
+  'metrics_events',
+  {
+    id: uuid('id').primaryKey(),
+    kind: metricsEventKind('kind').notNull(),
+    // gap_recorded 引用「问了什么」（无 claim 可引，故按 query 文本归因）；其它埋点可留空。
+    queryText: text('query_text'),
+    // 诊断负载（如 candidateCount / gatedCount / floor / embedderVersion），离线分析用，不进任何计分。
+    payload: jsonb('payload')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // 离线聚合按 kind + 时间扫（btree）；按 query 反查盲点频次按 query_text。
+  // query_text 用 **hash** 索引而非 btree：query 是 agent 原生输入、长度无界，btree 单项上限 ~8191B
+  // 会让够长的 query 在 recordGap 处 INSERT 直接抛错、连带打断正常召回（盲点信号恰在最该记录时记不下）。
+  // hash 只索引哈希码、无大小限制，且 getGapEvents 只做等值反查（= 命中），正合 hash 的能力边界。
+  (t) => [
+    index('idx_metrics_events_kind_created').on(t.kind, t.createdAt),
+    index('idx_metrics_events_query').using('hash', t.queryText),
+  ],
+)
+
 /** page_claims：page = claim 的 M:N 组装（A.1 未声明 FK，照此实现）。 */
 export const pageClaims = pgTable(
   'page_claims',
@@ -184,3 +216,4 @@ export type ClaimStatus = (typeof claimStatus.enumValues)[number]
 export type RelationType = (typeof relationType.enumValues)[number]
 export type ProvRelevance = (typeof provRelevance.enumValues)[number]
 export type VerificationKind = (typeof verificationKind.enumValues)[number]
+export type MetricsEventKind = (typeof metricsEventKind.enumValues)[number]

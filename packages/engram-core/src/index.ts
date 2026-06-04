@@ -67,3 +67,22 @@ export {
   getReembedMarkers,
   type ReembedMarker,
 } from './embedding/reembed.js'
+export {
+  recordGap,
+  getMetricsEvents,
+  getGapEvents,
+  GAP_RECORDED,
+  METRICS_EVENT_KINDS,
+  type GapPayload,
+  type MetricsEvent,
+  type GapEvent,
+} from './spi/metrics.js'
+export {
+  runGapQuestion,
+  runL5Suite,
+  L5_GAP_QUESTIONS,
+  L5_GAP_NAMESPACE,
+  type L5Question,
+  type GapObservation,
+  type L5SuiteReport,
+} from './eval/l5-gap.js'
