@@ -67,6 +67,7 @@ beforeEach(async () => {
 /** Seed a recallable active claim with one exact provenance; neutral usageCorrect, factors clear the floor pre-usage. */
 async function mkClaim(opts?: {
   claimText?: string
+  status?: schema.ClaimStatus
   factors?: Partial<{ authority: number; entailment: number; indepSupport: number }>
 }): Promise<string> {
   const claimText = opts?.claimText ?? `claim-${randomUUID()}`
@@ -92,7 +93,7 @@ async function mkClaim(opts?: {
   await db.insert(schema.claim).values({
     id,
     claimText,
-    status: 'active',
+    status: opts?.status ?? 'active',
     confidence: 0,
     confidenceRaw: 0,
     confidenceFactors: { factors, weights: WEIGHTS, calibrationVersion: 'identity' },
@@ -120,6 +121,34 @@ async function storedOf(claimId: string): Promise<{ usageCorrect: number; raw: n
     .where(eq(schema.claim.id, claimId))
   const stored = row!.f as { factors: { usageCorrect: number } }
   return { usageCorrect: stored.factors.usageCorrect, raw: row!.raw }
+}
+
+async function statusOf(claimId: string): Promise<schema.ClaimStatus> {
+  const [row] = await db
+    .select({ s: schema.claim.status })
+    .from(schema.claim)
+    .where(eq(schema.claim.id, claimId))
+  return row!.s
+}
+
+/** Wrap a DB so its FIRST .transaction() call rejects (then delegates) — exercises a per-claim recompute failure. */
+function dbFailingFirstTransaction(real: DB): DB {
+  let armed = true
+  return new Proxy(real as object, {
+    get(target, prop, recv) {
+      if (prop === 'transaction') {
+        return (...a: unknown[]): unknown => {
+          if (armed) {
+            armed = false
+            return Promise.reject(new Error('injected recompute transaction failure'))
+          }
+          return (real.transaction as (...x: unknown[]) => unknown)(...a)
+        }
+      }
+      const v = Reflect.get(target, prop, recv)
+      return typeof v === 'function' ? v.bind(target) : v
+    },
+  }) as unknown as DB
 }
 
 describe('S19 Harvester worker — usage→confidence loop (pure statistics, A.6/A.7)', () => {
@@ -273,5 +302,39 @@ describe('S19 Harvester worker — usage→confidence loop (pure statistics, A.6
       .where(eq(schema.claim.id, id))
     const stored = row!.f as { calibrationVersion: string }
     expect(stored.calibrationVersion).toBe('identity') // g untouched (S28 owns g, not Harvester)
+  })
+
+  it("red line #2: the Harvester recomputes a non-active claim's confidence but NEVER relaxes its status (quarantined stays quarantined)", async () => {
+    // selectUsageClaims filters on kind='usage_truth' only (no status filter) → it DOES visit a quarantined claim;
+    // recomputeClaimConfidence only writes confidence/raw/factors, never status. Pin that the agent cannot relax.
+    const id = await mkClaim({ claimText: 'sku harvest quarantined', status: 'quarantined' })
+    for (const u of ['a', 'b', 'c']) {
+      await reportUsage(db, id, 'adopted', { byRole: `consumer:${u}`, taskId: `t-${u}` })
+    }
+    const res = await runHarvester({ db })
+    expect(res.harvested).toBe(1) // it visited + recomputed the quarantined claim
+    expect((await storedOf(id)).usageCorrect).toBe(1) // confidence dimension (f4) DID move
+    expect(await statusOf(id)).toBe('quarantined') // RED LINE #2: status untouched — an agent never relaxes
+  })
+
+  it("A.7 failure holds state: one claim's recompute throwing is skipped (no crash) — the rest still harvest", async () => {
+    const a = await mkClaim({ claimText: 'sku harvest fail A' })
+    const b = await mkClaim({ claimText: 'sku harvest fail B' })
+    for (const id of [a, b]) {
+      for (const u of ['x', 'y', 'z']) {
+        await reportUsage(db, id, 'adopted', {
+          byRole: `consumer:${u}:${id}`,
+          taskId: `t:${u}:${id}`,
+        })
+      }
+    }
+    // first per-claim recompute transaction rejects; the loop must catch it, skip, and continue with the other claim
+    const proxied = dbFailingFirstTransaction(db)
+    const res = await runHarvester({ db: proxied }, { claimIds: [a, b] }) // must RESOLVE, not throw
+    expect(res.skipped).toBe(1) // exactly one recompute threw → skipped (the central A.7 no-crash/hold-state contract)
+    expect(res.harvested).toBe(1) // the other claim still harvested — one failure does not block the batch
+    const failed = res.outcomes.find((o) => o.note?.includes('recompute error'))
+    expect(failed).toBeDefined()
+    expect(Number.isNaN(failed!.usageCorrect)).toBe(true) // skipped claim carries the NaN sentinel + note
   })
 })

@@ -20,7 +20,7 @@
  * 整轮选批失败（DB 抖动）则整轮跳过、维持现状（既有 confidence 一字不动）。下一轮 batch/cron 再来。
  */
 import { recomputeClaimConfidence, schema, type DB, type RecomputeResult } from '@engram/core'
-import { and, eq, inArray } from 'drizzle-orm'
+import { and, desc, eq, inArray, max } from 'drizzle-orm'
 
 const DEFAULT_BY_ROLE = 'agent:harvester'
 const DEFAULT_MAX_CLAIMS = 500
@@ -135,10 +135,14 @@ async function selectUsageClaims(
       )
     return rows.map((r) => r.claimId)
   }
+  // cron: distinct usage-claims, most-recently-reported first (deterministic order; bounded — the tail is
+  // picked up next round, not silently dropped by an unordered .limit). Mirrors the batch path's determinism.
   const rows = await db
-    .selectDistinct(cols)
+    .select({ claimId: schema.claimVerification.claimId })
     .from(schema.claimVerification)
     .where(eq(schema.claimVerification.kind, 'usage_truth'))
+    .groupBy(schema.claimVerification.claimId)
+    .orderBy(desc(max(schema.claimVerification.createdAt)))
     .limit(opts.maxClaims)
   return rows.map((r) => r.claimId)
 }
