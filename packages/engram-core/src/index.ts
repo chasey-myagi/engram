@@ -54,6 +54,7 @@ export {
   applyGMap,
   assertCalibrationMap,
   CALIBRATION_IDENTITY,
+  CALIBRATION_CODE_VERSION,
   IDENTITY_MAP,
   type CalibrationKnot,
   type CalibrationMap,
@@ -65,7 +66,6 @@ export {
   rollbackToIdentity,
   getActiveCalibrationVersion,
   getActiveCalibrationMap,
-  getCalibrationMap,
   loadCalibrationMaps,
   getCalibrationHistory,
   type CommitCalibrationInput,
@@ -85,6 +85,7 @@ export {
   runAcceptanceGate,
   MAX_GATE_FLIP_FRACTION,
   MIN_SAMPLES_PER_BIN,
+  MIN_OUTPUT_SPREAD,
   type GateCheckId,
   type GateCheck,
   type GateVerdict,
@@ -96,6 +97,16 @@ export {
   type SwapResult,
   type EvaluateOptions,
 } from './calibration/recalibrate.js'
+// S28 · isotonic 拟合器（PAVA，确定性单调；A3 红线在 {rawPredicted,correct} 输入边界守）—— S27 CalibrationFitter 落地。
+export { fitIsotonic, makeIsotonicFitter } from './calibration/isotonic.js'
+// S28 · 「首次校准」触发外壳（Harvester 校准半边）：usage_truth 独立门控取样 → ≥200 门 → fit → 验收门原子换。
+export {
+  fitAndMaybeRecalibrate,
+  collectUsageCalibrationSamples,
+  MIN_FIT_SAMPLES,
+  type FitFromUsageOptions,
+  type FitResult,
+} from './calibration/fit-from-usage.js'
 export { applyAdapter, DEFAULT_ADAPTER_EPSILON, type RecallAdapter } from './spi/adapter.js'
 export {
   setStandards,

@@ -24,6 +24,7 @@ import { eq } from 'drizzle-orm'
 
 import { getActiveStandards, type Standards } from '../config/standards.js'
 import { applyG, rawFromStoredFactors, type StoredConfidence } from '../confidence/confidence.js'
+import { loadCalibrationMaps } from '../calibration/calibration-store.js'
 import type { DB, Tx } from '../db/client.js'
 import { claim, claimProvenance, type ClaimStatus } from '../db/schema.js'
 import { computeEntailmentFactor } from '../verifier/patrol-verdict.js'
@@ -128,9 +129,14 @@ export async function transitionClaimInTx(
         humanReview: liveHumanReview,
         entailment: liveEntailment,
       }
+      // S28 FIX 1：晋升门的 conf 重算按该 claim **钉的**校准版本算 g（与 recall 同口径，老快照冻结）。
+      // 非 identity 版本必须解析出 map 喂 applyG（否则抛）——本事务内按钉的版本批量解析（identity 不必解析、直通）。
+      // 这正是「fit 出 g' 换上后，新写入的 draft 钉非 identity 版本，draft→active 晋升不再因缺 map 而抛」的修复点。
+      const maps = await loadCalibrationMaps(tx, [stored.calibrationVersion])
       const conf = applyG(
         rawFromStoredFactors(factors, std.factorWeights),
         stored.calibrationVersion,
+        maps.get(stored.calibrationVersion),
       )
       if (!(conf >= PROMOTE_CONFIDENCE_FLOOR)) {
         throw new Error(

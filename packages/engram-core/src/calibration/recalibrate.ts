@@ -13,7 +13,7 @@
 import { getActiveStandards } from '../config/standards.js'
 import type { DB } from '../db/client.js'
 import { getActivePolicy } from '../governance/governance-state.js'
-import type { CalibrationMap } from '../confidence/confidence.js'
+import { CALIBRATION_CODE_VERSION, type CalibrationMap } from '../confidence/confidence.js'
 import { runAcceptanceGate, type GateInputs, type GateVerdict } from './acceptance-gate.js'
 import {
   advise,
@@ -86,6 +86,9 @@ export async function evaluateAndMaybeSwap(
       candidateEce: proposal.candidateEce,
       deltaEce: proposal.deltaEce,
       sampleCount: proposal.sampleCount,
+      // code_version 锚（A.3 #3）：这版 g 是在哪一版 confidence 公式代码下拟合/激活的。公式代码变更后，
+      // 跨此断点的历史 raw/conf 不可比——纵向趋势/ECE 比对须按 code_version 分段（不可混算）。
+      codeVersion: CALIBRATION_CODE_VERSION,
     },
     reason: `advisor-accept: ΔECE ${proposal.deltaEce.toFixed(4)} (5/5 checks)`,
     createdBy: opts.createdBy ?? 'gate:advisor-accept',

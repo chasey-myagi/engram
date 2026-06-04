@@ -16,6 +16,7 @@ import { computeReliability } from './calibration.js'
 import { advise, identityLikeCandidate, type GoldenSample } from './advisor.js'
 import {
   MAX_GATE_FLIP_FRACTION,
+  MIN_OUTPUT_SPREAD,
   MIN_SAMPLES_PER_BIN,
   runAcceptanceGate,
   type GateInputs,
@@ -288,5 +289,59 @@ describe('S27 验收门（确定性，5/5 才 approve；逐项可咬）', () => 
     expect(MAX_GATE_FLIP_FRACTION).toBeGreaterThan(0)
     expect(MAX_GATE_FLIP_FRACTION).toBeLessThan(1)
     expect(MIN_SAMPLES_PER_BIN).toBeGreaterThanOrEqual(1)
+    expect(MIN_OUTPUT_SPREAD).toBeGreaterThan(0)
+  })
+})
+
+// ---- S28 FIX 3：⑥ output_spread 拒退化常值/单 knot g（不抢前序检查的咬合项）----
+describe('S28 验收门 ⑥ output_spread（FIX 3：拒退化无分辨力 g）', () => {
+  it('常值 g（两端点同 y）→ reject 在 output_spread（spread=0）', () => {
+    // 常值 g 把每条 claim 压成同一个 0.7——抹平全部排序语义。样本 raw 全在 [0.6,0.9]：identity 下与常值 0.7 下
+    // 都 ≥floor（无翻转、③ 过），桶足（⑤ 过）、恒温器未收紧（④ 过）⇒ 首个未过项确是 ⑥ output_spread。
+    const constMap: CalibrationMap = {
+      version: 'const',
+      knots: [
+        { x: 0, y: 0.7 },
+        { x: 1, y: 0.7 },
+      ],
+    }
+    const highSamples: GoldenSample[] = []
+    for (const center of [0.65, 0.75, 0.85]) {
+      for (let k = 0; k <= MIN_SAMPLES_PER_BIN; k++) {
+        highSamples.push({ rawPredicted: center, correct: k % 2 === 0 })
+      }
+    }
+    const inputs = baseInputs(constMap, highSamples)
+    // 自检前提：③④⑤ 都过（否则它们会先咬住、本测就测不到 ⑥）。
+    const v = runAcceptanceGate(inputs)
+    expect(v.checks.find((c) => c.id === 'consumption_flip')!.passed).toBe(true)
+    expect(v.checks.find((c) => c.id === 'bin_samples')!.passed).toBe(true)
+    expect(v.approved).toBe(false)
+    expect(v.failedCheck).toBe('output_spread')
+  })
+
+  it('有真实 spread 的单调 g（identityLike）→ ⑥ 过', () => {
+    const v = runAcceptanceGate(baseInputs(identityLikeCandidate('spready'), wellSampled()))
+    expect(v.checks.find((c) => c.id === 'output_spread')!.passed).toBe(true)
+  })
+
+  it('⑥ 放在末位：consumption_flip 先咬住时 failedCheck 不被 ⑥ 抢（y 全=1 既翻门又零 spread）', () => {
+    // 候选把所有 raw 抬到 1：既触发 ③ 消费门大翻转、又是常值（spread=0）。首个未过项应是 ③ 而非 ⑥。
+    const violentConst: CalibrationMap = {
+      version: 'violent-const',
+      knots: [
+        { x: 0, y: 1 },
+        { x: 1, y: 1 },
+      ],
+    }
+    const v = runAcceptanceGate(baseInputs(violentConst, wellSampled()))
+    expect(v.approved).toBe(false)
+    expect(v.failedCheck).toBe('consumption_flip') // ③ 先于 ⑥（既有测试的咬合项不变）
+    expect(v.checks.find((c) => c.id === 'output_spread')!.passed).toBe(false) // ⑥ 也确实没过
+  })
+
+  it('identity g（空 knots）天然有分辨力：⑥ 过（直通 raw、保序）', () => {
+    const v = runAcceptanceGate(baseInputs(IDENTITY_MAP, wellSampled()))
+    expect(v.checks.find((c) => c.id === 'output_spread')!.passed).toBe(true)
   })
 })

@@ -62,6 +62,17 @@ export const CONFLICT_ALPHA = 0.5
 export const CALIBRATION_IDENTITY = 'identity'
 
 /**
+ * confidence 计算口径的 **code_version 锚**（命门 A.3 #3）。
+ *
+ * raw / conf 是七因子公式 + g 共同算出的。`g` 的演进靠 calibration_version 锚定（换 g 留痕、快照冻结）；
+ * 但**公式本身**（因子定义 / 衰减式 / 合成方式）若改了代码，旧 raw 与新 raw 不再同尺度可比——
+ * 这超出 calibration_version 能表达的范畴（它只记 g 这一层）。故每次 g 落库时把当时的 code_version 一并钉进
+ * evidence：**code_version 不同的两段历史 raw/conf 在纵向趋势/ECE 比对里不可混算**（A.3 不变量）。
+ * 改了七因子公式/衰减式就 bump 这个常量——它是「历史不可比」的显式断点标记（轻量：一个常量 + 落库 + 不变量）。
+ */
+export const CALIBRATION_CODE_VERSION = 's28-isotonic-1' as const
+
+/**
  * 单调校准映射 g' 的一个结点（S27）。g' = [0,1]→[0,1] 的分段线性、**非递减**插值，由升序 knots 定义。
  * x = 输入（raw）锚点，y = 该锚点处的校准输出（已校准概率）。两端无需覆盖 0/1：插值在端点外做夹断外推。
  */
@@ -312,16 +323,22 @@ export interface StoredConfidence {
   calibrationVersion: string
 }
 
-/** 一站式：因子 + 惩罚 → 完整计算结果。"为什么信"（w）与"数值=真实概率"（g）分开记。 */
+/**
+ * 一站式：因子 + 惩罚 → 完整计算结果。"为什么信"（w）与"数值=真实概率"（g）分开记。
+ *
+ * S28 FIX 1（写路径上 g 真正生效的口子）：若 calibrationVersion 非 identity，**必须**传入已解析的 `map`
+ * （由调用方按活动版本经 loadCalibrationMaps 解析）。applyG 对非 identity 版本缺 map 会抛——所以写入新 claim 时
+ * 把它钉到活动版本并存 value=activeG(raw)，靠的就是这条参数把活动 g 的 map 喂进来。identity 版本忽略 map（直通 raw）。
+ */
 export function computeConfidence(
   f: AdditiveFactors,
   p: PenaltyInputs,
-  opts: { weights?: FactorWeights; calibrationVersion?: string } = {},
+  opts: { weights?: FactorWeights; calibrationVersion?: string; map?: CalibrationMap } = {},
 ): ComputedConfidence {
   const weights = opts.weights ?? DEFAULT_WEIGHTS
   const calibrationVersion = opts.calibrationVersion ?? CALIBRATION_IDENTITY
   const confidenceRaw = computeRaw(f, p, weights)
-  const confidence = applyG(confidenceRaw, calibrationVersion)
+  const confidence = applyG(confidenceRaw, calibrationVersion, opts.map)
   return {
     confidence,
     confidenceRaw,

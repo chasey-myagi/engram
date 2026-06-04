@@ -12,6 +12,9 @@
  *   ④ 不与恒温器当前动作冲突？       —— 若恒温器正收紧（promotionGateLevel>0），候选 g' 不得**净放松**有效置信
  *                                       （越过门的样本数不得比当前 g 更多）；恒温器收门时 g 不许偷偷开门（反向用力）。
  *   ⑤ 每个校准桶样本足？             —— 每个**非空** reliability bin 的样本数 ≥ MIN_SAMPLES_PER_BIN（欠采样不可信、拒）。
+ *   ⑥ g′ 排序分辨力不退化？（S28 FIX 3）—— g′ 须 ≥2 个**不同** knot 且输出 spread（max y − min y）≥ MIN_OUTPUT_SPREAD。
+ *                                       单 knot / 常值 g（把每条 claim 的 value 压成同一个数）会抹平全部排序语义、
+ *                                       让消费门要么全开要么全关——结构性退化，拒。放在末位（⑥），不抢前序检查的咬合项。
  *
  * 确定性来源：全部判据是纯算术/集合比较，零随机、零 LLM、零时钟。reject 路径只记日志（caller 落审计），现状 g 不动。
  */
@@ -22,6 +25,11 @@ import type { ReliabilityReport } from './calibration.js'
 export const MAX_GATE_FLIP_FRACTION = 0.2
 /** ⑤ 每个非空校准桶要求的最小样本数（欠此则该桶 observed 不可信，拒）。可调起步基线。 */
 export const MIN_SAMPLES_PER_BIN = 5
+/**
+ * ⑥（S28 FIX 3）g′ 输出最小 spread（max knot.y − min knot.y）。低于此即视为退化常值/无分辨力 g，拒。
+ * 取一个很小的正阈值：只拦**结构性退化**（单 knot / 全程同 y），不误伤数据本身较平的合法 g。可调起步基线。
+ */
+export const MIN_OUTPUT_SPREAD = 0.01
 
 /** 5 项检查的稳定标识（reject 时报是哪项咬住；审计/测试按它断言对应拒绝路径）。 */
 export type GateCheckId =
@@ -30,6 +38,7 @@ export type GateCheckId =
   | 'consumption_flip'
   | 'thermostat_conflict'
   | 'bin_samples'
+  | 'output_spread'
 
 /** 单项检查结果。 */
 export interface GateCheck {
@@ -129,6 +138,38 @@ function aboveFloorCount(sampleRaws: number[], map: CalibrationMap, floor: numbe
 }
 
 /**
+ * ⑥（S28 FIX 3）g′ 排序分辨力：须 ≥2 个**不同 x** 的 knot，且输出 spread（max y − min y）≥ MIN_OUTPUT_SPREAD。
+ * identity（空 knots）天然有分辨力（直通 raw、保序），spread 视为 1（不触发拒）。单 knot / 常值 g → spread=0、拒。
+ */
+function checkOutputSpread(map: CalibrationMap): GateCheck {
+  const ks = map.knots
+  if (ks.length === 0) {
+    // identity：g=raw，逐点保序、分辨力满格，不退化。
+    return {
+      id: 'output_spread',
+      passed: true,
+      detail: 'identity g (passthrough raw): full ordering resolution',
+    }
+  }
+  const distinctX = new Set(ks.map((k) => k.x)).size
+  let minY = ks[0]!.y
+  let maxY = ks[0]!.y
+  for (const k of ks) {
+    if (k.y < minY) minY = k.y
+    if (k.y > maxY) maxY = k.y
+  }
+  const spread = maxY - minY
+  const passed = distinctX >= 2 && spread >= MIN_OUTPUT_SPREAD
+  return {
+    id: 'output_spread',
+    passed,
+    detail: passed
+      ? `g′ has ${distinctX} distinct-x knots, output spread ${spread.toFixed(4)} (≥ ${MIN_OUTPUT_SPREAD})`
+      : `degenerate g′: ${distinctX} distinct-x knot(s), output spread ${spread.toFixed(4)} (< ${MIN_OUTPUT_SPREAD}) — would flatten every claim's value`,
+  }
+}
+
+/**
  * 跑验收门（**纯函数**）。5 项全过 → approved。任一不过 → reject + failedCheck=首个未过项。
  * 顺序固定（①→⑤），故 failedCheck 与测试的「对应拒绝路径」一一咬合、可复现。
  */
@@ -177,7 +218,10 @@ export function runAcceptanceGate(inputs: GateInputs): GateVerdict {
           )},${underfilled[0]!.hi.toFixed(2)}) has ${underfilled[0]!.count})`,
   }
 
-  const checks: GateCheck[] = [monotonic, range, flipCheck, thermostatCheck, binCheck]
+  // ⑥ g′ 排序分辨力（FIX 3）：放在末位，不抢前序检查的咬合项（既有测试的 failedCheck 不变）。
+  const spreadCheck = checkOutputSpread(inputs.candidate)
+
+  const checks: GateCheck[] = [monotonic, range, flipCheck, thermostatCheck, binCheck, spreadCheck]
   const failed = checks.find((c) => !c.passed)
   return failed ? { approved: false, checks, failedCheck: failed.id } : { approved: true, checks }
 }
