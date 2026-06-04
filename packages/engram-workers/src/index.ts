@@ -1,6 +1,7 @@
 /**
  * Engram 五工种（跑在 harness-pi 上、经 Consumer SPI 自养知识库）。领域无关。
- * S15：Distiller 上线。工种逻辑只依赖 @engram/core SPI + AgentRuntime 端口；agent loop 隔在 runtime adapter 后。
+ * S15：Distiller 上线（有界 loop + AgentRuntime 端口）。S16：read_source 全 kind（SourceReader 端口，含图走 VLM）。
+ * 工种逻辑只依赖 @engram/core SPI + AgentRuntime / SourceReader 端口；agent loop 与 VLM 都隔在 adapter 后。
  */
 export const WORKERS_VERSION = '0.0.0' as const
 
@@ -19,3 +20,15 @@ export {
   type AgentStopReason,
 } from './runtime/port.js'
 export { makeHarnessPiRuntime } from './runtime/harness-pi.js'
+
+// S16 · read_source 端口 + 实现（按 kind 选读法；含图走 VLM，经注入端口，零硬编码模型）。
+export {
+  type SourceReader,
+  type ReadRequest,
+  type ReadResult,
+  type ReadSegment,
+  READABLE_KINDS,
+  defaultHasImages,
+} from './read/source-reader.js'
+export { makeFakeSourceReader, type FakeSourceReaderOptions } from './read/fake-source-reader.js'
+export { makeVlmSourceReader } from './read/vlm-source-reader.js'

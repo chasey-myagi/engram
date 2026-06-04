@@ -17,9 +17,12 @@ import {
   schema,
   transitionClaim,
   type DB,
+  type SourceKind,
 } from '@engram/core'
 import { createFakeModel, type FakeAssistantResponse } from '@harness-pi/core/testing'
 
+import { makeFakeSourceReader } from '../read/fake-source-reader.js'
+import type { SourceReader } from '../read/source-reader.js'
 import { runDistiller } from '../distiller.js'
 import type { AgentRuntime } from '../runtime/port.js'
 import { makeHarnessPiRuntime } from '../runtime/harness-pi.js'
@@ -41,6 +44,12 @@ let db: DB
 let testDbName: string
 const embedder = makeFakeEmbedder()
 const judge = makeFakeSameFactJudge() // 默认 'unrelated'；本测试用结构化三元，走确定性规则
+const reader = makeFakeSourceReader() // S16 read_source：确定性、零网络、按 kind 选读法
+
+/** 给 runDistiller 拼一份 deps（默认注入共享 reader；可覆盖 runtime/reader）。 */
+function deps(over: { runtime: AgentRuntime; reader?: SourceReader }) {
+  return { db, embedder, judge, reader: over.reader ?? reader, runtime: over.runtime }
+}
 
 beforeAll(async () => {
   testDbName = `engram_test_${randomUUID().replace(/-/g, '')}`
@@ -112,11 +121,11 @@ const commitThenErrorRuntime: AgentRuntime = {
   },
 }
 
-async function aSource(opts: { kind?: string; content?: string } = {}) {
+async function aSource(opts: { kind?: SourceKind; content?: string } = {}) {
   return addSource(db, {
     content: opts.content ?? `body-${randomUUID()}`,
     contentHash: randomUUID(),
-    kind: (opts.kind ?? 'structured_spec') as 'structured_spec',
+    kind: opts.kind ?? 'structured_spec',
     authorityScore: 0.9, // strong ⇒ a 2-source merge clears the recall floor
   })
 }
@@ -149,7 +158,7 @@ describe('S15 Distiller worker (bounded loop on harness-pi) — A.7 five-stage s
       finishTurn(),
       stopTurn,
     ]
-    const res = await runDistiller({ db, embedder, judge, runtime: runtimeOf(script) }, sourceId)
+    const res = await runDistiller(deps({ runtime: runtimeOf(script) }), sourceId)
 
     expect(res.status).toBe('done')
     expect(res.committed).toBe(3) // three successful commit_claim calls (the equivalent one merges)
@@ -196,7 +205,7 @@ describe('S15 Distiller worker (bounded loop on harness-pi) — A.7 five-stage s
       finishTurn(),
       stopTurn,
     ]
-    const res = await runDistiller({ db, embedder, judge, runtime: runtimeOf(script) }, sourceId)
+    const res = await runDistiller(deps({ runtime: runtimeOf(script) }), sourceId)
     expect(res.status).toBe('done')
     expect(res.committed).toBe(1) // only the grounded claim
     expect(await db.select().from(schema.claim)).toHaveLength(1)
@@ -206,31 +215,25 @@ describe('S15 Distiller worker (bounded loop on harness-pi) — A.7 five-stage s
     const triple = { subject: 'sku-9', predicate: 'weight', object: '5kg' }
     const a = await aSource()
     await runDistiller(
-      {
-        db,
-        embedder,
-        judge,
+      deps({
         runtime: runtimeOf([
           commitTurn({ claimText: 'sku-9 weight 5kg', ...triple, locator: 'A1' }),
           finishTurn(),
           stopTurn,
         ]),
-      },
+      }),
       a.sourceId,
     )
 
     const b = await aSource()
     await runDistiller(
-      {
-        db,
-        embedder,
-        judge,
+      deps({
         runtime: runtimeOf([
           commitTurn({ claimText: 'the sku-9 weighs 5 kg', ...triple, locator: 'B1' }),
           finishTurn(),
           stopTurn,
         ]),
-      },
+      }),
       b.sourceId,
     )
 
@@ -270,7 +273,7 @@ describe('S15 Distiller worker (bounded loop on harness-pi) — A.7 five-stage s
         locator: 'L3',
       }),
     ]
-    const res = await runDistiller({ db, embedder, judge, runtime: runtimeOf(script) }, sourceId, {
+    const res = await runDistiller(deps({ runtime: runtimeOf(script) }), sourceId, {
       maxTurns: 2,
     })
     expect(res.status).toBe('human_pending')
@@ -286,10 +289,7 @@ describe('S15 Distiller worker (bounded loop on harness-pi) — A.7 five-stage s
 
   it('bounded loop: a non-done terminus (reason=error) degrades to human-pending; claims committed before the failure survive', async () => {
     const { sourceId } = await aSource()
-    const res = await runDistiller(
-      { db, embedder, judge, runtime: commitThenErrorRuntime },
-      sourceId,
-    )
+    const res = await runDistiller(deps({ runtime: commitThenErrorRuntime }), sourceId)
     expect(res.status).toBe('human_pending')
     expect(res.reason).toBe('error')
     expect(res.committed).toBe(1) // the one claim committed before the loop errored
@@ -300,20 +300,20 @@ describe('S15 Distiller worker (bounded loop on harness-pi) — A.7 five-stage s
     )
   })
 
-  it('unsupported source kind degrades to human-pending without running the loop (S15 reads structured_spec / human_qa only)', async () => {
-    const { sourceId } = await aSource({ kind: 'external_feed' })
-    // throwingRuntime hard-fails if the loop is entered — so a green test proves the unsupported-kind
-    // guard short-circuits BEFORE the runtime is touched (robust to a guard regression).
-    const res = await runDistiller({ db, embedder, judge, runtime: throwingRuntime }, sourceId)
+  it('an empty/malformed source (read_source yields no locatable segments) degrades to human-pending without running the loop', async () => {
+    // whitespace-only body → fake reader parses zero segments → degrade BEFORE the loop.
+    const { sourceId } = await aSource({ kind: 'structured_spec', content: '   \n\n  \t \n' })
+    // throwingRuntime hard-fails if the loop is entered — green proves the empty-read guard short-circuits.
+    const res = await runDistiller(deps({ runtime: throwingRuntime }), sourceId)
     expect(res.status).toBe('human_pending')
-    expect(res.reason).toBe('unsupported_kind')
+    expect(res.reason).toBe('empty_read')
     expect(res.committed).toBe(0)
     expect((await getHumanPendingSources(db)).some((p) => p.sourceId === sourceId)).toBe(true)
   })
 
   it('a missing source throws before the loop runs', async () => {
-    await expect(
-      runDistiller({ db, embedder, judge, runtime: throwingRuntime }, randomUUID()),
-    ).rejects.toThrow(/not found/)
+    await expect(runDistiller(deps({ runtime: throwingRuntime }), randomUUID())).rejects.toThrow(
+      /not found/,
+    )
   })
 })
