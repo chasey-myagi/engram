@@ -22,6 +22,7 @@ import {
 } from '../confidence/confidence.js'
 import { countIndependentSupports } from '../same-fact/independent.js'
 import { computeEntailmentFactor } from '../verifier/patrol-verdict.js'
+import { computeUsageCorrectFactor } from '../harvest/usage-correct.js'
 import type { DB, Tx } from '../db/client.js'
 import type { Embedder } from '../embedding/embedder.js'
 import {
@@ -126,10 +127,12 @@ export async function computeConfidenceFromProvenances(
   const ageDays = Math.max(0, (Date.now() - resolvedAsOf.getTime()) / MS_PER_DAY)
   // ── 因子接线单一标注点（S17/S19 在此抬可计算因子；不要散落别处）──
   // f2 entailment（S17）：已存在 claim 取其最新 patrol 裁决；新建 claim（无 id）留 NEUTRAL_FACTORS.entailment(0.5)。
-  // 兄弟切片 S19 在同处加 f4 usageCorrect（读 usage_truth），保持本处最小、易扩展。
+  // f4 usageCorrect（S19）：已存在 claim 按 usage_truth 独立门控统计 observed_correctness→f4；新建 claim（无 id）
+  //   或从未被使用 → 留 NEUTRAL_FACTORS.usageCorrect(0)。与 f2 同款实时口径（读最新真值，不吃写时快照）。
   const liveFactors = { ...NEUTRAL_FACTORS, authority, indepSupport }
   if (opts.claimId !== undefined) {
     liveFactors.entailment = await computeEntailmentFactor(tx, opts.claimId)
+    liveFactors.usageCorrect = await computeUsageCorrectFactor(tx, opts.claimId)
   }
   return computeConfidence(liveFactors, { ageDays, halfLifeDays, activeContradicts: 0 })
 }
