@@ -202,12 +202,14 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
     ).length
     await transitionClaim(db, withEv, 'active', {
       by: 'human:judge',
-      evidence: { sourceId, locator: 'rehab-doc#1' },
+      evidence: { sourceId, locator: 'rehab-doc#1', excerpt: 'p.4: the figure was re-measured' },
     })
     expect(await statusOf(withEv)).toBe('active')
     const provs = await db.select().from(claimProvenance).where(eq(claimProvenance.claimId, withEv))
     expect(provs.length).toBe(evBefore + 1) // the supplied evidence was recorded
-    expect(provs.some((p) => p.locator === 'rehab-doc#1' && p.relevance === 'exact')).toBe(true)
+    const rec = provs.find((p) => p.locator === 'rehab-doc#1')!
+    expect(rec.relevance).toBe('exact')
+    expect(rec.excerpt).toBe('p.4: the figure was re-measured') // excerpt round-trips on the relax path
   })
 
   it('A.4 red line — flagged→active (amnesty) and superseded→active (rollback) are human-only and need no new evidence', async () => {
@@ -285,6 +287,77 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
     expect(await statusOf(oldId)).toBe('superseded')
     const [stillThere] = await db.select({ id: claim.id }).from(claim).where(eq(claim.id, oldId))
     expect(stillThere!.id).toBe(oldId)
+  })
+
+  it('FOR UPDATE serializes concurrent transitions of the same claim: exactly one wins, no double side-effect', async () => {
+    // two humans race to amnesty the SAME quarantined claim, both citing evidence
+    const id = await seedClaim({
+      query: 'contended quarantined claim',
+      status: 'quarantined',
+      profile: HIGH,
+    })
+    const s1 = await aSource()
+    const s2 = await aSource()
+    const results = await Promise.allSettled([
+      transitionClaim(db, id, 'active', {
+        by: 'human:a',
+        evidence: { sourceId: s1.sourceId, locator: 'ev-a' },
+      }),
+      transitionClaim(db, id, 'active', {
+        by: 'human:b',
+        evidence: { sourceId: s2.sourceId, locator: 'ev-b' },
+      }),
+    ])
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1) // exactly one amnesty applied
+    const rejected = results.filter((r) => r.status === 'rejected')
+    expect(rejected).toHaveLength(1) // the loser observes post-lock 'active' and is rejected as a no-op
+    expect((rejected[0] as PromiseRejectedResult).reason.message).toMatch(/no-op/)
+    expect(await statusOf(id)).toBe('active')
+    // exactly ONE evidence row was inserted — the lock prevented a lost-update double-insert
+    const evRows = (
+      await db.select().from(claimProvenance).where(eq(claimProvenance.claimId, id))
+    ).filter((p) => p.locator === 'ev-a' || p.locator === 'ev-b')
+    expect(evRows).toHaveLength(1)
+  })
+
+  it("FOR UPDATE prevents the docstring's TOCTOU: a tighten racing a concurrent supersede never leaves the claim illegitimately revived", async () => {
+    const { sourceId } = await aSource()
+    const id = await seedClaim({
+      query: 'claim taken over by a supersede',
+      status: 'active',
+      profile: HIGH,
+    })
+    // race: an agent tries to flag the claim while it is concurrently superseded by a new version
+    await Promise.allSettled([
+      supersedeClaim(db, embedder, id, { claimText: 'v2 supersedes it' }, [
+        { sourceId, locator: 'v2' },
+      ]),
+      transitionClaim(db, id, 'flagged', { by: 'agent:patrol' }),
+    ])
+    // whichever ordering won, the claim ends 'superseded' — never stuck in 'flagged' on a taken-over claim
+    // (without the row lock a last-write-wins flag could revive a superseded claim back to 'flagged').
+    expect(await statusOf(id)).toBe('superseded')
+  })
+
+  it('red-edge evidence insert is atomic with the status flip: a bogus sourceId FK-throws and rolls the whole transition back', async () => {
+    const id = await seedClaim({ query: 'atomic relax', status: 'quarantined', profile: HIGH })
+    await expect(
+      transitionClaim(db, id, 'active', {
+        by: 'human:j',
+        evidence: { sourceId: randomUUID(), locator: 'ghost' }, // no such source ⇒ FK violation
+      }),
+    ).rejects.toThrow()
+    expect(await statusOf(id)).toBe('quarantined') // status did NOT flip — single-transaction rollback
+  })
+
+  it('a bare "human" role may relax, and a human may also tighten (belt-and-suspenders on the authority seam)', async () => {
+    const relaxId = await seedClaim({ query: 'bare human relax', status: 'flagged', profile: HIGH })
+    expect((await transitionClaim(db, relaxId, 'active', { by: 'human' })).to).toBe('active') // bare 'human' counts
+
+    const tightenId = await seedClaim({ query: 'human tightens', status: 'active', profile: HIGH })
+    expect((await transitionClaim(db, tightenId, 'flagged', { by: 'human:editor' })).to).toBe(
+      'flagged',
+    ) // humans tighten too
   })
 
   it('a transition on a missing claim throws', async () => {
