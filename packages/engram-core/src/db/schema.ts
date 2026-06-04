@@ -223,6 +223,45 @@ export const governanceState = pgTable(
 )
 
 /**
+ * calibration_map：校准映射 g' 的**版本化、append-only 持久化**（S27，A.3/A.8 命门）。
+ * 沿 standards / governance_state 的「append-only / 活动=createdAt 最新一行」式样，但语义是「换 g」而非「换门」。
+ *
+ * - 每行 = 一个具名校准版本（version）+ 它的单调 knots（(x,y) 升序结点，分段线性插值）+ 验证依据（ΔECE）。
+ * - **活动校准版本** = createdAt 最新一行的 version（表空 → 内核 sentinel 'identity'，g=raw）。
+ * - 验收门（确定性、活动版本的唯一写者）原子提交：一个 tx 内 append 新映射定义 + append 一行指向它的活动指针。
+ * - g=identity 即时回退（Story 29）= append 一行 version='identity' 的活动指针（knots 空），瞬间让 value 退回 raw。
+ *
+ * **快照冻结**：claim 写时把当时的 calibrationVersion 钉进 confidence_factors；recall 按该 claim 钉的版本现算 g，
+ * 故换活动版本只改**新写入** claim 的版本锚（老快照仍按其锚定的旧 g 算）。详见 confidence/confidence.ts。
+ *
+ * 不动任何 claim / 冻结枚举（A.1）：独立新表，纯校准配置态。knots/evidence 是离线审计/验证依据，不进任何在线计分。
+ */
+export const calibrationMap = pgTable(
+  'calibration_map',
+  {
+    id: uuid('id').primaryKey(),
+    // 具名校准版本（如 'identity' / 'cal-...'）。同一 version 可被多行引用（定义行 + 活动指针行）。
+    version: text('version').notNull(),
+    // 单调升序 (x,y) 结点（CalibrationKnot[]，分段线性插值）。identity 版本为空数组（[]）= 直通 raw。
+    knots: jsonb('knots').notNull(),
+    // 验证依据（A.8）：候选 g' 相对当时活动 g 在 golden 上的 ΔECE 等审计快照（离线，不进在线计分）。
+    evidence: jsonb('evidence')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    // 本行来由（'definition' / 'activate' 验收门激活 / 'rollback-identity' 即时回退）+ 说明，审计用。
+    reason: text('reason').notNull(),
+    // 写入者（'gate:advisor-accept' / 'human:rollback' …）。Advisor 只读，绝不在此出现（能力≠权力，A.8）。
+    createdBy: text('created_by').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // 活动版本按 created_at 倒序取第一行；按 version 反查某版本定义（hash 等值反查）。
+  (t) => [
+    index('idx_calibration_map_created').on(t.createdAt),
+    index('idx_calibration_map_version').using('hash', t.version),
+  ],
+)
+
+/**
  * metrics_events：append-only 评测事件流（A.9）。沿 usage_truth 的「只记事件 + 离线聚合」式样。
  * S10 首个用途 gap_recorded：当一次非空 recall 没有任何 claim 越过消费门（库确实没答案），
  * recall 落一条引用该 query 的 gap 事件 —— 盲点的诚实信号，绝不拿杜撰/门下 claim 顶替。
