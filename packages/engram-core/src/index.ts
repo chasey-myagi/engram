@@ -86,3 +86,15 @@ export {
   type GapObservation,
   type L5SuiteReport,
 } from './eval/l5-gap.js'
+export {
+  refluxFailures,
+  getRegressionPool,
+  getL5Candidates,
+  replayRegressionItem,
+  replayRegressionPool,
+  isHumanRole,
+  type RegressionItem,
+  type L5Candidate,
+  type ReplayVerdict,
+  type ReplayReport,
+} from './spi/reflux.js'
