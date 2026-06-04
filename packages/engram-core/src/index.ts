@@ -114,3 +114,23 @@ export {
   type TransitionOptions,
   type PositiveEvidence,
 } from './spi/transition.js'
+export { commitClaim, type CommitResult } from './spi/commit-claim.js'
+export {
+  objectEquivalent,
+  deterministicVerdict,
+  adjudicate,
+  SAME_FACT_CANDIDATE_SIMILARITY,
+  SAME_FACT_TOPK,
+  SAME_FACT_GRAY_ZONE_SIMILARITY,
+  type SameFactVerdict,
+  type SameFactJudge,
+  type ClaimShape,
+} from './same-fact/same-fact.js'
+export { makeFakeSameFactJudge, type FakeJudgeOptions } from './same-fact/fake-judge.js'
+export { makeDashScopeSameFactJudge } from './same-fact/dashscope-judge.js'
+export {
+  independent,
+  countIndependentSupports,
+  independentSupportFactor,
+  type SourceIndep,
+} from './same-fact/independent.js'

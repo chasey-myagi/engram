@@ -5,6 +5,7 @@
  */
 import { sql } from 'drizzle-orm'
 import {
+  type AnyPgColumn,
   doublePrecision,
   index,
   integer,
@@ -72,6 +73,9 @@ export const source = pgTable('source', {
   meta: jsonb('meta')
     .notNull()
     .default(sql`'{}'::jsonb`),
+  // S14/A.6 独立来源判定：声明本源派生自哪个上游源（自引 FK，可空）。independent() 沿此血缘链判同源，
+  // 同链不重复计印证（防同源刷 f3）。内核原生表示（不进 meta —— meta 是领域注入口、内核不解释）。
+  derivedFromSourceId: uuid('derived_from_source_id').references((): AnyPgColumn => source.id),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 

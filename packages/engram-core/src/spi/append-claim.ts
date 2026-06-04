@@ -20,6 +20,7 @@ import {
   type ComputedConfidence,
   type StoredConfidence,
 } from '../confidence/confidence.js'
+import { countIndependentSupports } from '../same-fact/independent.js'
 import type { DB, Tx } from '../db/client.js'
 import type { Embedder } from '../embedding/embedder.js'
 import {
@@ -39,6 +40,8 @@ export interface SourceInput {
   kind: SourceKind
   authorityScore?: number
   meta?: Record<string, unknown>
+  /** A.6 独立来源血缘：本源派生自哪个上游源（独立印证沿此链折叠，防同源刷 f3）。 */
+  derivedFromSourceId?: string
 }
 
 export interface DraftClaim {
@@ -68,21 +71,43 @@ function requireProvenance(provenances: ProvenanceInput[]): void {
   }
 }
 
+/** 一条出处的 sourceId + relevance（confidence 只数 supports 源，A.6）。 */
+export interface ProvenanceRef {
+  sourceId: string
+  relevance?: ProvRelevance | null
+}
+
+/** A.6：只有 exact / supporting 算「supports 源」；tangential / irrelevant 不计 authority / 印证。缺省视为 supporting。 */
+function isSupporting(relevance: ProvRelevance | null | undefined): boolean {
+  const r = relevance ?? 'supporting'
+  return r === 'exact' || r === 'supporting'
+}
+
 /**
- * S2 命门：从 claim 的出处源算连续 confidence。authority 取最强源、indepSupport 数独立源
- * （S2 阶段独立≈不同 source id；完整 A.6 独立判定是 S14）、stale 看 as_of、halfLife 看最强源的 kind。
+ * 命门：从一组**出处**算连续 confidence。只取 relevance∈{exact,supporting} 的 supports 源；authority 取其中最强源、
+ * halfLife 看最强源 kind、indepSupport 数**独立** supports 源（A.6：hash 去重 + derived_from 折叠 + agent_synthesis
+ * 0.5 折扣，S14）。tangential/irrelevant 出处既不抬 authority 也不计印证（防拿无关源刷 f3）。
+ * 既给 appendClaim 写新 claim 用，也给 commitClaim 合并后按全量出处重算用（单一真相源）。
  */
-async function computeClaimConfidence(
+export async function computeConfidenceFromProvenances(
   tx: Tx,
-  draft: DraftClaim,
-  provenances: ProvenanceInput[],
+  provenances: ProvenanceRef[],
+  asOf?: Date,
 ): Promise<ComputedConfidence> {
-  const sourceIds = [...new Set(provenances.map((p) => p.sourceId))]
-  const sources = sourceIds.length
+  const ids = [
+    ...new Set(provenances.filter((p) => isSupporting(p.relevance)).map((p) => p.sourceId)),
+  ]
+  const sources = ids.length
     ? await tx
-        .select({ authority: source.authorityScore, kind: source.kind })
+        .select({
+          id: source.id,
+          authority: source.authorityScore,
+          kind: source.kind,
+          contentHash: source.contentHash,
+          derivedFromSourceId: source.derivedFromSourceId,
+        })
         .from(source)
-        .where(inArray(source.id, sourceIds))
+        .where(inArray(source.id, ids))
     : []
   // 最强源（authority 最高）一遍扫出：它的 authority_score 作 f0、它的 kind 定半衰期。
   const dominant = sources.reduce<(typeof sources)[number] | null>(
@@ -91,12 +116,24 @@ async function computeClaimConfidence(
   )
   const authority = dominant?.authority ?? 0
   const halfLifeDays = dominant ? halfLifeDaysForKind(dominant.kind) : 180
-  const indepSupport = independentSupportScore(sources.length) // 1 源→0（无独立印证），越多越高
-  const asOf = draft.asOf ?? new Date()
-  const ageDays = Math.max(0, (Date.now() - asOf.getTime()) / MS_PER_DAY)
+  const indepSupport = independentSupportScore(countIndependentSupports(sources)) // A.6 独立印证数
+  const resolvedAsOf = asOf ?? new Date()
+  const ageDays = Math.max(0, (Date.now() - resolvedAsOf.getTime()) / MS_PER_DAY)
   return computeConfidence(
     { ...NEUTRAL_FACTORS, authority, indepSupport },
     { ageDays, halfLifeDays, activeContradicts: 0 },
+  )
+}
+
+async function computeClaimConfidence(
+  tx: Tx,
+  draft: DraftClaim,
+  provenances: ProvenanceInput[],
+): Promise<ComputedConfidence> {
+  return computeConfidenceFromProvenances(
+    tx,
+    provenances.map((p) => ({ sourceId: p.sourceId, relevance: p.relevance ?? null })),
+    draft.asOf,
   )
 }
 
@@ -191,6 +228,9 @@ export async function addSource(db: DB, input: SourceInput): Promise<{ sourceId:
       kind: input.kind,
       authorityScore: input.authorityScore ?? 0.5,
       meta: input.meta ?? {},
+      ...(input.derivedFromSourceId !== undefined
+        ? { derivedFromSourceId: input.derivedFromSourceId }
+        : {}),
     })
     .onConflictDoUpdate({
       target: source.contentHash,
