@@ -4,7 +4,7 @@
  * Advisor 只**诊断**（产候选 g' + ΔECE 验证依据，只读、零写权）；验收门是唯一**拍板者**（权力），且是**纯函数**：
  * 给定（候选 g' + ΔECE 依据 + 当前活动 g + 当前消费门 + 恒温器当前策略 + 校准样本/桶），恒返同一裁决。
  *
- * 5 项全过才 approve（任一不过 → reject + 记是哪项 + fail-silent 维持现状，绝不阻塞主干）：
+ * 6 项全过才 approve（任一不过 → reject + 记是哪项 + fail-silent 维持现状，绝不阻塞主干）：
  *   ① g' 单调（非递减）？           —— 复用 assertCalibrationMap 的单调判据（升序 x + 非递减 y）。
  *   ② 值域 ⊆ [0,1]？                —— 复用 assertCalibrationMap 的值域判据。
  *   ③ 消费门翻转受控（不剧烈）？     —— 在样本 raw 集上，old/new 两版 g 关于 consumeFloor 的「越门集合」变化比例
@@ -31,7 +31,7 @@ export const MIN_SAMPLES_PER_BIN = 5
  */
 export const MIN_OUTPUT_SPREAD = 0.01
 
-/** 5 项检查的稳定标识（reject 时报是哪项咬住；审计/测试按它断言对应拒绝路径）。 */
+/** 6 项检查的稳定标识（reject 时报是哪项咬住；审计/测试按它断言对应拒绝路径）。 */
 export type GateCheckId =
   | 'monotonic'
   | 'range'
@@ -170,8 +170,8 @@ function checkOutputSpread(map: CalibrationMap): GateCheck {
 }
 
 /**
- * 跑验收门（**纯函数**）。5 项全过 → approved。任一不过 → reject + failedCheck=首个未过项。
- * 顺序固定（①→⑤），故 failedCheck 与测试的「对应拒绝路径」一一咬合、可复现。
+ * 跑验收门（**纯函数**）。6 项全过 → approved。任一不过 → reject + failedCheck=首个未过项。
+ * 顺序固定（①→⑥），故 failedCheck 与测试的「对应拒绝路径」一一咬合、可复现。
  */
 export function runAcceptanceGate(inputs: GateInputs): GateVerdict {
   const floor = clamp01(inputs.consumeFloor)

@@ -41,6 +41,7 @@ import {
 
 import { runRedTeamGeneration, type ClassScore } from '../redteam-injector.js'
 import { REDTEAM_GENERATION_ITEMS } from '../redteam.gen.js'
+import { truncateEvalWorkTablesSql } from '../work-tables.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
 const migrationsFolder = join(
@@ -61,18 +62,18 @@ const embedder = makeFakeEmbedder()
 
 /** 清所有可被注入污染的表（红队样本临时 seed、随每条 reset 消失；红队世代/分表单独清）。 */
 async function resetWorkTables(): Promise<void> {
-  await pool.query(
-    'TRUNCATE source, claim, claim_provenance, relation, claim_verification, metrics_events, l5_candidates, golden_questions, promotion_audit CASCADE',
-  )
+  await pool.query(truncateEvalWorkTablesSql())
 }
 
 beforeAll(async () => {
   testDbName = `engram_test_${randomUUID().replace(/-/g, '')}`
   admin = new pg.Pool({ connectionString: DATABASE_URL, max: 2 })
+  admin.on('error', () => {})
   await admin.query(`CREATE DATABASE ${testDbName}`)
   const url = new URL(DATABASE_URL)
   url.pathname = `/${testDbName}`
   pool = new pg.Pool({ connectionString: url.toString(), max: 4 })
+  pool.on('error', () => {}) // 吞 teardown 期 DROP ... WITH(FORCE) 终止连接的 57P01（测试已结束、连接被服务端杀属预期）
   db = createDb(pool)
   await migrate(db, { migrationsFolder })
 })
