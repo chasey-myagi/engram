@@ -1,10 +1,15 @@
 /**
  * M2 校准 pilot 的可测逻辑 —— 与端口(embedder)解耦:测试注 fake、run.ts 注真 DashScope。
  *
- * seedCorpus → generateUsage(真 recall + 标签 oracle) → collectAndSplit → fitAndMeasure。
- * 头条产物:留出集上 **ECE(identity) vs ECE(g)** + reliability diagram。证明校准闭环在真嵌入+真 usage 上闭合、g 把 ECE 压下。
+ * seedCorpus → generateUsage(真 recall + 标签 oracle 写 usage_truth) → collectFactSamples(读回真 usage 燃料,带 factId)
+ * → measureFromSamples(**按 fact 切分** → fit isotonic g → 留出**事实**上比 identity vs g 的 ECE)。
+ *
+ * 泛化的单元是「事实」:每档很多事实凑出可测正确率,g 用该档**训练事实**学到的比率,去预测该档**留出(未见)事实**
+ * ⇒ 真泛化(非查表)。切分按 fact 整组进 fit 或 heldout,故无一事实跨两边(factsInBothSides=0 钉死)。
  */
 import { randomUUID } from 'node:crypto'
+
+import { eq } from 'drizzle-orm'
 
 import {
   addSource,
@@ -20,7 +25,6 @@ import {
   type CalibrationSample,
   type DB,
   type Embedder,
-  type GoldenSample,
   type ReliabilityReport,
 } from '@engram/core'
 
@@ -35,12 +39,18 @@ const WEIGHTS = {
   usageCorrect: 0.1,
 }
 
+/** 一条带事实归属的校准样本(从真 usage_truth 读回 + factId,用于按 fact 切分)。 */
+export interface FactSample {
+  factId: string
+  rawPredicted: number
+  correct: boolean
+}
+
 export interface SeedStats {
   total: number
   promoted: number
-  /** 各 fact 的 claimId(仅已晋升 active 的)。 */
   claimIdByFact: Map<string, string>
-  /** 已晋升 claim 的 raw 分布(排序),用于人读 sanity-check raw 是否落在消费门以上、有区分度。 */
+  /** 已 seed claim 的 rawTarget 分布(排序),人读 sanity-check raw 跨度。 */
   rawSorted: number[]
 }
 
@@ -59,7 +69,6 @@ export async function seedCorpus(
   const now = new Date()
   for (const f of facts) {
     const v = f.rawTarget
-    // 1 条 exact 出处(D1 强制:无出处的 claim 物理写不进)。
     const src = await addSource(db, {
       content: `source attesting: ${f.statement}`,
       contentHash: randomUUID(),
@@ -97,15 +106,13 @@ export async function seedCorpus(
       embedding: await embedder.embed(f.statement, 'document'),
       embeddingVersion: embedder.version,
     })
-    await db
-      .insert(schema.claimProvenance)
-      .values({
-        id: randomUUID(),
-        claimId,
-        sourceId: src.sourceId,
-        locator: `cal:${f.id}`,
-        relevance: 'exact',
-      })
+    await db.insert(schema.claimProvenance).values({
+      id: randomUUID(),
+      claimId,
+      sourceId: src.sourceId,
+      locator: `cal:${f.id}`,
+      relevance: 'exact',
+    })
     claimIdByFact.set(f.id, claimId)
     rawSorted.push(v)
   }
@@ -120,23 +127,22 @@ export interface UsageStats {
 }
 
 /**
- * 生成 usage_truth:逐 fact 用 query 真 recall;命中本 fact 的 claim ⇒ C 个独立消费者各报一次使用
- * (predictedConfidence = 召回快照 value;outcome 由**标签 oracle** 决定:fact.isTrue→adopted 否则 refuted)。
+ * 生成 usage_truth:逐 fact 用 query 真 recall;命中本 fact 的 claim ⇒ **一条**使用上报
+ * (predictedConfidence=召回快照 value;outcome 由**标签 oracle** 定:fact.isTrue→adopted 否则 refuted)。
+ * 每 fact 一条(claim 真值固定 ⇒ 多消费者同结局、对校准无新信息,故不重复)——一 fact = 一校准数据点。
  */
 export async function generateUsage(
   db: DB,
   embedder: Embedder,
   facts: CorpusFact[],
   claimIdByFact: Map<string, string>,
-  opts: { consumers?: number } = {},
 ): Promise<UsageStats> {
-  const consumers = opts.consumers ?? 6
   let recallHits = 0
   let recallMisses = 0
   let usageRows = 0
   for (const f of facts) {
     const claimId = claimIdByFact.get(f.id)
-    if (!claimId) continue // 未晋升 → 不可召回
+    if (!claimId) continue
     const hits = await recallClaims(db, embedder, f.query)
     const mine = hits.find((h) => h.claim.id === claimId)
     if (!mine) {
@@ -144,17 +150,34 @@ export async function generateUsage(
       continue
     }
     recallHits += 1
-    const predicted = mine.confidence.value // identity g 下 = raw 快照
-    for (let c = 0; c < consumers; c++) {
-      await reportUsage(db, claimId, f.isTrue ? 'adopted' : 'refuted', {
-        taskId: f.id,
-        byRole: `agent:eval-consumer-${c}`,
-        confidenceAtRecall: predicted,
-      })
-      usageRows += 1
-    }
+    await reportUsage(db, claimId, f.isTrue ? 'adopted' : 'refuted', {
+      taskId: f.id,
+      byRole: 'agent:eval-consumer',
+      confidenceAtRecall: mine.confidence.value, // identity g 下 = raw 快照
+    })
+    usageRows += 1
   }
   return { recallHits, recallMisses, usageRows }
+}
+
+/** 从真 usage_truth 读回校准燃料,带 factId(taskId):评测=消费,只读 outcome+predictedConfidence(A3:无胜负率通道)。 */
+export async function collectFactSamples(db: DB): Promise<FactSample[]> {
+  const rows = await db
+    .select({ verdict: schema.claimVerification.verdict })
+    .from(schema.claimVerification)
+    .where(eq(schema.claimVerification.kind, 'usage_truth'))
+  const out: FactSample[] = []
+  for (const r of rows) {
+    const v = r.verdict as { outcome?: unknown; taskId?: unknown; predictedConfidence?: unknown }
+    if (typeof v.predictedConfidence !== 'number' || Number.isNaN(v.predictedConfidence)) continue
+    if (v.outcome !== 'adopted' && v.outcome !== 'refuted') continue
+    out.push({
+      factId: typeof v.taskId === 'string' ? v.taskId : '',
+      rawPredicted: v.predictedConfidence,
+      correct: v.outcome === 'adopted',
+    })
+  }
+  return out
 }
 
 export interface CalibrationMeasurement {
@@ -162,43 +185,55 @@ export interface CalibrationMeasurement {
   fitCount: number
   heldoutCount: number
   fittedG: CalibrationMap
-  /** 留出集上,把存档 raw 当预测(identity g)算的可靠性。 */
+  /** 留出**事实**上,把存档 raw 当预测(identity g)算的可靠性。 */
   identity: ReliabilityReport
-  /** 留出集上,把 g(raw) 当预测算的可靠性。 */
+  /** 留出**事实**上,把 g(raw) 当预测算的可靠性。 */
   calibrated: ReliabilityReport
   /** ECE 改善 = identity.ece - calibrated.ece(>0 ⇒ g 把校准误差压下了)。 */
   eceDrop: number
+  /** **无泄漏自检**:同一 factId 同时出现在 fit 与 heldout 的事实数。必须 = 0 ⇒ 留出事实 g 真没见过 ⇒ 真泛化。 */
+  factsInBothSides: number
 }
 
-/** 确定性切分(按 rawPredicted 排序后交错),保证 fit/heldout 两侧的 raw 覆盖相近。 */
-export function splitSamples(
-  samples: GoldenSample[],
+/**
+ * **按 factId 切分**(整事实进 fit 或 heldout)。fit/heldout **共享置信档**(同档不同事实)——这正是校准泛化的方式:
+ * 用某档训练事实学到的正确率,去预测该档**未见**事实。绝不让同一事实跨两边(factsInBothSides 钉死 =0)。
+ */
+export function splitByFact(
+  samples: FactSample[],
   heldoutEvery = 3,
-): { fit: GoldenSample[]; heldout: GoldenSample[] } {
-  const sorted = [...samples].sort((a, b) => a.rawPredicted - b.rawPredicted)
-  const fit: GoldenSample[] = []
-  const heldout: GoldenSample[] = []
-  sorted.forEach((s, i) => (i % heldoutEvery === 0 ? heldout : fit).push(s))
+): { fit: FactSample[]; heldout: FactSample[] } {
+  const factIds = [...new Set(samples.map((s) => s.factId))].sort()
+  const heldoutFacts = new Set(factIds.filter((_id, i) => i % heldoutEvery === 0))
+  const fit: FactSample[] = []
+  const heldout: FactSample[] = []
+  for (const s of samples) (heldoutFacts.has(s.factId) ? heldout : fit).push(s)
   return { fit, heldout }
 }
 
-function toCalSamples(samples: GoldenSample[], g?: CalibrationMap): CalibrationSample[] {
+function toCalSamples(samples: FactSample[], g?: CalibrationMap): CalibrationSample[] {
   return samples.map((s) => ({
     predicted: g ? applyGMap(s.rawPredicted, g) : s.rawPredicted,
     correct: s.correct,
   }))
 }
 
-/** 取真值样本 → 切分 → fit isotonic g → 留出集上比 identity vs g 的 ECE。 */
-export async function fitAndMeasure(
-  db: DB,
+/** 纯函数:按 fact 切分 → fit isotonic g → 留出事实上比 identity vs g 的 ECE(+ 无泄漏自检)。无 DB,供负对照直测。 */
+export function measureFromSamples(
+  samples: FactSample[],
   opts: { binCount?: number; heldoutEvery?: number } = {},
-): Promise<CalibrationMeasurement> {
-  const samples = await collectUsageCalibrationSamples(db, [CALIBRATION_IDENTITY])
-  const { fit, heldout } = splitSamples(samples, opts.heldoutEvery ?? 3)
-  const fittedG = fitIsotonic(fit, `cal-pilot-${fit.length}`)
+): CalibrationMeasurement {
+  const { fit, heldout } = splitByFact(samples, opts.heldoutEvery ?? 3)
+  const fittedG = fitIsotonic(
+    fit.map((s) => ({ rawPredicted: s.rawPredicted, correct: s.correct })),
+    `cal-pilot-${fit.length}`,
+  )
   const identity = computeReliability(toCalSamples(heldout), opts.binCount ?? 10)
   const calibrated = computeReliability(toCalSamples(heldout, fittedG), opts.binCount ?? 10)
+  const fitFacts = new Set(fit.map((s) => s.factId))
+  const factsInBothSides = new Set(
+    heldout.filter((s) => fitFacts.has(s.factId)).map((s) => s.factId),
+  ).size
   return {
     totalSamples: samples.length,
     fitCount: fit.length,
@@ -207,7 +242,17 @@ export async function fitAndMeasure(
     identity,
     calibrated,
     eceDrop: identity.ece - calibrated.ece,
+    factsInBothSides,
   }
+}
+
+/** 读回真 usage 燃料 → measureFromSamples(按 fact 切分,真·样本外事实)。 */
+export async function fitAndMeasure(
+  db: DB,
+  opts: { binCount?: number; heldoutEvery?: number } = {},
+): Promise<CalibrationMeasurement> {
+  const samples = await collectFactSamples(db)
+  return measureFromSamples(samples, opts)
 }
 
 /** 把一份 reliability 报告画成 ASCII reliability diagram(每非空 bin 一行:预测均值 vs 观测正确率)。 */
@@ -224,20 +269,23 @@ export function renderReliability(r: ReliabilityReport): string {
   return lines.join('\n')
 }
 
-/** 端到端跑一次 pilot(seed→usage→fit→measure)。供 run.ts(真端口)与测试(fake 端口)复用。 */
+/** 端到端跑一次 pilot(seed→usage→读回→按 fact 切分→fit→measure)。供 run.ts(真端口)与测试(fake 端口)复用。 */
 export async function runCalibrationPilot(
   db: DB,
   embedder: Embedder,
-  opts: { consumers?: number; binCount?: number; heldoutEvery?: number } = {},
-): Promise<{ seed: SeedStats; usage: UsageStats; measurement: CalibrationMeasurement }> {
+  opts: { binCount?: number; heldoutEvery?: number } = {},
+): Promise<{
+  seed: SeedStats
+  usage: UsageStats
+  measurement: CalibrationMeasurement
+  /** 真 usage_truth 持久行数(经 SPI 读回的独立样本数;= measurement.totalSamples 时证明读回口径一致)。 */
+  persistedSamples: number
+}> {
   const facts = buildCorpus()
   const seed = await seedCorpus(db, embedder, facts)
-  const usage = await generateUsage(db, embedder, facts, seed.claimIdByFact, {
-    ...(opts.consumers !== undefined ? { consumers: opts.consumers } : {}),
-  })
-  const measurement = await fitAndMeasure(db, {
-    ...(opts.binCount !== undefined ? { binCount: opts.binCount } : {}),
-    ...(opts.heldoutEvery !== undefined ? { heldoutEvery: opts.heldoutEvery } : {}),
-  })
-  return { seed, usage, measurement }
+  const usage = await generateUsage(db, embedder, facts, seed.claimIdByFact)
+  const measurement = await fitAndMeasure(db, opts)
+  // round-trip sanity:核准 collectUsageCalibrationSamples(生产校准取样口径)与本地读回样本数一致。
+  const persisted = await collectUsageCalibrationSamples(db, [CALIBRATION_IDENTITY])
+  return { seed, usage, measurement, persistedSamples: persisted.length }
 }

@@ -33,7 +33,7 @@ const migrationsFolder = join(
 
 function pct(xs: number[], p: number): number {
   if (xs.length === 0) return NaN
-  return xs[Math.min(xs.length - 1, Math.floor(p * xs.length))]!
+  return xs[Math.round(p * (xs.length - 1))]!
 }
 
 async function main(): Promise<void> {
@@ -60,7 +60,11 @@ async function main(): Promise<void> {
     console.log(`[m2] 临时库 ${dbName} 已建 + 迁移。用真 DashScope text-embedding-v3。`)
 
     const embedder = makeDashScopeEmbedder()
-    const { seed, usage, measurement } = await runCalibrationPilot(db, embedder, { consumers: 6 })
+    const { seed, usage, measurement, persistedSamples } = await runCalibrationPilot(
+      db,
+      embedder,
+      {},
+    )
 
     console.log('\n=== seed(接地语料) ===')
     console.log(
@@ -68,11 +72,11 @@ async function main(): Promise<void> {
     )
     console.log('\n=== usage(真 recall + 标签 oracle) ===')
     console.log(
-      `  recall 命中 ${usage.recallHits} / 漏 ${usage.recallMisses};usage_truth 行 ${usage.usageRows}`,
+      `  recall 命中 ${usage.recallHits} / 漏 ${usage.recallMisses};usage_truth 行 ${usage.usageRows};SPI 读回样本 ${persistedSamples}`,
     )
-    console.log('\n=== 校准测量(留出集) ===')
+    console.log('\n=== 校准测量(按 fact 切分,留出=未见事实) ===')
     console.log(
-      `  样本 ${measurement.totalSamples}(fit ${measurement.fitCount} / heldout ${measurement.heldoutCount});g 结点 ${measurement.fittedG.knots.length}`,
+      `  样本 ${measurement.totalSamples}(fit ${measurement.fitCount} / heldout ${measurement.heldoutCount});g 结点 ${measurement.fittedG.knots.length};事实跨边 ${measurement.factsInBothSides}(须 0)`,
     )
     console.log('\n  -- identity g(未校准:raw 当预测) --')
     console.log(renderReliability(measurement.identity))

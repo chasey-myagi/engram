@@ -1,9 +1,12 @@
 /**
- * M2 校准 pilot 的 CI 守门(fake 端口、真测试 DB、不联网)——守 pilot **逻辑**:接地语料 seed → 真 recall 产 usage →
- * isotonic 拟合 g → 留出集上 g 把 ECE 压下。真 Qwen 嵌入版见 calibration-pilot/run.ts(env-gated,不进 CI)。
+ * M2 校准 pilot 的 CI 守门(fake 端口、真测试 DB、不联网)——守 g-校准映射拟合闭环的逻辑:接地语料 seed →
+ * 真 recall 产 usage(读回真 usage_truth 燃料)→ isotonic 拟合 g → **按 fact 切分**(留出事实 g 未见)上 g 把 ECE 压下。
+ * 真 Qwen 嵌入版见 calibration-pilot/run.ts(env-gated,不进 CI)。
  *
- * 不是 smoke:断言(1)语料确实注入了可观的 identity 校准误差(有东西可校);(2)g 在**留出集**上把 ECE 压下
- * (不只训练集——证明学到的是泛化的单调修正、非过拟合);(3)g 非平凡(≥2 结点)。
+ * **射程**:验命门的**校准映射(g)半边**(usage→拟合→压 ECE)在真 recall+真 usage 上闭环;raw 七因子计算半边在 seed
+ * 时被直接设值绕过(它本身在 core 的 confidence 单测里验),M2 不测它。
+ *
+ * 三测:①闭环 + 真泛化(留出事实零跨边 + g 在未见事实上压 ECE);②语料前提不变量(过自信被真注入);③负对照(良校准输入 ⇒ g 不无中生有压 ECE)。
  */
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -15,7 +18,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { createDb, makeFakeEmbedder, type DB, type Embedder } from '@engram/core'
 
-import { runCalibrationPilot } from '../calibration-pilot/pilot.js'
+import { buildCorpus, NUM_LEVELS } from '../calibration-pilot/corpus.js'
+import {
+  measureFromSamples,
+  runCalibrationPilot,
+  type FactSample,
+} from '../calibration-pilot/pilot.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
 const migrationsFolder = join(
@@ -53,26 +61,62 @@ afterAll(async () => {
   await admin.end()
 })
 
-describe('M2 · 校准 pilot(接地语料 → 真 recall+usage → isotonic g 在留出集压低 ECE)', () => {
-  it('校准闭环闭合:语料有可观 identity 校准误差,g 在**留出集**上把 ECE 压下、且 g 非平凡', async () => {
-    const { seed, usage, measurement } = await runCalibrationPilot(db, embedder, {
-      consumers: 6,
+describe('M2 · 校准 pilot(g 拟合闭环:接地语料 → 真 recall+usage → 按 fact 切分、留出事实上压 ECE)', () => {
+  it('① 闭环 + 真泛化:留出事实零跨边,g 非平凡,且在未见事实上把 ECE 压下', async () => {
+    const { seed, usage, measurement, persistedSamples } = await runCalibrationPilot(db, embedder, {
       heldoutEvery: 3,
     })
 
-    // seed:至少 mid+strong 档晋升 active 并可召回(全 fact 都过 D2 晋升门设计)。
     expect(seed.promoted).toBeGreaterThan(0)
     expect(usage.recallHits).toBeGreaterThan(0)
-    // 样本量够拟合(独立 (by_role,taskId) 去重后)。
-    expect(measurement.totalSamples).toBeGreaterThanOrEqual(60)
     expect(measurement.heldoutCount).toBeGreaterThan(0)
+    // 读回口径一致:本地读回样本数 = 生产校准取样器(collectUsageCalibrationSamples)所见。
+    expect(persistedSamples).toBe(measurement.totalSamples)
 
-    // ① 语料确实注入了可观的过自信(否则无东西可校,测试就没意义)。
+    // **真·样本外硬证据**:没有任何事实同时在 fit 与 heldout(否则 g 见过该事实标签、"泛化"是假的)。
+    expect(measurement.factsInBothSides).toBe(0)
+
+    // 语料确实注入了可观的过自信(否则无东西可校)。
     expect(measurement.identity.ece).toBeGreaterThan(0.03)
-    // ② g 非平凡(学到了一条单调映射,不是 identity)。
-    expect(measurement.fittedG.knots.length).toBeGreaterThanOrEqual(2)
-    // ③ 关键:g 在**留出集**上把 ECE 压下(泛化的单调修正,不是过拟合训练集)。
+    // g 非平凡:学到一条有跨度的单调映射(y 跨度 > 0.05),不是常值/identity。
+    const ys = measurement.fittedG.knots.map((k) => k.y)
+    expect(Math.max(...ys) - Math.min(...ys)).toBeGreaterThan(0.05)
+    // 关键:g 在**未见事实**(同档不同事实)上把 ECE 压下 ⇒ 学到的是档级正确率的泛化修正。
     expect(measurement.calibrated.ece).toBeLessThan(measurement.identity.ece)
     expect(measurement.eceDrop).toBeGreaterThan(0)
   }, 120_000)
+
+  it('② 语料前提不变量:各档实测真值率单调升、且每档严格低于该档 rawTarget(过自信真被注入)', () => {
+    const facts = buildCorpus()
+    const rates: number[] = []
+    for (let level = 0; level < NUM_LEVELS; level++) {
+      const fs = facts.filter((f) => f.level === level)
+      expect(fs.length).toBeGreaterThan(0)
+      const trueRate = fs.filter((f) => f.isTrue).length / fs.length
+      // 过自信:每档真值率严格低于该档 rawTarget(raw 高估正确率)。
+      expect(trueRate).toBeLessThan(fs[0]!.rawTarget)
+      rates.push(trueRate)
+    }
+    // 单调:档号越高(rawTarget 越大)真值率越高 ⇒ raw 有信息量(g 该学单调、非翻转)。
+    for (let i = 1; i < rates.length; i++) expect(rates[i]!).toBeGreaterThan(rates[i - 1]!)
+    // 客观真值:每个事实都有非空 object(altAt 保证 false 事实 object ≠ 真值)。
+    for (const f of facts) expect(f.object.length).toBeGreaterThan(0)
+  })
+
+  it('③ 负对照:良校准输入(各档正确率≈rawTarget)⇒ g 不无中生有压 ECE(eceDrop≈0)', () => {
+    // 5 档 × 20 事实,每档 k=round(raw·20) 条正确 ⇒ 观测正确率≈raw(本就良校准)。每事实唯一 factId、按 fact 切分。
+    const samples: FactSample[] = []
+    let fid = 0
+    for (const raw of [0.5, 0.6, 0.7, 0.8, 0.9]) {
+      const n = 20
+      const k = Math.round(raw * n)
+      for (let i = 0; i < n; i++)
+        samples.push({ factId: `nc-${fid++}`, rawPredicted: raw, correct: i < k })
+    }
+    const m = measureFromSamples(samples, { heldoutEvery: 3 })
+    expect(m.factsInBothSides).toBe(0)
+    expect(m.identity.ece).toBeLessThan(0.05) // 输入本就良校准
+    // g 不该在已良校准的输入上无中生有"改善"(防"总把 ECE 压向基率"的 bug)。
+    expect(Math.abs(m.eceDrop)).toBeLessThan(0.05)
+  })
 })
