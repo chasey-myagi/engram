@@ -73,7 +73,7 @@ describe('M2 · 校准 pilot(g 拟合闭环:接地语料 → 真 recall+usage �
     // 读回口径一致:本地读回样本数 = 生产校准取样器(collectUsageCalibrationSamples)所见。
     expect(persistedSamples).toBe(measurement.totalSamples)
 
-    // **真·样本外硬证据**:没有任何事实同时在 fit 与 heldout(否则 g 见过该事实标签、"泛化"是假的)。
+    // 结构性 sanity(本语料一 fact 一 usage ⇒ 恒 0,非硬泛化证据);真泛化的实证是下面 ECE 在**同档不同事实**上下降。
     expect(measurement.factsInBothSides).toBe(0)
 
     // 语料确实注入了可观的过自信(否则无东西可校)。
@@ -81,7 +81,7 @@ describe('M2 · 校准 pilot(g 拟合闭环:接地语料 → 真 recall+usage �
     // g 非平凡:学到一条有跨度的单调映射(y 跨度 > 0.05),不是常值/identity。
     const ys = measurement.fittedG.knots.map((k) => k.y)
     expect(Math.max(...ys) - Math.min(...ys)).toBeGreaterThan(0.05)
-    // 关键:g 在**未见事实**(同档不同事实)上把 ECE 压下 ⇒ 学到的是档级正确率的泛化修正。
+    // 关键(真泛化):g 在**未见事实**(同档不同事实,g 没见过它们的标签)上把 ECE 压下 ⇒ 学到的是档级正确率的泛化修正。
     expect(measurement.calibrated.ece).toBeLessThan(measurement.identity.ece)
     expect(measurement.eceDrop).toBeGreaterThan(0)
   }, 120_000)
@@ -115,7 +115,9 @@ describe('M2 · 校准 pilot(g 拟合闭环:接地语料 → 真 recall+usage �
     }
     const m = measureFromSamples(samples, { heldoutEvery: 3 })
     expect(m.factsInBothSides).toBe(0)
-    expect(m.identity.ece).toBeLessThan(0.05) // 输入本就良校准
+    // 输入本就良校准:identity ECE 低(阈值留宽:量化 round(raw·20)+按 fact 子采样会让留出子集略偏离档基率,
+    // 实测~0.047;放到 0.08 避免无关采样噪声假红——本测要证的是 g 的**克制**,不是子集的精确校准)。
+    expect(m.identity.ece).toBeLessThan(0.08)
     // g 不该在已良校准的输入上无中生有"改善"(防"总把 ECE 压向基率"的 bug)。
     expect(Math.abs(m.eceDrop)).toBeLessThan(0.05)
   })

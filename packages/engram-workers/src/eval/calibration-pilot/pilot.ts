@@ -30,7 +30,7 @@ import {
 
 import { buildCorpus, type CorpusFact } from './corpus.js'
 
-/** 因子权重(Σ=1):5 因子都设到 rawTarget ⇒ base=Σwᵢ·rawTarget=rawTarget(与内核默认权重对齐)。 */
+/** 因子权重:此处**仅需 Σw=1**(5 因子都设到 rawTarget ⇒ base=Σwᵢ·rawTarget=rawTarget,与具体权重分配无关;非"对齐内核默认")。 */
 const WEIGHTS = {
   authority: 0.3,
   humanReview: 0.3,
@@ -191,7 +191,11 @@ export interface CalibrationMeasurement {
   calibrated: ReliabilityReport
   /** ECE 改善 = identity.ece - calibrated.ece(>0 ⇒ g 把校准误差压下了)。 */
   eceDrop: number
-  /** **无泄漏自检**:同一 factId 同时出现在 fit 与 heldout 的事实数。必须 = 0 ⇒ 留出事实 g 真没见过 ⇒ 真泛化。 */
+  /**
+   * **结构性 sanity**:同一 factId 跨 fit/heldout 的事实数。本语料一 fact 一 usage ⇒ 一 factId 一样本 ⇒ 恒为 0
+   * (不是硬泛化证据,只防"按样本切把同一 fact 拆两边"那类回归)。**真泛化的实证**是 calibrated.ece<identity.ece:
+   * fit/heldout 共享置信档但**事实不同**,g 用某档训练事实学到的正确率去预测该档**未见**事实仍压低 ECE。
+   */
   factsInBothSides: number
 }
 
