@@ -22,7 +22,8 @@
     "typecheck": "tsc -p . --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "demo": "node dist/runner/main.js"
+    "demo": "node dist/runner/main.js",
+    "eval:calibration": "node dist/eval/calibration-pilot/run.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
