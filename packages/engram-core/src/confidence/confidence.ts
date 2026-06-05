@@ -58,8 +58,94 @@ export interface PenaltyInputs {
 /** conflictDecay 的 α 起步基线。 */
 export const CONFLICT_ALPHA = 0.5
 
-/** g 的起步版本：identity（conf=raw）。 */
+/** g 的起步/sentinel 版本：identity（conf=raw）。也是 g=identity 即时回退（Story 29）的目标版本。 */
 export const CALIBRATION_IDENTITY = 'identity'
+
+/**
+ * confidence 计算口径的 **code_version 锚**（命门 A.3 #3）。
+ *
+ * raw / conf 是七因子公式 + g 共同算出的。`g` 的演进靠 calibration_version 锚定（换 g 留痕、快照冻结）；
+ * 但**公式本身**（因子定义 / 衰减式 / 合成方式）若改了代码，旧 raw 与新 raw 不再同尺度可比——
+ * 这超出 calibration_version 能表达的范畴（它只记 g 这一层）。故每次 g 落库时把当时的 code_version 一并钉进
+ * evidence：**code_version 不同的两段历史 raw/conf 在纵向趋势/ECE 比对里不可混算**（A.3 不变量）。
+ * 改了七因子公式/衰减式就 bump 这个常量——它是「历史不可比」的显式断点标记（轻量：一个常量 + 落库 + 不变量）。
+ */
+export const CALIBRATION_CODE_VERSION = 's28-isotonic-1' as const
+
+/**
+ * 单调校准映射 g' 的一个结点（S27）。g' = [0,1]→[0,1] 的分段线性、**非递减**插值，由升序 knots 定义。
+ * x = 输入（raw）锚点，y = 该锚点处的校准输出（已校准概率）。两端无需覆盖 0/1：插值在端点外做夹断外推。
+ */
+export interface CalibrationKnot {
+  x: number
+  y: number
+}
+
+/**
+ * 校准映射 g'（S27，A.3 命门「g=value==真实概率，statistical」）。version 是它在 calibration_map 表里的具名版本；
+ * knots 是定义它的升序结点（identity 版本 knots=[]，直通 raw）。这是「w 为什么信 / g 数值多准」职责分离里的 g 半边。
+ * **不可变值对象**：拟合算法（S28 isotonic）产出它，验收门（S27）审它，recall 按 claim 钉的版本应用它。
+ */
+export interface CalibrationMap {
+  version: string
+  knots: CalibrationKnot[]
+}
+
+/** 内核 sentinel 校准映射：identity（空 knots，applyGMap 直通 raw）。表空 / 回退到它即 g=raw。 */
+export const IDENTITY_MAP: CalibrationMap = { version: CALIBRATION_IDENTITY, knots: [] }
+
+/**
+ * 校验校准映射的两个**几何不变量**（验收门 ①② 与 store 写时都靠它，单一口径防漂移）：
+ *   ① knots 的 x **严格升序**（同 x 无定义、会让插值除零）；
+ *   ② y **非递减**（g' 单调不减——校准不能把高 raw 压到比低 raw 还低，否则破坏排序语义）；
+ *   ③ 所有 x、y ∈ [0,1]（值域闭合）。
+ * 违反即抛（写时硬拒）。identity（空 knots）平凡满足。NaN 一律视为违反（>/≥/范围比较对 NaN 恒 false）。
+ */
+export function assertCalibrationMap(map: CalibrationMap): void {
+  const ks = map.knots
+  for (let i = 0; i < ks.length; i++) {
+    const k = ks[i]!
+    if (!(k.x >= 0 && k.x <= 1)) {
+      throw new Error(`calibration: knot.x must be in [0,1] (got ${k.x} at #${i})`)
+    }
+    if (!(k.y >= 0 && k.y <= 1)) {
+      throw new Error(`calibration: knot.y must be in [0,1] (got ${k.y} at #${i})`)
+    }
+    if (i > 0) {
+      const prev = ks[i - 1]!
+      if (!(k.x > prev.x)) {
+        throw new Error(`calibration: knot.x must be strictly ascending (got ${prev.x} → ${k.x})`)
+      }
+      if (!(k.y >= prev.y)) {
+        throw new Error(`calibration: g' must be non-decreasing (got y ${prev.y} → ${k.y})`)
+      }
+    }
+  }
+}
+
+/**
+ * 纯函数：把校准映射 g' 应用到 raw（分段线性插值，端点外夹断）。空 knots（identity）= 直通 clamp01(raw)。
+ * 已假定 map 满足不变量（升序、非递减、值域 [0,1]）——调用方/store 写时已 assertCalibrationMap。
+ * 给定 x 落在 [knots[i].x, knots[i+1].x] 内时线性插值；左于首结点 → 首结点 y；右于末结点 → 末结点 y。
+ */
+export function applyGMap(raw: number, map: CalibrationMap): number {
+  const x = clamp01(raw)
+  const ks = map.knots
+  if (ks.length === 0) return x // identity
+  if (x <= ks[0]!.x) return clamp01(ks[0]!.y) // 左夹断
+  const last = ks[ks.length - 1]!
+  if (x >= last.x) return clamp01(last.y) // 右夹断
+  for (let i = 0; i < ks.length - 1; i++) {
+    const a = ks[i]!
+    const b = ks[i + 1]!
+    if (x >= a.x && x <= b.x) {
+      const span = b.x - a.x
+      const t = span > 0 ? (x - a.x) / span : 0 // 升序保证 span>0；除零守卫纯防御
+      return clamp01(a.y + t * (b.y - a.y))
+    }
+  }
+  return clamp01(last.y) // 兜底（理论不可达：上面区间已覆盖 [first.x,last.x]）
+}
 
 /** 内核消费门下界（A.2）：value 低于此绝不进召回结果。consumer / 配置态只能抬高，绝不能降低。 */
 export const KERNEL_CONFIDENCE_FLOOR = 0.4
@@ -171,14 +257,34 @@ export function rawFromStoredFactors(
   return computeBase(factors, weights) * factors.staleDecay * cDecay
 }
 
-/** g 映射：起步 identity（conf=raw）。未来在此分派 temperature / isotonic（S27/S28），与 w 职责分离。 */
-export function applyG(raw: number, calibrationVersion: string = CALIBRATION_IDENTITY): number {
-  switch (calibrationVersion) {
-    case CALIBRATION_IDENTITY:
-      return clamp01(raw)
-    default:
-      throw new Error(`confidence: unknown calibration version "${calibrationVersion}"`)
+/**
+ * g 映射（S27：按版本应用）。与 w（为什么信，配置态）职责**分离**：这里只算「数值=多准」（statistical）。
+ *
+ * - identity 版本（或缺省）→ clamp01(raw)，**无需** DB / 无需 map 入参（热路径默认零开销）。
+ * - 非 identity 版本 → **必须**传入该版本已解析的 `map`（升序、非递减、值域 [0,1] 的 knots），分段线性插值。
+ *   保持纯/同步：recall 与 live-recompute 在请求开头按候选 claim 钉的版本批量解析 map，再逐条同步 applyG 传入。
+ *   传入 map.version 与 calibrationVersion 不一致 → 抛（防张冠李戴用错版本的 g）。
+ *
+ * **快照冻结**靠这条性质天然成立：每条 claim 钉死自己的 calibrationVersion，recall 解析的就是它钉的那版 g'，
+ * 后来换活动版本不回溯改写老 claim 的锚 → 老快照永远按它当年的 g 算。
+ */
+export function applyG(
+  raw: number,
+  calibrationVersion: string = CALIBRATION_IDENTITY,
+  map?: CalibrationMap,
+): number {
+  if (calibrationVersion === CALIBRATION_IDENTITY) return clamp01(raw)
+  if (!map) {
+    throw new Error(
+      `confidence: calibration version "${calibrationVersion}" requires a resolved map (none supplied)`,
+    )
   }
+  if (map.version !== calibrationVersion) {
+    throw new Error(
+      `confidence: map version "${map.version}" does not match requested "${calibrationVersion}"`,
+    )
+  }
+  return applyGMap(raw, map)
 }
 
 /**
@@ -217,16 +323,22 @@ export interface StoredConfidence {
   calibrationVersion: string
 }
 
-/** 一站式：因子 + 惩罚 → 完整计算结果。"为什么信"（w）与"数值=真实概率"（g）分开记。 */
+/**
+ * 一站式：因子 + 惩罚 → 完整计算结果。"为什么信"（w）与"数值=真实概率"（g）分开记。
+ *
+ * S28 FIX 1（写路径上 g 真正生效的口子）：若 calibrationVersion 非 identity，**必须**传入已解析的 `map`
+ * （由调用方按活动版本经 loadCalibrationMaps 解析）。applyG 对非 identity 版本缺 map 会抛——所以写入新 claim 时
+ * 把它钉到活动版本并存 value=activeG(raw)，靠的就是这条参数把活动 g 的 map 喂进来。identity 版本忽略 map（直通 raw）。
+ */
 export function computeConfidence(
   f: AdditiveFactors,
   p: PenaltyInputs,
-  opts: { weights?: FactorWeights; calibrationVersion?: string } = {},
+  opts: { weights?: FactorWeights; calibrationVersion?: string; map?: CalibrationMap } = {},
 ): ComputedConfidence {
   const weights = opts.weights ?? DEFAULT_WEIGHTS
   const calibrationVersion = opts.calibrationVersion ?? CALIBRATION_IDENTITY
   const confidenceRaw = computeRaw(f, p, weights)
-  const confidence = applyG(confidenceRaw, calibrationVersion)
+  const confidence = applyG(confidenceRaw, calibrationVersion, opts.map)
   return {
     confidence,
     confidenceRaw,

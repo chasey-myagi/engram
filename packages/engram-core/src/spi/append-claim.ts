@@ -20,6 +20,11 @@ import {
   type ComputedConfidence,
   type StoredConfidence,
 } from '../confidence/confidence.js'
+import { countIndependentSupports } from '../same-fact/independent.js'
+import { getActiveCalibrationMap } from '../calibration/calibration-store.js'
+import { computeEntailmentFactor } from '../verifier/patrol-verdict.js'
+import { computeUsageCorrectFactor } from '../harvest/usage-correct.js'
+import { computeHumanReviewFactor } from '../editor/human-review.js'
 import type { DB, Tx } from '../db/client.js'
 import type { Embedder } from '../embedding/embedder.js'
 import {
@@ -39,6 +44,8 @@ export interface SourceInput {
   kind: SourceKind
   authorityScore?: number
   meta?: Record<string, unknown>
+  /** A.6 独立来源血缘：本源派生自哪个上游源（独立印证沿此链折叠，防同源刷 f3）。 */
+  derivedFromSourceId?: string
 }
 
 export interface DraftClaim {
@@ -68,21 +75,47 @@ function requireProvenance(provenances: ProvenanceInput[]): void {
   }
 }
 
+/** 一条出处的 sourceId + relevance（confidence 只数 supports 源，A.6）。 */
+export interface ProvenanceRef {
+  sourceId: string
+  relevance?: ProvRelevance | null
+}
+
+/** A.6：只有 exact / supporting 算「supports 源」；tangential / irrelevant 不计 authority / 印证。缺省视为 supporting。 */
+function isSupporting(relevance: ProvRelevance | null | undefined): boolean {
+  const r = relevance ?? 'supporting'
+  return r === 'exact' || r === 'supporting'
+}
+
 /**
- * S2 命门：从 claim 的出处源算连续 confidence。authority 取最强源、indepSupport 数独立源
- * （S2 阶段独立≈不同 source id；完整 A.6 独立判定是 S14）、stale 看 as_of、halfLife 看最强源的 kind。
+ * 命门：从一组**出处**算连续 confidence。只取 relevance∈{exact,supporting} 的 supports 源；authority 取其中最强源、
+ * halfLife 看最强源 kind、indepSupport 数**独立** supports 源（A.6：hash 去重 + derived_from 折叠 + agent_synthesis
+ * 0.5 折扣，S14）。tangential/irrelevant 出处既不抬 authority 也不计印证（防拿无关源刷 f3）。
+ * 既给 appendClaim 写新 claim 用，也给 commitClaim 合并后按全量出处重算用（单一真相源）。
+ *
+ * opts.claimId（S17 起）：给了**已存在** claim 的 id，则把 f2 entailment 因子接到该 claim 最新 patrol 裁决上
+ * （pass→1 / fail→0 / 未跑→中性 0.5）；没给（如 appendClaim 新建、claim 尚不存在）则 entailment 留中性。
  */
-async function computeClaimConfidence(
+export async function computeConfidenceFromProvenances(
   tx: Tx,
-  draft: DraftClaim,
-  provenances: ProvenanceInput[],
+  provenances: ProvenanceRef[],
+  asOf?: Date,
+  opts: { claimId?: string } = {},
 ): Promise<ComputedConfidence> {
-  const sourceIds = [...new Set(provenances.map((p) => p.sourceId))]
-  const sources = sourceIds.length
+  const ids = [
+    ...new Set(provenances.filter((p) => isSupporting(p.relevance)).map((p) => p.sourceId)),
+  ]
+  const sources = ids.length
     ? await tx
-        .select({ authority: source.authorityScore, kind: source.kind })
+        .select({
+          id: source.id,
+          authority: source.authorityScore,
+          kind: source.kind,
+          contentHash: source.contentHash,
+          derivedFromSourceId: source.derivedFromSourceId,
+        })
         .from(source)
-        .where(inArray(source.id, sourceIds))
+        .where(inArray(source.id, ids))
     : []
   // 最强源（authority 最高）一遍扫出：它的 authority_score 作 f0、它的 kind 定半衰期。
   const dominant = sources.reduce<(typeof sources)[number] | null>(
@@ -91,12 +124,45 @@ async function computeClaimConfidence(
   )
   const authority = dominant?.authority ?? 0
   const halfLifeDays = dominant ? halfLifeDaysForKind(dominant.kind) : 180
-  const indepSupport = independentSupportScore(sources.length) // 1 源→0（无独立印证），越多越高
-  const asOf = draft.asOf ?? new Date()
-  const ageDays = Math.max(0, (Date.now() - asOf.getTime()) / MS_PER_DAY)
+  const indepSupport = independentSupportScore(countIndependentSupports(sources)) // A.6 独立印证数
+  const resolvedAsOf = asOf ?? new Date()
+  const ageDays = Math.max(0, (Date.now() - resolvedAsOf.getTime()) / MS_PER_DAY)
+  // ── 因子接线单一标注点（S17/S19/S22 在此抬可计算因子；不要散落别处）──
+  // f1 humanReview（S22）：已存在 claim 取其最新主编人审（Approve→1 / Reject→0）；新建 claim（无 id）
+  //   或从未被人审 → 留 NEUTRAL_FACTORS.humanReview(0)（「人审未发生」中性）。与 f2/f4 同款实时口径。
+  // f2 entailment（S17）：已存在 claim 取其最新 patrol 裁决；新建 claim（无 id）留 NEUTRAL_FACTORS.entailment(0.5)。
+  // f4 usageCorrect（S19）：已存在 claim 按 usage_truth 独立门控统计 observed_correctness→f4；新建 claim（无 id）
+  //   或从未被使用 → 留 NEUTRAL_FACTORS.usageCorrect(0)。与 f2 同款实时口径（读最新真值，不吃写时快照）。
+  const liveFactors = { ...NEUTRAL_FACTORS, authority, indepSupport }
+  if (opts.claimId !== undefined) {
+    liveFactors.humanReview = await computeHumanReviewFactor(tx, opts.claimId)
+    liveFactors.entailment = await computeEntailmentFactor(tx, opts.claimId)
+    liveFactors.usageCorrect = await computeUsageCorrectFactor(tx, opts.claimId)
+  }
+  // S28 FIX 1（写路径让 g 真正生效）：把新 claim 钉到**当前活动校准版本**、并存 value=activeG(raw)。
+  // 在同一事务内解析活动 g（version + 已解析 map）——非 identity 版本必须带 map 喂给 applyG（否则抛）。
+  // 这是「越用越准」闭环里 g 对**新写入**生效的口子：fit 出 g' 并过门换上后，此后新 claim 即按 g' 钉版本/算值；
+  // 老 claim 各自钉自己当年的版本（recall 按钉的版本现算）→ 换 g 不回溯改写历史（快照冻结，见 confidence.ts）。
+  const activeMap = await getActiveCalibrationMap(tx)
   return computeConfidence(
-    { ...NEUTRAL_FACTORS, authority, indepSupport },
+    liveFactors,
     { ageDays, halfLifeDays, activeContradicts: 0 },
+    {
+      calibrationVersion: activeMap.version,
+      map: activeMap,
+    },
+  )
+}
+
+async function computeClaimConfidence(
+  tx: Tx,
+  draft: DraftClaim,
+  provenances: ProvenanceInput[],
+): Promise<ComputedConfidence> {
+  return computeConfidenceFromProvenances(
+    tx,
+    provenances.map((p) => ({ sourceId: p.sourceId, relevance: p.relevance ?? null })),
+    draft.asOf,
   )
 }
 
@@ -180,6 +246,24 @@ async function recordContradictions(tx: Tx, newClaimId: string, draft: DraftClai
   }
 }
 
+/** 读一条 source（工种 read_source 用，如 Distiller）。不存在返 null。 */
+export async function getSource(
+  db: DB,
+  sourceId: string,
+): Promise<{ id: string; content: string; kind: SourceKind; authorityScore: number } | null> {
+  const [row] = await db
+    .select({
+      id: source.id,
+      content: source.content,
+      kind: source.kind,
+      authorityScore: source.authorityScore,
+    })
+    .from(source)
+    .where(eq(source.id, sourceId))
+    .limit(1)
+  return row ?? null
+}
+
 /** 幂等入原文：content_hash 撞号则复用既有行（不重复落库），单语句 ON CONFLICT 总返存活 id。meta 原样存。 */
 export async function addSource(db: DB, input: SourceInput): Promise<{ sourceId: string }> {
   const rows = await db
@@ -191,6 +275,9 @@ export async function addSource(db: DB, input: SourceInput): Promise<{ sourceId:
       kind: input.kind,
       authorityScore: input.authorityScore ?? 0.5,
       meta: input.meta ?? {},
+      ...(input.derivedFromSourceId !== undefined
+        ? { derivedFromSourceId: input.derivedFromSourceId }
+        : {}),
     })
     .onConflictDoUpdate({
       target: source.contentHash,
@@ -221,7 +308,7 @@ export async function appendClaim(
   })
 }
 
-/** append-only 取代：新版本沿用旧 claim 的 lineage_id，加一条 supersedes 边，旧版标 superseded（不物理删）。 */
+/** append-only 取代（薄壳）：事务外算嵌入 → 开事务 → 委托 supersedeClaimInTx。 */
 export async function supersedeClaim(
   db: DB,
   embedder: Embedder,
@@ -230,36 +317,47 @@ export async function supersedeClaim(
   provenances: ProvenanceInput[],
 ): Promise<{ claimId: string }> {
   requireProvenance(provenances)
-  const embedding = await embedder.embed(draft.claimText, 'document')
-  return db.transaction(async (tx) => {
-    const old = await tx
-      .select({ lineageId: claim.lineageId, status: claim.status })
-      .from(claim)
-      .where(eq(claim.id, oldClaimId))
-      .for('update') // 锁住旧版行：并发取代同一 head 时序列化，第二个会看到 superseded → 拒，避免谱系分叉
-    if (old.length === 0) {
-      throw new Error(`supersede_claim: claim ${oldClaimId} not found`)
-    }
-    // 单 head 不变量：只取代当前 head；取代一个已 superseded 的旧版会让同 lineage 出现两个 head（谱系分叉）。
-    if (old[0]!.status === 'superseded') {
-      throw new Error(
-        `supersede_claim: claim ${oldClaimId} is already superseded (would fork its lineage); supersede the current head`,
-      )
-    }
-    const conf = await computeClaimConfidence(tx, draft, provenances)
-    const claimId = await insertClaim(
-      tx,
-      draft,
-      old[0]!.lineageId,
-      conf,
-      embedding,
-      embedder.version,
+  const embedding = await embedder.embed(draft.claimText, 'document') // 事务外算（纯计算/远程调用，不持锁）
+  return db.transaction((tx) =>
+    supersedeClaimInTx(tx, oldClaimId, draft, provenances, embedding, embedder.version),
+  )
+}
+
+/**
+ * append-only 取代的 **Tx 变体**：在调用方已开启的事务内取代，对旧版行加 FOR UPDATE 锁。供 HITL 编排器
+ * （editor-action.ts 的 Edit-Approve）把「append 新版本 + 投 f1 人审 + 晋升新版本」绑进**同一事务**，
+ * 任一步抛则整体回滚——杜绝半截谱系（旧版已 superseded、新版卡在 draft、事实静默掉出召回）。
+ * 嵌入由调用方在事务外先算好传入（不在持锁期间做远程嵌入）。新版本沿用旧 claim 的 lineage_id，加一条 supersedes 边。
+ */
+export async function supersedeClaimInTx(
+  tx: Tx,
+  oldClaimId: string,
+  draft: DraftClaim,
+  provenances: ProvenanceInput[],
+  embedding: number[],
+  embeddingVersion: string,
+): Promise<{ claimId: string }> {
+  requireProvenance(provenances)
+  const old = await tx
+    .select({ lineageId: claim.lineageId, status: claim.status })
+    .from(claim)
+    .where(eq(claim.id, oldClaimId))
+    .for('update') // 锁住旧版行：并发取代同一 head 时序列化，第二个会看到 superseded → 拒，避免谱系分叉
+  if (old.length === 0) {
+    throw new Error(`supersede_claim: claim ${oldClaimId} not found`)
+  }
+  // 单 head 不变量：只取代当前 head；取代一个已 superseded 的旧版会让同 lineage 出现两个 head（谱系分叉）。
+  if (old[0]!.status === 'superseded') {
+    throw new Error(
+      `supersede_claim: claim ${oldClaimId} is already superseded (would fork its lineage); supersede the current head`,
     )
-    await insertProvenances(tx, claimId, provenances)
-    await tx
-      .insert(relation)
-      .values({ id: randomUUID(), fromClaim: claimId, toClaim: oldClaimId, type: 'supersedes' })
-    await tx.update(claim).set({ status: 'superseded' }).where(eq(claim.id, oldClaimId))
-    return { claimId }
-  })
+  }
+  const conf = await computeClaimConfidence(tx, draft, provenances)
+  const claimId = await insertClaim(tx, draft, old[0]!.lineageId, conf, embedding, embeddingVersion)
+  await insertProvenances(tx, claimId, provenances)
+  await tx
+    .insert(relation)
+    .values({ id: randomUUID(), fromClaim: claimId, toClaim: oldClaimId, type: 'supersedes' })
+  await tx.update(claim).set({ status: 'superseded' }).where(eq(claim.id, oldClaimId))
+  return { claimId }
 }

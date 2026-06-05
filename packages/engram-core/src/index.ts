@@ -6,14 +6,19 @@
 export const ENGRAM_VERSION = '0.0.0' as const
 
 export * as schema from './db/schema.js'
+export type { SourceKind, ClaimStatus } from './db/schema.js'
 export { createPool, createDb, type DB } from './db/client.js'
+export { halfLifeDaysForKind } from './confidence/confidence.js'
 export {
   addSource,
+  getSource,
   appendClaim,
   supersedeClaim,
+  computeConfidenceFromProvenances,
   type SourceInput,
   type DraftClaim,
   type ProvenanceInput,
+  type ProvenanceRef,
 } from './spi/append-claim.js'
 export {
   recallClaims,
@@ -43,6 +48,65 @@ export {
   type ReliabilityBin,
   type ReliabilityReport,
 } from './calibration/calibration.js'
+// S27 · g′ 表示 + applyG-by-version（命门 A.3）：单调校准映射（升序非递减 knots，分段线性插值）。
+export {
+  applyG,
+  applyGMap,
+  assertCalibrationMap,
+  CALIBRATION_IDENTITY,
+  CALIBRATION_CODE_VERSION,
+  IDENTITY_MAP,
+  type CalibrationKnot,
+  type CalibrationMap,
+} from './confidence/confidence.js'
+// S27 · 校准映射版本化 store（append-only / 活动=最新一行）+ 原子激活（验收门唯一写者）+ g=identity 即时回退（Story 29）。
+export {
+  appendCalibrationMapTx,
+  commitCalibrationMap,
+  rollbackToIdentity,
+  getActiveCalibrationVersion,
+  getActiveCalibrationMap,
+  loadCalibrationMaps,
+  getCalibrationHistory,
+  type CommitCalibrationInput,
+  type CalibrationMapRow,
+} from './calibration/calibration-store.js'
+// S27 · 旁挂只读 Advisor（能力：诊断 + 绑 ΔECE，无写权）+ 拟合端口（S28 isotonic 从此接入；S27 不实现）。
+export {
+  advise,
+  identityLikeCandidate,
+  type GoldenSample,
+  type CalibrationFitter,
+  type CalibrationProposal,
+  type AdvisorOptions,
+} from './calibration/advisor.js'
+// S27 · 确定性验收门（权力：5 项全过才 approve，逐项可咬；A.8 否决在线 meta-orchestrator）。
+export {
+  runAcceptanceGate,
+  MAX_GATE_FLIP_FRACTION,
+  MIN_SAMPLES_PER_BIN,
+  MIN_OUTPUT_SPREAD,
+  type GateCheckId,
+  type GateCheck,
+  type GateVerdict,
+  type GateInputs,
+} from './calibration/acceptance-gate.js'
+// S27 · 控制面链路：Advisor→验收门→（5/5 原子换 / 否则 fail-silent HOLD）。活动 g 的唯一写入路径（除即时回退）。
+export {
+  evaluateAndMaybeSwap,
+  type SwapResult,
+  type EvaluateOptions,
+} from './calibration/recalibrate.js'
+// S28 · isotonic 拟合器（PAVA，确定性单调；A3 红线在 {rawPredicted,correct} 输入边界守）—— S27 CalibrationFitter 落地。
+export { fitIsotonic, makeIsotonicFitter } from './calibration/isotonic.js'
+// S28 · 「首次校准」触发外壳（Harvester 校准半边）：usage_truth 独立门控取样 → ≥200 门 → fit → 验收门原子换。
+export {
+  fitAndMaybeRecalibrate,
+  collectUsageCalibrationSamples,
+  MIN_FIT_SAMPLES,
+  type FitFromUsageOptions,
+  type FitResult,
+} from './calibration/fit-from-usage.js'
 export { applyAdapter, DEFAULT_ADAPTER_EPSILON, type RecallAdapter } from './spi/adapter.js'
 export {
   setStandards,
@@ -108,9 +172,246 @@ export {
   type GoldenQuestion,
   type PromotionAuditRow,
 } from './spi/exam-immunity.js'
+// S29 · 冻结红队世代（版本化 append-only，纵向比较的固定敌手）+ 免疫力维度（detection rate，离线报告、不进计分）。
+export {
+  freezeRedTeamGeneration,
+  getRedTeamGeneration,
+  getRedTeamGenerations,
+  recordImmunityScore,
+  getImmunityScores,
+  REDTEAM_CLASSES,
+  type RedTeamClass,
+  type RedTeamItem,
+  type RedTeamGeneration,
+  type ImmunityScore,
+} from './spi/redteam-generation.js'
+// S30 · L3 系统维度（substrate-ready 七维）的 append-only 度量脊柱 + 离线幂等聚合 + 时间序列读路径。
+export {
+  recordDimension,
+  getDimensionEvents,
+  getDimensionSeries,
+  DIMENSION,
+  DIMENSION_NAMES,
+  type DimensionName,
+  type DimensionEvent,
+  type RecordDimensionInput,
+  type DimensionSeriesPoint,
+} from './spi/dimension-events.js'
+export {
+  computeSystemDimensions,
+  runSystemDimensions,
+  runGoldenItem,
+  aggregateLatest,
+  L3_GOLDEN,
+  L3_GOLDEN_NAMESPACE,
+  L3_GOLDEN_MIN_SIMILARITY,
+  DEFAULT_K,
+  RELOCATED_TO_S31,
+  type SystemGoldenItem,
+  type GoldenObservation,
+  type SystemDimensions,
+  type ComputeOptions,
+  type RunReport,
+} from './eval/system-dimensions.js'
+// S31 · 归因脊柱（P3 门）：单环失败归因——任一已落库失败确定性追溯回恰好一个 loop/工种（确定性 + 单环优先级表）。
+export {
+  attributeFailure,
+  loopForRedTeamClass,
+  claimCreatedBy,
+  lineageEdges,
+  RESPONSIBLE_LOOP,
+  RESPONSIBLE_LOOPS,
+  PRECEDENCE,
+  type ResponsibleLoop,
+  type FailureKind,
+  type FailureInput,
+  type Attribution,
+} from './eval/attribution-spine.js'
+// S31 · 纵向冻结-golden 同卷复考（第⑧维，S30 迁来）：跨 release append-only ΔECE↓/Δcoverage↑ + 内/中/外三环 + A3 边界。
+export {
+  recordRecompete,
+  runRecompeteSnapshot,
+  getRecompeteSeries,
+  getRecompeteEvents,
+  RECOMPETE_DIMENSIONS,
+  RING,
+  RINGS,
+  FROZEN_GOLDEN_VERSION,
+  type RecompeteDimension,
+  type Ring,
+  type RecompeteEvent,
+  type RecordRecompeteInput,
+  type RecompeteReport,
+  type RunRecompeteOptions,
+  type RecompeteSeriesPoint,
+} from './eval/longitudinal-recompete.js'
+// S31 · L5 → 归因脊柱迁移「长出了知识」：曾零召回的 L5 题变可答（recall≥1 + 人确认）→ append-only 迁出 L5。
+export {
+  migrateL5IfGrew,
+  getKnowledgeGrewEvents,
+  isMigratedOutOfL5,
+  liveL5Questions,
+  type KnowledgeGrewEvent,
+  type MigrateL5Options,
+  type MigrateL5Result,
+} from './eval/l5-migration.js'
 export {
   transitionClaim,
   PROMOTE_CONFIDENCE_FLOOR,
   type TransitionOptions,
   type PositiveEvidence,
 } from './spi/transition.js'
+export { commitClaim, type CommitResult } from './spi/commit-claim.js'
+export {
+  markSourceHumanPending,
+  getHumanPendingSources,
+  type HumanPendingSource,
+} from './spi/worker-audit.js'
+export {
+  objectEquivalent,
+  deterministicVerdict,
+  adjudicate,
+  SAME_FACT_CANDIDATE_SIMILARITY,
+  SAME_FACT_TOPK,
+  SAME_FACT_GRAY_ZONE_SIMILARITY,
+  type SameFactVerdict,
+  type SameFactJudge,
+  type ClaimShape,
+} from './same-fact/same-fact.js'
+export { makeFakeSameFactJudge, type FakeJudgeOptions } from './same-fact/fake-judge.js'
+export { makeDashScopeSameFactJudge } from './same-fact/dashscope-judge.js'
+export {
+  independent,
+  countIndependentSupports,
+  independentSupportFactor,
+  type SourceIndep,
+} from './same-fact/independent.js'
+export {
+  reconcilePair,
+  isReconcileCandidate,
+  objectSubsetViaEntailment,
+  hasNonIndependentPair,
+  RECONCILE_PAIR_SIMILARITY,
+  type ReconcileVerdict,
+} from './same-fact/reconcile.js'
+export {
+  recordReconcileEscalation,
+  getReconcileEscalations,
+  RECONCILE_POISON_REASON,
+  type ReconcileEscalation,
+} from './spi/reconcile-signal.js'
+export {
+  type EntailmentJudge,
+  type EntailmentQuery,
+  type EntailmentEvidence,
+  type EntailmentVerdict,
+} from './verifier/entailment-judge.js'
+export {
+  makeFakeEntailmentJudge,
+  type FakeEntailmentJudgeOptions,
+} from './verifier/fake-entailment-judge.js'
+export { makeDashScopeEntailmentJudge } from './verifier/dashscope-entailment-judge.js'
+export {
+  writePatrolVerdict,
+  latestPatrolVerdict,
+  computeEntailmentFactor,
+  latestEntailmentFactors,
+  entailmentVerdictToFactor,
+  type PatrolVerdict,
+} from './verifier/patrol-verdict.js'
+// S19 · f4 usageCorrect 生产者（usage_truth 独立门控统计 → observed_correctness → f4）。Harvester 工种调它。
+export {
+  computeUsageCorrectStats,
+  computeUsageCorrectFactor,
+  latestUsageCorrectFactors,
+  usageCorrectStatsFromCounts,
+  USAGE_CORRECT_K,
+  USAGE_CORRECT_MIN_SAMPLES,
+  type UsageCorrectStats,
+} from './harvest/usage-correct.js'
+export { recomputeClaimConfidence, type RecomputeResult } from './harvest/recompute.js'
+// S22 · f1 humanReview 生产者（最后一个休眠因子）：主编人审 → claim_verification(kind=patrol, human) → f1。
+export {
+  writeHumanReview,
+  latestHumanReview,
+  computeHumanReviewFactor,
+  latestHumanReviewFactors,
+  HUMAN_REVIEW_APPROVE,
+  HUMAN_REVIEW_REJECT,
+  type HumanReviewVerdict,
+} from './editor/human-review.js'
+// S22 · 主编三动作（Approve / Edit-Approve / Reject）：因子-only、append-only、状态由门限重算（人的红边）。
+export {
+  approveClaim,
+  editApproveClaim,
+  rejectClaim,
+  type EditorActorContext,
+  type EditorActionResult,
+} from './editor/editor-action.js'
+// S22 · human_overturn 翻案事件（S26 恒温器 falseQuarantineRate 的生产者）。
+export {
+  recordHumanOverturn,
+  getHumanOverturns,
+  HUMAN_OVERTURN,
+  type OverturnKind,
+  type HumanOverturnPayload,
+  type HumanOverturn,
+} from './editor/human-overturn.js'
+export {
+  adjudicateConflict,
+  MACHINE_RUNGS,
+  type ConflictSide,
+  type Adjudication,
+  type LadderRung,
+} from './spi/conflict-ladder.js'
+export {
+  loadConflictSide,
+  resolveConflict,
+  escalateConflict,
+  humanAdjudicateConflict,
+  getEditorConflictQueue,
+  getResolvedConflicts,
+  getClaimStatus,
+  adjudicatedPairKeys,
+  CONFLICT_ADJUDICATED,
+  type ConflictAdjudicatedPayload,
+  type ConflictAdjudication,
+  type ConflictPersistResult,
+} from './spi/conflict-arbiter.js'
+// S23 · 主编工作台读半边：审阅队列（按实时 confidence 升序）+ 单条 claim 谱系视图（出处/引用 page/版本史）。
+export {
+  getEditorInbox,
+  getClaimLineage,
+  EDITOR_INBOX_STATUSES,
+  DEFAULT_INBOX_LIMIT,
+  type EditorInboxRow,
+  type EditorInboxQuery,
+  type ClaimLineage,
+  type LineageProvenance,
+  type CitingPage,
+  type LineageVersion,
+} from './editor/editor-inbox.js'
+// S23 · recall / editor-inbox 的实时 confidence 重算单一口径（抽取，防漂移）。
+export {
+  recomputeLiveConfidence,
+  loadLiveConfidence,
+  liveContradictsByClaim,
+  type LiveConfidence,
+  type RecomputeCandidate,
+} from './confidence/live-recompute.js'
+// S21 · NC-exact 红线统一闸门（红线#3 / A.6）：判 non_compliant/refuted 须 ≥1 条 relevance='exact' 反向证据，
+// 否则拒判 + 强制升级主编。Verifier 与 Arbiter 共用此一处闸门（无分叉）。
+export {
+  assertNcExactEvidence,
+  countExactProvenances,
+  getRefusedRulings,
+  RULING_REFUSED,
+  type NcExactGateResult,
+  type RefusedRulingKind,
+  type RulingRefusedPayload,
+  type RefusedRuling,
+} from './spi/nc-exact-gate.js'
+// S26 · GovernanceController 恒温器（A.7/A.8）：确定性闭环控制律（proportional + deadband + bounded damped step，
+// 收敛不振荡）→ 五指标映射 D2 收紧 + falseQuarantineRate 反向放宽巡查（counter-force）；版本化持久化 + fail-silent
+// 编排 + L2 仿真谐波。全经 governance barrel 导出。
+export * from './governance/index.js'
