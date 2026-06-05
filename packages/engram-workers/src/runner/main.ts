@@ -77,97 +77,100 @@ function oneOfEachClass(): RedTeamItem[] {
 async function main(): Promise<void> {
   const dbName = `engram_demo_${randomUUID().replace(/-/g, '')}`
   const admin = new pg.Pool({ connectionString: DATABASE_URL, max: 2 })
-  await admin.query(`CREATE DATABASE ${dbName}`)
-  const url = new URL(DATABASE_URL)
-  url.pathname = `/${dbName}`
-  const pool = new pg.Pool({ connectionString: url.toString(), max: 4 })
-  const db = createDb(pool)
-
+  // 嵌套 try/finally：外层兜 admin pool（即便 CREATE DATABASE 抛错也保证 admin.end()）、内层兜 test pool。
   try {
-    await migrate(db, { migrationsFolder })
-    console.log(`[engram] 临时库 ${dbName} 已建 + 迁移完成。`)
+    await admin.query(`CREATE DATABASE ${dbName}`)
+    const url = new URL(DATABASE_URL)
+    url.pathname = `/${dbName}`
+    const pool = new pg.Pool({ connectionString: url.toString(), max: 4 })
+    try {
+      const db = createDb(pool)
+      await migrate(db, { migrationsFolder })
+      console.log(`[engram] 临时库 ${dbName} 已建 + 迁移完成。`)
 
-    const embedder = makeFakeEmbedder()
-    const entailment = makeFakeEntailmentJudge({ verdictOf: () => 'pass' })
-    const runner = new EngramRunner({
-      db,
-      embedder,
-      distiller: {
+      const embedder = makeFakeEmbedder()
+      const entailment = makeFakeEntailmentJudge({ verdictOf: () => 'pass' })
+      const runner = new EngramRunner({
         db,
         embedder,
-        judge: makeFakeSameFactJudge(),
-        runtime: makeHarnessPiRuntime(
-          createFakeModel([
-            commit({
-              claimText: 'widget-7 max load 50kg',
-              subject: 'widget-7',
-              predicate: 'max-load',
-              object: '50kg',
-              locator: 'L1',
-            }),
-            finish(),
-            stop,
-          ]),
-        ),
-        reader: makeFakeSourceReader(),
-      },
-      verifier: { db, judge: entailment },
-      reconciler: { db, judge: entailment },
-      harvester: { db },
-      arbiterRuntimeFor: (pairs) =>
-        makeHarnessPiRuntime(
-          createFakeModel([...pairs.map(([a, b]) => adjudicate(a, b)), finish(), stop]),
-        ),
-    })
-    console.log(`[engram] 工种接线：${runner.registeredWorkers().join(' · ')}`)
+        distiller: {
+          db,
+          embedder,
+          judge: makeFakeSameFactJudge(),
+          runtime: makeHarnessPiRuntime(
+            createFakeModel([
+              commit({
+                claimText: 'widget-7 max load 50kg',
+                subject: 'widget-7',
+                predicate: 'max-load',
+                object: '50kg',
+                locator: 'L1',
+              }),
+              finish(),
+              stop,
+            ]),
+          ),
+          reader: makeFakeSourceReader(),
+        },
+        verifier: { db, judge: entailment },
+        reconciler: { db, judge: entailment },
+        harvester: { db },
+        arbiterRuntimeFor: (pairs) =>
+          makeHarnessPiRuntime(
+            createFakeModel([...pairs.map(([a, b]) => adjudicate(a, b)), finish(), stop]),
+          ),
+      })
+      console.log(`[engram] 工种接线：${runner.registeredWorkers().join(' · ')}`)
 
-    // ── live 闭环一拍：摄入一源 → 级联 → 恒温器 → 校准。 ──
-    const { sourceId } = await addSource(db, {
-      content: 'spec sheet: widget-7 max load 50kg',
-      contentHash: randomUUID(),
-      kind: 'structured_spec',
-      authorityScore: 0.9,
-    })
-    const loop = await runner.runClosedLoop({ sources: [sourceId] })
-    const cascade = loop.ingests[0]!.result
-    console.log('\n=== live 闭环一拍 ===')
-    console.log(
-      `  级联触达工种：${JSON.stringify(cascade.firedByWorker)}（失效=${cascade.failures}，截断=${cascade.truncated}）`,
-    )
-    console.log(
-      `  恒温器：ran=${loop.governance.ran} changed=${loop.governance.changed ?? false} raisedGate=${loop.governance.raisedGate ?? false}`,
-    )
-    console.log(
-      `  首次校准：${loop.recalibrate.fitted ? `fitted(samples=${loop.recalibrate.sampleCount}, swapped=${loop.recalibrate.swapResult.swapped})` : `未拟合(${loop.recalibrate.reason}, samples=${loop.recalibrate.sampleCount}) — g 维持 identity（诚实）`}`,
-    )
-
-    // ── 红蓝对抗北极星一回合（sandbox）。 ──
-    const resetWorkTables = async (): Promise<void> => {
-      await pool.query(
-        'TRUNCATE source, claim, claim_provenance, relation, claim_verification, metrics_events, l5_candidates, golden_questions, promotion_audit CASCADE',
-      )
-    }
-    const round = await runner.adversarialRound({
-      generationVersion: `demo-gen-${randomUUID().slice(0, 8)}`,
-      items: oneOfEachClass(),
-      resetWorkTables,
-    })
-    console.log('\n=== 红蓝对抗北极星一回合 ===')
-    console.log(
-      `  A1 题免疫：进被计分 ${round.scoredItemIds.length} / BLOCK ${round.blockedItemIds.length}`,
-    )
-    for (const s of round.classScores) {
+      // ── live 闭环一拍：摄入一源 → 级联 → 恒温器 → 校准。 ──
+      const { sourceId } = await addSource(db, {
+        content: 'spec sheet: widget-7 max load 50kg',
+        contentHash: randomUUID(),
+        kind: 'structured_spec',
+        authorityScore: 0.9,
+      })
+      const loop = await runner.runClosedLoop({ sources: [sourceId] })
+      const cascade = loop.ingests[0]!.result
+      console.log('\n=== live 闭环一拍 ===')
       console.log(
-        `  [${s.redteamClass}] 检出 ${s.detected}/${s.injected}（detectionRate=${s.detectionRate}）`,
+        `  级联触达工种：${JSON.stringify(cascade.firedByWorker)}（失效=${cascade.failures}，截断=${cascade.truncated}）`,
       )
+      console.log(
+        `  恒温器：ran=${loop.governance.ran} changed=${loop.governance.changed ?? false} raisedGate=${loop.governance.raisedGate ?? false}`,
+      )
+      console.log(
+        `  首次校准：${loop.recalibrate.fitted ? `fitted(samples=${loop.recalibrate.sampleCount}, swapped=${loop.recalibrate.swapResult.swapped})` : `未拟合(${loop.recalibrate.reason}, samples=${loop.recalibrate.sampleCount}) — g 维持 identity（诚实）`}`,
+      )
+
+      // ── 红蓝对抗北极星一回合（sandbox）。 ──
+      const resetWorkTables = async (): Promise<void> => {
+        await pool.query(
+          'TRUNCATE source, claim, claim_provenance, relation, claim_verification, metrics_events, l5_candidates, golden_questions, promotion_audit CASCADE',
+        )
+      }
+      const round = await runner.adversarialRound({
+        generationVersion: `demo-gen-${randomUUID().slice(0, 8)}`,
+        items: oneOfEachClass(),
+        resetWorkTables,
+      })
+      console.log('\n=== 红蓝对抗北极星一回合 ===')
+      console.log(
+        `  A1 题免疫：进被计分 ${round.scoredItemIds.length} / BLOCK ${round.blockedItemIds.length}`,
+      )
+      for (const s of round.classScores) {
+        console.log(
+          `  [${s.redteamClass}] 检出 ${s.detected}/${s.injected}（detectionRate=${s.detectionRate}）`,
+        )
+      }
+      console.log(`  breach(漏检+单环归因)：${round.breaches.length}`)
+      console.log(
+        `  下一代更难题：${round.nextGeneration.items.length} 条（冻结=${round.nextGeneration.frozen}）`,
+      )
+      console.log('\n[engram] 北极星闭环 demo 跑通 ✓')
+    } finally {
+      await pool.end()
     }
-    console.log(`  breach(漏检+单环归因)：${round.breaches.length}`)
-    console.log(
-      `  下一代更难题：${round.nextGeneration.items.length} 条（冻结=${round.nextGeneration.frozen}）`,
-    )
-    console.log('\n[engram] 北极星闭环 demo 跑通 ✓')
   } finally {
-    await pool.end()
     await admin.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`)
     await admin.end()
   }

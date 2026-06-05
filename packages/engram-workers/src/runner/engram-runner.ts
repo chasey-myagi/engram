@@ -147,6 +147,14 @@ export class EngramRunner {
   /**
    * 跑一个完整 **live** 闭环 cycle：摄入诸源（级联到收敛）→ 使用上报（Harvester）→ 恒温器一拍 → 首次校准一拍。
    * 四面里的「consume→核验→写回→再校准」一拍走完（对抗面单独调，见 adversarialRound 的 sandbox 说明）。
+   *
+   * **前提（单拍 / source 一次性）**：每个 source 只摄入一次。Distiller 抽完后 claimsForSource 查该 source 经
+   * provenance 关联的**全部** claim 当 batch_appended；同一 source 二次 ingest 会把旧 claim 重新塞回级联、重复触发
+   * Reconciler/Verifier（行为正确但浪费）。多拍调度（去重/水位线）属更外层定时器的事，非本 runner 一拍的职责。
+   *
+   * **不 fail-silent**：runClosedLoop 自身是裸 await —— 控制面两拍的「失效静音」保护落在被调函数内部
+   * （runGovernanceCycle 整轮 try/catch、fitAndMaybeRecalibrate 纯读+受控写）；数据面级联的单点失效落在
+   * EventDispatcher（吞处理器抛错、计 failures、不掀翻级联）。本方法不另加 guard，依赖这两层既有契约。
    */
   async runClosedLoop(input: ClosedLoopInput = {}): Promise<ClosedLoopReport> {
     const ingests: ClosedLoopReport['ingests'] = []
@@ -180,7 +188,7 @@ export class EngramRunner {
         if (event.type !== 'source.ingested') return []
         await runDistiller(this.deps.distiller, event.payload.sourceId)
         const claimIds = await this.claimsForSource(event.payload.sourceId)
-        const pairs = await this.activeContradictsPairs()
+        const pairs = await this.allContradictsPairs()
         const out: EngramEvent[] = []
         if (claimIds.length > 0) {
           out.push({ type: 'batch_appended', payload: { claimIds } })
@@ -245,8 +253,11 @@ export class EngramRunner {
     return rows.map((r) => r.claimId)
   }
 
-  /** 取全库 contradicts 无序对（去重）；Arbiter 据此把 conflict.detected 路由到机判阶梯（其内部只裁 active↔active）。 */
-  private async activeContradictsPairs(): Promise<Array<[string, string]>> {
+  /**
+   * 取**全库** contradicts 无序对（去重；不按状态过滤——故名 all 非 active）。Arbiter 据此把 conflict.detected
+   * 路由到机判阶梯，**active↔active 的过滤由 Arbiter 内部负责**（draft/非活跃对它忠实跳过、不机判不升级）。
+   */
+  private async allContradictsPairs(): Promise<Array<[string, string]>> {
     const edges = await this.deps.db
       .select({ from: schema.relation.fromClaim, to: schema.relation.toClaim })
       .from(schema.relation)

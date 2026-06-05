@@ -2,12 +2,15 @@
  * P4b · EngramRunner 集成 —— 证明北极星模块**真能跑起来**：一个 EngramRunner 实例把五工种 + 控制面 + 红蓝对抗
  * 接成可执行自闭环，全程真测试 DB + 真工种（fake 端口：fake model/embedder/judge/reader，零 bespoke 业务 mock）。
  *
- * 证明四件事：
+ * 证明：
  *   1. 路由表 = 五工种（接线全解自各工种导出的 TRIGGER 常量，非模型）。
  *   2. runClosedLoop（live 一拍）：一源摄入经声明触发级联到收敛（Distiller→Reconciler/Verifier）、claim 真落库；
  *      恒温器(S26)真走一步落 governance_state；首次校准(S28)诚实 below_threshold（<200 样本 ⇒ g 维持 identity）。
- *   3. harvestUsage：report_usage 只命中 Harvester（闭合「使用→升信」f4 的独立门控统计）。
- *   4. adversarialRound（对抗北极星一回合，sandbox）：经 runner 真跑 P4a runRedBlueRound —— 四类题全过 A1 免疫
+ *   3. harvestUsage / runClosedLoop({usage})：report_usage 只命中 Harvester（闭合「使用→升信」f4）。
+ *   4. **runner 真把 Arbiter 接进运行进程**（本 runner 存在的理由）：一对 active 矛盾经 runClosedLoop 被
+ *      wire() 的 arbiter 臂 + allContradictsPairs + arbiterRuntimeFor 路由到 Arbiter 并确定性自裁（正向覆盖）。
+ *   5. runner 级单点失效：一个工种处理器抛错被 EventDispatcher 吞、计 failures、级联不掀翻、读写主干不污染。
+ *   6. adversarialRound（对抗北极星一回合，sandbox）：经 runner 真跑 P4a runRedBlueRound —— 四类题全过 A1 免疫
  *      进被计分 cohort、判分落 redteam_immunity_scores。两条铁律(A1/A3)由 P4a 的 21 测结构性钉死，此处只证 runner 能驱动。
  */
 import { randomUUID } from 'node:crypto'
@@ -22,6 +25,7 @@ import {
   addSource,
   createDb,
   getImmunityScores,
+  getResolvedConflicts,
   makeFakeEmbedder,
   makeFakeEntailmentJudge,
   makeFakeSameFactJudge,
@@ -92,8 +96,23 @@ const stopTurn: FakeAssistantResponse = {
   stopReason: 'stop',
 }
 
-/** 造一个全 fake 端口的 EngramRunner（distiller 脚本注入有界 loop 的产出）。 */
-function buildRunner(distillerScript: FakeAssistantResponse[]): EngramRunner {
+/** 默认 arbiter 运行时工厂：逐对 adjudicate + finish（确定性阶梯定胜者，model 不选边）。 */
+function defaultArbiterRuntimeFor(pairs: Array<[string, string]>) {
+  return makeHarnessPiRuntime(
+    createFakeModel([...pairs.map(([a, b]) => adjudicateTurn(a, b)), finishTurn(), stopTurn]),
+  )
+}
+
+/**
+ * 造一个全 fake 端口的 EngramRunner（distiller 脚本注入有界 loop 的产出）。
+ * arbiterRuntimeFor 可覆盖（spy 记录收到的对 / 注入抛错验 runner 级单点失效）。
+ */
+function buildRunner(
+  distillerScript: FakeAssistantResponse[],
+  arbiterRuntimeFor: (
+    pairs: Array<[string, string]>,
+  ) => ReturnType<typeof makeHarnessPiRuntime> = defaultArbiterRuntimeFor,
+): EngramRunner {
   const distiller: DistillerDeps = {
     db,
     embedder,
@@ -111,10 +130,7 @@ function buildRunner(distillerScript: FakeAssistantResponse[]): EngramRunner {
     verifier,
     reconciler,
     harvester,
-    arbiterRuntimeFor: (pairs) =>
-      makeHarnessPiRuntime(
-        createFakeModel([...pairs.map(([a, b]) => adjudicateTurn(a, b)), finishTurn(), stopTurn]),
-      ),
+    arbiterRuntimeFor,
   })
 }
 
@@ -156,6 +172,77 @@ async function resetRedTeamTables(): Promise<void> {
 function oneOfEachClass(): RedTeamItem[] {
   const classes = ['false', 'contradiction', 'stale', 'near_dup_poison'] as const
   return classes.map((c) => REDTEAM_GENERATION_ITEMS.find((i) => i.redteamClass === c)!)
+}
+
+const DISTILLER_ROLE = 'agent:distiller'
+const ARBITER_ROLE = 'agent:arbiter'
+// HIGH 因子 profile：清 recall floor、让 seed 的 claim 真 active 且可召回（与 choreography 测同款）。
+const WEIGHTS = {
+  authority: 0.3,
+  humanReview: 0.3,
+  entailment: 0.15,
+  indepSupport: 0.15,
+  usageCorrect: 0.1,
+}
+const HIGH = {
+  authority: 0.8,
+  humanReview: 0.8,
+  entailment: 0.8,
+  indepSupport: 0.8,
+  usageCorrect: 0.8,
+}
+
+/** 直接 seed 一条 active、可召回、exact 出处的 S/P/O claim（模拟既有 KB）。 */
+async function seedActiveClaim(opts: {
+  query: string
+  object: string
+  asOf: Date
+}): Promise<string> {
+  const { sourceId } = await addSource(db, {
+    content: `src-${randomUUID()}`,
+    contentHash: randomUUID(),
+    kind: 'structured_spec',
+    authorityScore: 0.5,
+  })
+  const id = randomUUID()
+  await db.insert(schema.claim).values({
+    id,
+    claimText: opts.query,
+    subject: 'k',
+    predicate: 'p',
+    object: opts.object,
+    status: 'active',
+    confidence: 0.8,
+    confidenceRaw: 0.8,
+    confidenceFactors: {
+      factors: { ...HIGH, ageDays: 0, activeContradicts: 0, staleDecay: 1, conflictDecay: 1 },
+      weights: WEIGHTS,
+      calibrationVersion: 'identity',
+    },
+    lineageId: randomUUID(),
+    asOf: opts.asOf,
+    createdBy: DISTILLER_ROLE,
+    embedding: await embedder.embed(opts.query),
+    embeddingVersion: embedder.version,
+  })
+  await db
+    .insert(schema.claimProvenance)
+    .values({ id: randomUUID(), claimId: id, sourceId, locator: 'L1', relevance: 'exact' })
+  return id
+}
+
+/** seed 一对 active 矛盾 claim（同 query → recall 双返）+ 一条 contradicts 边。a 较新 ⇒ ③ recency 唯一胜者。 */
+async function seedActivePair(opts: {
+  query: string
+  aAsOf: Date
+  bAsOf: Date
+}): Promise<{ a: string; b: string }> {
+  const a = await seedActiveClaim({ query: opts.query, object: 'A', asOf: opts.aAsOf })
+  const b = await seedActiveClaim({ query: opts.query, object: 'B', asOf: opts.bAsOf })
+  await db
+    .insert(schema.relation)
+    .values({ id: randomUUID(), fromClaim: a, toClaim: b, type: 'contradicts' })
+  return { a, b }
 }
 
 beforeAll(async () => {
@@ -235,6 +322,121 @@ describe('P4b · EngramRunner 把北极星接成可跑自闭环', () => {
       expect(Object.keys(usage.firedByWorker)).toEqual(['harvester'])
       expect(usage.firedByWorker.harvester).toBe(1)
       expect(usage.failures).toBe(0)
+    })
+
+    it('③b runClosedLoop({usage})：usageHarvest 非空、单拍内 Harvester 真被触发（整合分支覆盖）', async () => {
+      // 先有一条 active claim（seed）可供上报；再在**同一拍** runClosedLoop 里走 usage 分支。
+      const a = await seedActiveClaim({
+        query: 'kpZ throughput',
+        object: 'A',
+        asOf: new Date('2025-06-01T00:00:00.000Z'),
+      })
+      await reportUsage(db, a, 'adopted', { taskId: 'u1', byRole: 'agent:consumer-x' })
+      await reportUsage(db, a, 'adopted', { taskId: 'u2', byRole: 'agent:consumer-y' })
+
+      const runner = buildRunner(oneClaimScript())
+      const report = await runner.runClosedLoop({ usage: [a] })
+
+      // usageHarvest 非空分支（engram-runner.ts:157-159）真被走到，且只命中 Harvester。
+      expect(report.usageHarvest).not.toBeNull()
+      expect(report.usageHarvest!.result.firedByWorker.harvester).toBe(1)
+      expect(report.usageHarvest!.result.failures).toBe(0)
+      // 控制面两拍仍走完。
+      expect(report.governance.ran).toBe(true)
+      expect(report.recalibrate.fitted).toBe(false)
+    })
+
+    it('④ runner 真把 Arbiter 接进运行进程：一对 active 矛盾经 runClosedLoop 被路由到 Arbiter 并确定性裁决', async () => {
+      // 既有 KB：一对 active 矛盾 claim（a 较新 → ③ recency 唯一胜者）。这是 runner 存在的理由——把 Arbiter 接进跑起来的进程。
+      const { a, b } = await seedActivePair({
+        query: 'kpA throughput',
+        aAsOf: new Date('2025-06-01T00:00:00.000Z'),
+        bAsOf: new Date('2025-01-01T00:00:00.000Z'),
+      })
+      // spy：记录 arbiterRuntimeFor 收到的对（证明 wire() 的 arbiter 臂 + allContradictsPairs + 工厂调用真跑）。
+      const seenPairs: Array<Array<[string, string]>> = []
+      const runner = buildRunner(
+        // distiller 提交一条**不矛盾**的新 claim（驱动 distiller/reconciler/verifier 全级联），不引入新 contradicts 边。
+        [
+          commitTurn({
+            claimText: 'sku-x spec 1',
+            subject: 'sku-x',
+            predicate: 'spec',
+            object: '1',
+            locator: 'L9',
+          }),
+          finishTurn(),
+          stopTurn,
+        ],
+        (pairs) => {
+          seenPairs.push(pairs)
+          return defaultArbiterRuntimeFor(pairs)
+        },
+      )
+      const sourceId = await aSource()
+      const report = await runner.runClosedLoop({ sources: [sourceId] })
+      const cascade = report.ingests[0]!.result
+
+      // 全级联触达（含 Arbiter，正向覆盖——非此前的 toBeUndefined 负判）。
+      expect(cascade.failures).toBe(0)
+      expect(cascade.firedByWorker.distiller).toBe(1)
+      expect(cascade.firedByWorker.reconciler).toBe(1)
+      expect(cascade.firedByWorker.verifier).toBe(1)
+      expect(cascade.firedByWorker.arbiter).toBe(1)
+      // 工厂确实收到了那对待裁矛盾（allContradictsPairs → conflict.detected → arbiterRuntimeFor）。
+      expect(seenPairs.flat()).toContainEqual([a, b])
+      // Arbiter 确定性自裁（③ recency 定胜者 = a，model 不选边）；红线#2：不改 status，双方仍 active。
+      const resolved = await getResolvedConflicts(db)
+      expect(resolved).toHaveLength(1)
+      expect(resolved[0]!.payload.winnerId).toBe(a)
+      expect(resolved[0]!.payload.byRole).toBe(ARBITER_ROLE)
+      const statuses = await db
+        .select({ id: schema.claim.id, s: schema.claim.status })
+        .from(schema.claim)
+      expect(statuses.find((r) => r.id === a)!.s).toBe('active')
+      expect(statuses.find((r) => r.id === b)!.s).toBe('active')
+    })
+
+    it('⑤ runner 级单点失效：一个工种处理器抛错被吞、计 failures、级联不掀翻、其余工种照常 + claim 仍落库', async () => {
+      // 注入一个**会抛错**的 arbiter 工厂（模拟该工种被禁用/崩了）；备一对 active 矛盾让 arbiter 臂必被触发。
+      await seedActivePair({
+        query: 'kpB throughput',
+        aAsOf: new Date('2025-06-01T00:00:00.000Z'),
+        bAsOf: new Date('2025-01-01T00:00:00.000Z'),
+      })
+      const runner = buildRunner(
+        [
+          commitTurn({
+            claimText: 'sku-y spec 2',
+            subject: 'sku-y',
+            predicate: 'spec',
+            object: '2',
+            locator: 'L9',
+          }),
+          finishTurn(),
+          stopTurn,
+        ],
+        () => {
+          throw new Error('arbiter runtime down (injected single-point failure)')
+        },
+      )
+      const sourceId = await aSource()
+      // runClosedLoop 不应抛（EventDispatcher 吞掉处理器抛错）。
+      const report = await runner.runClosedLoop({ sources: [sourceId] })
+      const cascade = report.ingests[0]!.result
+
+      // 单点失效被计、级联未掀翻：distiller/reconciler/verifier 照常触达。
+      expect(cascade.failures).toBeGreaterThanOrEqual(1)
+      expect(cascade.firedByWorker.distiller).toBe(1)
+      expect(cascade.firedByWorker.reconciler).toBe(1)
+      expect(cascade.firedByWorker.verifier).toBe(1)
+      // 读写主干不受污染：distiller 抽的那条新 claim 仍真落库（sku-y）。
+      const seeded = await db.select({ id: schema.claim.id }).from(schema.claim)
+      expect(seeded.length).toBeGreaterThanOrEqual(3) // 2 seeded 矛盾对 + ≥1 新抽 claim
+      // arbiter 抛错没产出任何裁决（被吞）。
+      expect(await getResolvedConflicts(db)).toHaveLength(0)
+      // 控制面两拍仍走完（runner 一拍完整）。
+      expect(report.governance.ran).toBe(true)
     })
   })
 
