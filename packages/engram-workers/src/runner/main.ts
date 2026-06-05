@@ -32,6 +32,7 @@ import {
 import { makeFakeSourceReader } from '../read/fake-source-reader.js'
 import { makeHarnessPiRuntime } from '../runtime/harness-pi.js'
 import { REDTEAM_GENERATION_ITEMS } from '../eval/redteam.gen.js'
+import { truncateEvalWorkTablesSql } from '../eval/work-tables.js'
 import { EngramRunner } from './engram-runner.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
@@ -144,9 +145,7 @@ async function main(): Promise<void> {
 
       // ── 红蓝对抗北极星一回合（sandbox）。 ──
       const resetWorkTables = async (): Promise<void> => {
-        await pool.query(
-          'TRUNCATE source, claim, claim_provenance, relation, claim_verification, metrics_events, l5_candidates, golden_questions, promotion_audit CASCADE',
-        )
+        await pool.query(truncateEvalWorkTablesSql())
       }
       const round = await runner.adversarialRound({
         generationVersion: `demo-gen-${randomUUID().slice(0, 8)}`,

@@ -45,6 +45,7 @@ import { type VerifierDeps } from '../../verifier.js'
 import { makeFakeSourceReader } from '../../read/fake-source-reader.js'
 import { makeHarnessPiRuntime } from '../../runtime/harness-pi.js'
 import { REDTEAM_GENERATION_ITEMS } from '../../eval/redteam.gen.js'
+import { truncateEvalWorkTablesSql } from '../../eval/work-tables.js'
 import { EngramRunner } from '../engram-runner.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
@@ -160,9 +161,7 @@ function oneClaimScript(): FakeAssistantResponse[] {
 }
 
 async function resetWorkTables(): Promise<void> {
-  await pool.query(
-    'TRUNCATE source, claim, claim_provenance, relation, claim_verification, metrics_events, l5_candidates, golden_questions, promotion_audit CASCADE',
-  )
+  await pool.query(truncateEvalWorkTablesSql())
 }
 async function resetRedTeamTables(): Promise<void> {
   await pool.query(
@@ -248,10 +247,12 @@ async function seedActivePair(opts: {
 beforeAll(async () => {
   testDbName = `engram_test_${randomUUID().replace(/-/g, '')}`
   admin = new pg.Pool({ connectionString: DATABASE_URL, max: 2 })
+  admin.on('error', () => {})
   await admin.query(`CREATE DATABASE ${testDbName}`)
   const url = new URL(DATABASE_URL)
   url.pathname = `/${testDbName}`
   pool = new pg.Pool({ connectionString: url.toString(), max: 4 })
+  pool.on('error', () => {}) // 吞 teardown 期 DROP ... WITH(FORCE) 终止连接的 57P01（测试已结束、连接被服务端杀属预期）
   db = createDb(pool)
   await migrate(db, { migrationsFolder })
 })

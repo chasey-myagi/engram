@@ -60,10 +60,12 @@ const WEIGHTS = {
 beforeAll(async () => {
   testDbName = `engram_test_${randomUUID().replace(/-/g, '')}`
   admin = new pg.Pool({ connectionString: DATABASE_URL, max: 2 })
+  admin.on('error', () => {})
   await admin.query(`CREATE DATABASE ${testDbName}`)
   const url = new URL(DATABASE_URL)
   url.pathname = `/${testDbName}`
   pool = new pg.Pool({ connectionString: url.toString(), max: 4 })
+  pool.on('error', () => {}) // 吞 teardown 期 DROP ... WITH(FORCE) 终止连接的 57P01（测试已结束、连接被服务端杀属预期）
   db = createDb(pool)
   await migrate(db, { migrationsFolder })
 })

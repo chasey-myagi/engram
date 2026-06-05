@@ -47,6 +47,7 @@ import {
 
 import { runRedBlueRound, escalateMiss, type RoundResult } from '../red-blue-round.js'
 import { REDTEAM_GENERATION_ITEMS } from '../redteam.gen.js'
+import { truncateEvalWorkTablesSql } from '../work-tables.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
 const migrationsFolder = join(
@@ -67,9 +68,7 @@ const embedder: Embedder = makeFakeEmbedder()
 
 /** 清所有可被注入污染的工作表（红队世代/分表单独清，因 freeze 是 append-only 跨 item 持久）。 */
 async function resetWorkTables(): Promise<void> {
-  await pool.query(
-    'TRUNCATE source, claim, claim_provenance, relation, claim_verification, metrics_events, l5_candidates, golden_questions, promotion_audit CASCADE',
-  )
+  await pool.query(truncateEvalWorkTablesSql())
 }
 
 /** 清红队世代/免疫分/纵向表（每个回合用独立 version，避免 freeze 撞名）。 */
@@ -82,10 +81,12 @@ async function resetRedTeamTables(): Promise<void> {
 beforeAll(async () => {
   testDbName = `engram_test_${randomUUID().replace(/-/g, '')}`
   admin = new pg.Pool({ connectionString: DATABASE_URL, max: 2 })
+  admin.on('error', () => {})
   await admin.query(`CREATE DATABASE ${testDbName}`)
   const url = new URL(DATABASE_URL)
   url.pathname = `/${testDbName}`
   pool = new pg.Pool({ connectionString: url.toString(), max: 4 })
+  pool.on('error', () => {}) // 吞 teardown 期 DROP ... WITH(FORCE) 终止连接的 57P01（测试已结束、连接被服务端杀属预期）
   db = createDb(pool)
   await migrate(db, { migrationsFolder })
 })
@@ -428,6 +429,40 @@ describe('P4a · 红蓝对抗回合（runRedBlueRound：真 DB 驱动真工种�
       const esc = escalateMiss(noNum, 'v2', new Date('2026-03-15T00:00:00.000Z'))
       expect(esc.id).toBe('no-number::esc:v2') // 仅 id 升代血缘
       expect({ ...esc, id: noNum.id }).toEqual(noNum) // 其余字段逐字段原样（无数字可收窄 ⇒ 不改值，仍是 miss）
+    })
+
+    it('escalateMiss false 类紧 margin 守卫：中点撞 claimLb/evidLb（相邻整数）→ 原样升代、不假收窄', () => {
+      // claimLb=4 / evidLb=3 相邻：harder=round((4+3)/2)=round(3.5)=4=claimLb ⇒ 守卫 (harder!==claimLb) 兜住、return base。
+      // 现存语料三条 false 的 margin 都很宽(9/0,300/100,99/42)，这支永不被真 item 触达——这里直接钉死兜底。
+      const tight: RedTeamItem = {
+        id: 'tight-margin',
+        redteamClass: 'false',
+        claimText: 'metric is at least 4 units',
+        object: 'at least 4',
+        evidence: 'metric is at least 3 units',
+        sourceKind: 'structured_spec',
+      }
+      const esc = escalateMiss(tight, 'v3', new Date('2026-03-15T00:00:00.000Z'))
+      expect(esc.id).toBe('tight-margin::esc:v3')
+      // 中点落在 claimLb 上 ⇒ 不收窄（值原样），只换 id 血缘——仍是 miss、绝不静默退化成非 false 探针。
+      expect(esc.claimText).toBe(tight.claimText)
+      expect(esc.object).toBe(tight.object)
+    })
+
+    it('escalateMiss replaceNum 词边界：claimLb 是更大数的子串时只换独立 token、不误伤子串', () => {
+      // claimLb=5，claimText 同时含 '5'（独立 token）与 '150'（含子串 5）。收窄须只改独立的 5，绝不把 150 改成 1<to>0。
+      // evidLb=9 ⇒ harder=round((5+9)/2)=7。期望：独立 '5'→'7'，'150' 原样。
+      const substr: RedTeamItem = {
+        id: 'substr-collide',
+        redteamClass: 'false',
+        claimText: 'throughput is at least 5 of 150 units',
+        object: 'at least 5',
+        evidence: 'throughput is at least 9 of 150 units',
+        sourceKind: 'structured_spec',
+      }
+      const esc = escalateMiss(substr, 'v4', new Date('2026-03-15T00:00:00.000Z'))
+      expect(esc.claimText).toBe('throughput is at least 7 of 150 units') // 独立 5→7；150 原样（子串没被误伤）
+      expect(esc.object).toBe('at least 7')
     })
 
     it('autoFreeze=false 且世代已预冻结 → 回合正常跑通，不二次 freeze（不撞名抛）', async () => {

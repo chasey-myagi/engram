@@ -256,6 +256,10 @@ export class EngramRunner {
   /**
    * 取**全库** contradicts 无序对（去重；不按状态过滤——故名 all 非 active）。Arbiter 据此把 conflict.detected
    * 路由到机判阶梯，**active↔active 的过滤由 Arbiter 内部负责**（draft/非活跃对它忠实跳过、不机判不升级）。
+   *
+   * TODO(吞吐, 多拍调度落地时)：每次 ingest 都全表重扫 relation 并重发所有 contradicts 对——大库下是 O(全部边)/拍。
+   * Arbiter 的 selectPairs 已去重已裁对（幂等、不会错判），故现在只是浪费不是错。增量触发（watermark / Distiller
+   * 直接回报本轮新写的 contradicts 边）属外层定时器/多拍调度的事，见 runClosedLoop 的「单拍 / source 一次性」前提。
    */
   private async allContradictsPairs(): Promise<Array<[string, string]>> {
     const edges = await this.deps.db
