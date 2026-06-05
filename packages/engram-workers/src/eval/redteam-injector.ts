@@ -270,19 +270,23 @@ async function ageClaimInPlace(db: DB, claimId: string, asOf: Date): Promise<voi
 async function runFalse(deps: RedTeamRunDeps, item: RedTeamItem): Promise<InjectionOutcome> {
   const { db } = deps
   const { claimId } = await injectClaim(deps, item)
-  // 晋升 active（桩 entailmentPass：晋升不是免疫断言点，免疫点是 Verifier 把幻觉收紧）。
-  try {
-    await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
-  } catch {
-    /* 因子不足留 draft：Verifier 仍会用 oracle 实算，draft 上 fail 留影子区（不晋升）→ 见下 detected 口径 */
+  // 晋升 active（桩 entailmentPass：晋升不是免疫断言点，免疫点是 Verifier 把**活跃**幻觉收紧到 flagged）。
+  // **断言晋升真成功**：若 D2 floor 耦合（auth/indepSupport/PROMOTE_FLOOR 常量）变动让它停在 draft，则**大声失败**——
+  // 而不是把「judge 说 fail 但停 draft」当弱检出蒙混过去（gate#1 test-review/linus：draft 兜底会掩盖晋升路径回归）。
+  await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
+  const promoted = await statusOf(db, claimId)
+  if (promoted !== 'active') {
+    throw new Error(
+      `runFalse: claim ${claimId} failed to promote to active (got '${promoted}') — D2 floor coupling broke; ` +
+        `the false-class immune point requires an ACTIVE hallucination for the Verifier to flag.`,
+    )
   }
   const judge = makeBoundEntailmentOracle()
   const res = await runVerifier({ db, judge }, { claimIds: [claimId], maxClaims: 50 })
   const finalStatus = await statusOf(db, claimId)
-  // 逮到 = entailment fail 被真 Verifier 判出且把 active 幻觉收紧到 flagged（draft 上 fail 不晋升也算逮到：拒入库）。
+  // 逮到 = 真 Verifier 用 oracle 实算 fail 并把活跃幻觉 active→flagged（入 Verifier 前已断言是 active，故无 draft 弱判据）。
   const outcome = res.outcomes.find((o) => o.claimId === claimId)
-  const failJudged = outcome?.entailment === 'fail'
-  const detected = finalStatus === 'flagged' || (failJudged && finalStatus === 'draft')
+  const detected = finalStatus === 'flagged'
   return {
     itemId: item.id,
     redteamClass: 'false',

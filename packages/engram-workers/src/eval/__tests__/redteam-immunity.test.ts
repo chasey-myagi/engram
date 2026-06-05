@@ -180,16 +180,22 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
       }
     })
 
-    it('回归护栏：不晋升的「永远 pass / 不写边」工种会让对应类检出率掉到 0（证明断言真盯工种）', async () => {
-      // 反证：把 false 类的 claim 注入后**不跑 Verifier**（模拟 Verifier 离线/漏检）→ claim 仍 active、未被 flag。
+    it('回归护栏（真反证）：把 false claim **晋升到 active** 后**不跑 Verifier** → 仍 active、未被 flag —— flag 由工种驱动而非 append/transition', async () => {
+      // 旧版断言「draft ≠ flagged」是**恒真**的（A.4 无 draft→flagged 合法边），删掉 Verifier 也照样绿、根本不盯工种。
+      // 真反证：必须先把幻觉**晋升到 active**（一条本可被 Verifier 收紧的活跃 claim），再证明「不跑 Verifier 就不会被 flag」。
       await resetWorkTables()
       const item = REDTEAM_GENERATION_ITEMS.find((i) => i.redteamClass === 'false')!
-      const src = await addSource(db, {
-        content: item.evidence,
-        contentHash: randomUUID(),
-        kind: item.sourceKind as schema.SourceKind,
-        authorityScore: 0.6,
-      })
+      // 与 runFalse 同款：挂 4 条 authority=1.0 独立 exact 源让 base 过 0.5 晋升门。
+      const provs: { sourceId: string; locator: string; relevance: 'exact' }[] = []
+      for (let i = 0; i < 4; i++) {
+        const s = await addSource(db, {
+          content: `${item.evidence} #neg-${i}`,
+          contentHash: randomUUID(),
+          kind: item.sourceKind as schema.SourceKind,
+          authorityScore: 1.0,
+        })
+        provs.push({ sourceId: s.sourceId, locator: `neg:${i}`, relevance: 'exact' })
+      }
       const { claimId } = await appendClaim(
         db,
         embedder,
@@ -199,14 +205,25 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
           ...(item.predicate !== undefined ? { predicate: item.predicate } : {}),
           ...(item.object !== undefined ? { object: item.object } : {}),
         },
-        [{ sourceId: src.sourceId, locator: 'no-verifier', relevance: 'exact' }],
+        provs,
       )
+      // 晋升到 active（桩 entailmentPass）——一条**活跃**幻觉，本可被 Verifier 收紧到 flagged。
+      await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
+      const promoted = (
+        await db
+          .select({ s: schema.claim.status })
+          .from(schema.claim)
+          .where(eq(schema.claim.id, claimId))
+      )[0]!.s
+      expect(promoted).toBe('active') // 晋升真成功（否则下面的反证空过）
+
+      // **不跑 Verifier** → 活跃幻觉无人收紧 → 仍 active、未被 flag。
+      // 这条在「删掉 Verifier 检出路径」时仍 active（正确反证）；在「append/transition 误 flag」时会 fail（真盯）。
       const [row] = await db
         .select({ s: schema.claim.status })
         .from(schema.claim)
         .where(eq(schema.claim.id, claimId))
-      // 没有 Verifier 介入 → 幻觉留在库里（draft，未被 flag）。免疫反应=工种驱动，缺工种就没免疫。
-      expect(row!.s).not.toBe('flagged')
+      expect(row!.s).toBe('active') // 仍 active、绝非 flagged —— 免疫=工种驱动，缺工种就没免疫
     })
   })
 
@@ -248,16 +265,18 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
       expect(byClass).toEqual(new Set(['false', 'contradiction', 'stale', 'near_dup_poison']))
     })
 
-    it('维度 append-only：再记一次同类不覆盖、各留一行（离线聚合取最新）', async () => {
-      const before = (await getImmunityScores(db, 'rt-dim-test', 'false')).length
+    it('维度 append-only：再记一次同类不覆盖、各留一行，且**旧行值原样保留**（不被新 record 改写）', async () => {
+      const beforeRows = await getImmunityScores(db, 'rt-dim-test', 'false')
+      const priorFirst = beforeRows[0]! // 最早一行（asc(createdAt,id) → 始终居首）
       await recordImmunityScore(db, {
         generationVersion: 'rt-dim-test',
         redteamClass: 'false',
-        injected: 3,
-        detected: 3,
+        injected: 99, // 故意用不同值：若新 record 误改旧行，下面的 toEqual 会逮到
+        detected: 1,
       })
-      const after = (await getImmunityScores(db, 'rt-dim-test', 'false')).length
-      expect(after).toBe(before + 1) // append-only，不覆盖
+      const afterRows = await getImmunityScores(db, 'rt-dim-test', 'false')
+      expect(afterRows.length).toBe(beforeRows.length + 1) // append-only，不覆盖
+      expect(afterRows[0]).toEqual(priorFirst) // 旧行逐字段原样保留（detected/injected/rate/时间…全不变）
     })
   })
 
