@@ -463,6 +463,45 @@ export const redteamImmunityScores = pgTable(
   (t) => [index('idx_redteam_scores_gen_class').on(t.generationVersion, t.redteamClass)],
 )
 
+/**
+ * dimension_events：L3 系统维度的 **append-only 度量脊柱**（S30，A.9 stories 44/47/52，设计稿 FIG 10/10a 八维）。
+ * 一行 = 一次 run 在某个**维度**上的一个读数（dimension + value + 诊断 payload + 落库时刻）。
+ *
+ * 为何独立新表而非往 metrics_events 加 kind：metrics_event_kind 是**冻结枚举**（红线#4），加值即违红线；
+ * 且维度天然**属于某次评测 run**（runId 锚），与 redteam_immunity_scores「分总是某个世代的分」、calibration_map
+ * 「分总是某个 g 版本的分」同构。故沿 governance_state / calibration_map / redteam_* 的**版本化 append-only 式样**，
+ * 把维度落进专表 —— 既是「metrics 通道」的精神延续（只记事件、离线聚合），又零触碰冻结枚举。
+ * dimension 用 **text 标签**（与 redteam_class 同款，纯文本、内核不解释），故无需为七维新增任何枚举。
+ *
+ * **绝不进任何在线判据/校准 g/纵向计分**：拟合器 collectUsageCalibrationSamples 只读 usage_truth，**从不**读本表。
+ * 时间序列（ΔECE↓ / Δcoverage↑ 可画曲线）= 按 (dimension, created_at) 升序读出的 value 序列（getDimensionSeries）。
+ * raw 事件**绝不可变**：重跑同一 event log 的离线聚合是确定性的（同输入 → 同维度值），不改写历史行。
+ */
+export const dimensionEvents = pgTable(
+  'dimension_events',
+  {
+    id: uuid('id').primaryKey(),
+    // 一次评测 run 的标识（同 run 的七维读数共享它）。纵向 = 跨 run 按 created_at 排。
+    runId: text('run_id').notNull(),
+    // 维度标签：'precision_at_k' | 'recall_at_k' | 'grounding' | 'ece' | 'coverage' | 'staleness' | 'immunity'
+    //（纯文本，内核不解释；A3 边界：immunity 仅被报告、绝不喂 g/纵向计分，与 S29 同款）。
+    dimension: text('dimension').notNull(),
+    // 该维度本次 run 的标量读数 ∈ [0,1]（P/R@k/grounding/coverage 越高越好；ece/staleness 越低越好；具体语义见 eval 层）。
+    value: doublePrecision('value').notNull(),
+    // 诊断负载（样本数 / k / 命中明细 / 来源世代等），离线分析用，**不进任何计分**。
+    payload: jsonb('payload')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdBy: text('created_by').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // 时间序列按 (dimension, created_at) 升序扫（画 ΔECE↓ / Δcoverage↑ 曲线）；按 run 取一次 run 的全维。
+  (t) => [
+    index('idx_dimension_events_dim_created').on(t.dimension, t.createdAt),
+    index('idx_dimension_events_run').on(t.runId),
+  ],
+)
+
 export type SourceKind = (typeof sourceKind.enumValues)[number]
 export type ClaimStatus = (typeof claimStatus.enumValues)[number]
 export type RelationType = (typeof relationType.enumValues)[number]

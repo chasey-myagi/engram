@@ -185,6 +185,34 @@ export {
   type RedTeamGeneration,
   type ImmunityScore,
 } from './spi/redteam-generation.js'
+// S30 · L3 系统维度（substrate-ready 七维）的 append-only 度量脊柱 + 离线幂等聚合 + 时间序列读路径。
+export {
+  recordDimension,
+  getDimensionEvents,
+  getDimensionSeries,
+  DIMENSION,
+  DIMENSION_NAMES,
+  type DimensionName,
+  type DimensionEvent,
+  type RecordDimensionInput,
+  type DimensionSeriesPoint,
+} from './spi/dimension-events.js'
+export {
+  computeSystemDimensions,
+  runSystemDimensions,
+  runGoldenItem,
+  aggregateLatest,
+  L3_GOLDEN,
+  L3_GOLDEN_NAMESPACE,
+  L3_GOLDEN_MIN_SIMILARITY,
+  DEFAULT_K,
+  RELOCATED_TO_S31,
+  type SystemGoldenItem,
+  type GoldenObservation,
+  type SystemDimensions,
+  type ComputeOptions,
+  type RunReport,
+} from './eval/system-dimensions.js'
 export {
   transitionClaim,
   PROMOTE_CONFIDENCE_FLOOR,
