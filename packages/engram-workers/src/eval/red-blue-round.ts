@@ -202,8 +202,11 @@ export function escalateMiss(item: RedTeamItem, nextVersion: string, now: Date):
     const m = s.match(/(\d+(?:\.\d+)?)/)
     return m ? parseFloat(m[1]!) : null
   }
-  const replaceNum = (s: string, from: number, to: number): string =>
-    s.replace(String(from), String(to))
+  // 只替换**作为独立数字 token** 的那一处（前后非数字），杜绝把 '5' 错改进 '150'、'3' 错改进 '13' 等子串碰撞。
+  const replaceNum = (s: string, from: number, to: number): string => {
+    const escaped = String(from).replace(/[.]/g, '\\.')
+    return s.replace(new RegExp(`(?<!\\d)${escaped}(?!\\d)`), String(to))
+  }
 
   const base: RedTeamItem = { ...item, id: escId }
 

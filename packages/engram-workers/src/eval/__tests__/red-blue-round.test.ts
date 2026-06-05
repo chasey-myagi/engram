@@ -415,4 +415,74 @@ describe('P4a · 红蓝对抗回合（runRedBlueRound：真 DB 驱动真工种�
       ).rejects.toThrow()
     })
   })
+
+  describe('错误路径 / 兜底分支', () => {
+    it('escalateMiss 兜底：无可解析数字的 miss item → 原样升代（只换 id 血缘，其余字段逐字段不变）', () => {
+      const noNum: RedTeamItem = {
+        id: 'no-number',
+        redteamClass: 'false',
+        claimText: 'this claim has no digits at all',
+        evidence: 'and the evidence has none either',
+        sourceKind: 'structured_spec',
+      }
+      const esc = escalateMiss(noNum, 'v2', new Date('2026-03-15T00:00:00.000Z'))
+      expect(esc.id).toBe('no-number::esc:v2') // 仅 id 升代血缘
+      expect({ ...esc, id: noNum.id }).toEqual(noNum) // 其余字段逐字段原样（无数字可收窄 ⇒ 不改值，仍是 miss）
+    })
+
+    it('autoFreeze=false 且世代已预冻结 → 回合正常跑通，不二次 freeze（不撞名抛）', async () => {
+      await resetRedTeamTables()
+      const items = [oneOfEachClass()[0]!] // 一条干净 false
+      await freezeRedTeamGeneration(db, {
+        version: 'rb-prefrozen',
+        items,
+        reason: 'pre-frozen by caller',
+      })
+      const res = await runRedBlueRound(
+        { db, embedder },
+        { generationVersion: 'rb-prefrozen', items, resetWorkTables, autoFreeze: false },
+      )
+      expect(res.scoredItemIds.length).toBeGreaterThanOrEqual(1) // 跑通（未因二次 freeze 撞名抛）
+      expect(await getRedTeamGeneration(db, 'rb-prefrozen')).not.toBeNull()
+    })
+
+    it('autoFreeze=false 且世代未预冻结 → 在任何蓝队注入**之前**快速失败（claim 表仍空旁证未白跑）', async () => {
+      await resetRedTeamTables()
+      await resetWorkTables()
+      await expect(
+        runRedBlueRound(
+          { db, embedder },
+          {
+            generationVersion: 'rb-never-frozen',
+            items: [oneOfEachClass()[0]!],
+            resetWorkTables,
+            autoFreeze: false,
+          },
+        ),
+      ).rejects.toThrow(/not pre-frozen/)
+      // 快速失败发生在 ②③ 注入之前 ⇒ claim 表仍空（没白跑蓝队才 FK 炸）。
+      expect((await db.select().from(schema.claim)).length).toBe(0)
+    })
+
+    it('空 items → 拒（一个回合至少跑 1 条对抗 item）', async () => {
+      await expect(
+        runRedBlueRound(
+          { db, embedder },
+          { generationVersion: 'rb-empty', items: [], resetWorkTables },
+        ),
+      ).rejects.toThrow(/>=1/)
+    })
+
+    it('同一 generationVersion 跑两次 → 第二次撞名抛（世代 append-only、纵向锚不可静默重写）', async () => {
+      await resetRedTeamTables()
+      const items = [oneOfEachClass()[0]!]
+      await runRedBlueRound(
+        { db, embedder },
+        { generationVersion: 'rb-dup', items, resetWorkTables },
+      )
+      await expect(
+        runRedBlueRound({ db, embedder }, { generationVersion: 'rb-dup', items, resetWorkTables }),
+      ).rejects.toThrow() // freezeRedTeamGeneration UNIQUE 撞名 → 世代不可静默重写
+    })
+  })
 })
