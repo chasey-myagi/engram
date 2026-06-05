@@ -213,6 +213,48 @@ export {
   type ComputeOptions,
   type RunReport,
 } from './eval/system-dimensions.js'
+// S31 · 归因脊柱（P3 门）：单环失败归因——任一已落库失败确定性追溯回恰好一个 loop/工种（确定性 + 单环优先级表）。
+export {
+  attributeFailure,
+  loopForRedTeamClass,
+  claimCreatedBy,
+  lineageEdges,
+  RESPONSIBLE_LOOP,
+  RESPONSIBLE_LOOPS,
+  PRECEDENCE,
+  type ResponsibleLoop,
+  type FailureKind,
+  type FailureInput,
+  type Attribution,
+} from './eval/attribution-spine.js'
+// S31 · 纵向冻结-golden 同卷复考（第⑧维，S30 迁来）：跨 release append-only ΔECE↓/Δcoverage↑ + 内/中/外三环 + A3 边界。
+export {
+  recordRecompete,
+  runRecompeteSnapshot,
+  getRecompeteSeries,
+  getRecompeteEvents,
+  RECOMPETE_DIMENSIONS,
+  RING,
+  RINGS,
+  FROZEN_GOLDEN_VERSION,
+  type RecompeteDimension,
+  type Ring,
+  type RecompeteEvent,
+  type RecordRecompeteInput,
+  type RecompeteReport,
+  type RunRecompeteOptions,
+  type RecompeteSeriesPoint,
+} from './eval/longitudinal-recompete.js'
+// S31 · L5 → 归因脊柱迁移「长出了知识」：曾零召回的 L5 题变可答（recall≥1 + 人确认）→ append-only 迁出 L5。
+export {
+  migrateL5IfGrew,
+  getKnowledgeGrewEvents,
+  isMigratedOutOfL5,
+  liveL5Questions,
+  type KnowledgeGrewEvent,
+  type MigrateL5Options,
+  type MigrateL5Result,
+} from './eval/l5-migration.js'
 export {
   transitionClaim,
   PROMOTE_CONFIDENCE_FLOOR,

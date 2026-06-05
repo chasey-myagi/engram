@@ -502,6 +502,94 @@ export const dimensionEvents = pgTable(
   ],
 )
 
+/**
+ * recompete_events：**第⑧维「纵向越用越好」的 append-only 度量脊柱**（S31，A.9 stories 47/49/51，设计稿 FIG 10/10a 八维
+ * 第⑧维 + FIG「外环·release/纵向」）。S30 把第⑧维**刻意迁到 S31**（其生产者是冻结 golden 同卷复考），此表即落它。
+ *
+ * 一行 = 一次 release 快照在**冻结 golden 同卷**上重考算出的一个**维度读数 + 相对上一快照的 Δ**：
+ *   - frozenGoldenVersion：复考所对的**冻结 golden 版本**（同版本 ⇒ 同题 ⇒ 跨 release 可比；防「题变易」冒充「系统变好」）。
+ *   - releaseSnapshot：本次复考的 release 标识（T0/T1/T2…，纵向曲线的 x 轴）。
+ *   - dimension：复考的维度，**只取 'ece' / 'coverage'**（与 S30 DIMENSION 同定义、跨 release 可比）。**A3 红线**：
+ *     绝不取 ELO/胜负率/reward —— 纵向 Δ 只由 ECE/coverage 等八维量构成（结构性边界：本表无 reward 列、写者拒非白名单维度）。
+ *   - value：本快照该维的标量读数 ∈ [0,1]。
+ *   - delta：相对**上一 release 快照同维**的差（ECE 取 prev−curr=「↓为正」即改善量；coverage 取 curr−prev=「↑为正」）。
+ *     首个快照无前序 ⇒ delta=null（基线）。delta 同样 append-only：**绝不回改**任一历史快照（重考新 release 只追新行）。
+ *   - ring：三环嵌套（设计稿 FIG）中本读数属哪一环——'inner'（秒级实时消费用当前 g 改召回值）/ 'mid'（分时级校准
+ *     回灌重拟 g）/ 'outer'（release 纵向：冻结 golden 同卷复考）。纵向曲线的承重产线是 outer 环。
+ *
+ * 沿 dimension_events / redteam_immunity_scores 的版本化 append-only 式样，独立**新表**、零触碰冻结枚举（红线#4）；
+ * dimension/ring 用 **text 标签**（内核不解释，与 redteam_class 同款）。**绝不进任何在线判据/校准 g**（拟合器只读
+ * usage_truth，从不读本表）。纵向曲线（ΔECE↓ / Δcoverage↑）= 按 (frozenGoldenVersion, dimension, created_at) 升序读出。
+ */
+export const recompeteEvents = pgTable(
+  'recompete_events',
+  {
+    id: uuid('id').primaryKey(),
+    // 复考所对的**冻结 golden 版本**（跨 release 可比的锚：同版本 ⇒ 同题）。
+    frozenGoldenVersion: text('frozen_golden_version').notNull(),
+    // 本次复考的 release 标识（T0/T1/T2…，纵向曲线 x 轴）。
+    releaseSnapshot: text('release_snapshot').notNull(),
+    // 复考维度（白名单：'ece' | 'coverage'，与 S30 DIMENSION 同定义；A3：绝不含 ELO/胜负率/reward）。
+    dimension: text('dimension').notNull(),
+    // 本快照该维标量读数 ∈ [0,1]。
+    value: doublePrecision('value').notNull(),
+    // 相对上一 release 快照同维的改善量（ECE: prev−curr；coverage: curr−prev）。首快照=null（基线）。
+    delta: doublePrecision('delta'),
+    // 三环：'inner' | 'mid' | 'outer'（纵向承重产线 = outer 环；纯文本标签，内核不解释）。
+    ring: text('ring').notNull(),
+    // 诊断负载（前序快照 value / runId / golden 题数等），离线分析用，**不进任何计分**。
+    payload: jsonb('payload')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdBy: text('created_by').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // 纵向曲线按 (frozen_golden_version, dimension, created_at) 升序扫；按 release 取一次复考全维。
+  (t) => [
+    index('idx_recompete_events_golden_dim_created').on(
+      t.frozenGoldenVersion,
+      t.dimension,
+      t.createdAt,
+    ),
+    index('idx_recompete_events_release').on(t.releaseSnapshot),
+  ],
+)
+
+/**
+ * knowledge_grew_events：**L5 缺口题「长出了知识」的 append-only 迁移证据**（S31，A.9 story 49 + PRD A.9：
+ * 「若某版本开始能答某 L5 题 → 移出 L5、进归因脊柱（证明长出了知识）」）。
+ *
+ * 一行 = 一道**曾零召回**的 L5 缺口题，在某 release 上变得可答（recall ≥1 越门 result **且**人确认）后，被迁出 L5
+ * 的留痕。l5_question_id UNIQUE ⇒ 同一题至多迁出一次（幂等；重复迁不堆叠）。**绝不删 L5 夹具**（L5 是冻结题集），
+ * 「迁出」是逻辑标注（此表存在该行 = 该题已不再算盲点、已进归因脊柱），不物理改 L5_GAP_QUESTIONS。
+ *
+ * 沿 metrics_events / dimension_events 的「只记事件 + 离线读」式样，独立**新表**、零触碰冻结枚举（红线#4）。
+ * **只人能确认**（confirmedBy 须 'human…'，复用 isHumanRole）—— 与 L5 候选晋升同款 HITL 权威门：knowledge-grew
+ * 是「知识真长出来了」的人类架构裁断，不让 agent 自报「我会了」冒充成长（防 Goodhart）。
+ */
+export const knowledgeGrewEvents = pgTable(
+  'knowledge_grew_events',
+  {
+    id: uuid('id').primaryKey(),
+    // 迁出的 L5 缺口题 id（L5_GAP_QUESTIONS 的 id）。UNIQUE ⇒ 同题至多迁出一次。
+    l5QuestionId: text('l5_question_id').notNull().unique(),
+    // 题面（即原 L5 query，留作归因脊柱可读证据）。
+    query: text('query').notNull(),
+    // 变得可答的 release 标识。
+    releaseSnapshot: text('release_snapshot').notNull(),
+    // 迁出时越门召回数（≥1 才迁；留作审计）。
+    recalledCount: integer('recalled_count').notNull(),
+    // 人确认者（须 'human…'：知识长出是人的架构裁断）。
+    confirmedBy: text('confirmed_by').notNull(),
+    // 诊断负载（越门 claim id 集 / 召回快照值等），离线分析用，**不进任何计分**。
+    payload: jsonb('payload')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('idx_knowledge_grew_release').on(t.releaseSnapshot)],
+)
+
 export type SourceKind = (typeof sourceKind.enumValues)[number]
 export type ClaimStatus = (typeof claimStatus.enumValues)[number]
 export type RelationType = (typeof relationType.enumValues)[number]
