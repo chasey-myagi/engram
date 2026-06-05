@@ -90,8 +90,9 @@ export const L3_GOLDEN: readonly SystemGoldenItem[] = Object.freeze(
 
 /**
  * L3 golden 默认召回相似度下界。golden 间共享通用词（"rated"/"thermal"/"commit"）会让交叉相似度抬到 ~0.18，
- * 而对角自相似 ≥0.55；取 0.4 既清掉交叉泄漏又稳过自命中。**只更严不放松**（recall 取 ctx.minSimilarity，
- * consumer 永远只能抬高相似度门）—— 这是 consumer 侧合法旋钮，不改任何内核语义。调用方可经 ctx 覆盖。
+ * 而对角自相似 ≥0.55；取 0.4 既清掉交叉泄漏又稳过自命中。这是 consumer 侧的相似度门旋钮（不改任何内核语义、
+ * 不碰安全不变量）。注意：相似度门**不是**内核强制下界（不像 confidenceFloor 有 Math.max 夹），recall 原样取
+ * ctx.minSimilarity；本 eval 把它抬到 0.4 是**本评测自身**只调严的取数选择，并非内核保证调用方无法调低。调用方可经 ctx 覆盖。
  */
 export const L3_GOLDEN_MIN_SIMILARITY = 0.4
 
@@ -151,7 +152,7 @@ export async function runGoldenItem(
   ctx: RecallContext = {},
 ): Promise<GoldenObservation> {
   // k 经 ctx.limit 流进真 recall（评测=消费：@k 就是消费方的召回上限，不是评测旁路）。
-  // minSimilarity 默认抬到 L3_GOLDEN_MIN_SIMILARITY（清交叉泄漏；只更严不放松），ctx 显式给则用 ctx 的。
+  // minSimilarity 默认抬到 L3_GOLDEN_MIN_SIMILARITY（本评测调严以清交叉泄漏；只抬相似度门→只会减少召回，不会虚高任何维），ctx 显式给则用 ctx 的。
   const recalled = await recallClaims(db, embedder, item.query, {
     minSimilarity: L3_GOLDEN_MIN_SIMILARITY,
     ...ctx,
@@ -232,8 +233,9 @@ export async function computeSystemDimensions(
       recalledClaimCount += 1
       // grounding：无出处的 claim **结构上不计入 grounded**（recall 已 D1 兜底丢它，这里 provenances.length 仍再 assert）。
       if (r.provenances.length >= 1) groundedClaimCount += 1
-      // staleness：越过半衰期 ⇔ staleDecay<0.5（ageDays>halfLife）。kind 经召回结果推导不到，
-      // 故直接判召回快照里**实时重算**的 staleDecay（recall 用活动权重 + asOf 现算，同一口径、不二次查 source kind）。
+      // staleness：越过半衰期 ⇔ staleDecay<0.5。判的是召回快照里**透传的存档 staleDecay**（live-recompute 只实时重算
+      // base/conflictDecay，staleDecay 取写入/上次重算时的存档值，非按当前时钟现算）。**偏差**：年龄随时间长、存档 decay 不变，
+      // 故本维**结构上低估**当前真实陈旧度——它是「上次落库时的陈旧快照」而非「此刻新鲜度」。report-only（不进 g，A3 安全）。
       if (r.confidence.factors.staleDecay < 0.5) staleClaimCount += 1
     }
   }

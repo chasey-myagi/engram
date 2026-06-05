@@ -171,6 +171,24 @@ describe('S30 L3 system dimensions (substrate-ready 7) — append-only events th
     expect(four.precisionAtK).toBeLessThanOrEqual(1)
   })
 
+  it('P@k pinned to an EXACT value: a golden recalling 1 relevant + 1 irrelevant-but-above-floor claim → precisionAtK === 1/2 (denominator counts retrieved-not-relevant, numerator counts only text hits)', async () => {
+    // 钉死 P@k 的分子/分母语义（gate#1 test-review：此前只断言 >0 && <=1，换分母也照样绿）。
+    // 造一道定制 golden：query 同时召回「相关」(命中 expected 子串) + 「不相关但过门」(高 trigram 重叠、不含 expected) 各一条。
+    const relevant = 'precision pinned relevant claim alpha'
+    const distractor = 'precision pinned relevant claim beta' // 与 query 高度重叠 → 被召回；不含 expected → 不相关
+    const query = 'precision pinned relevant claim'
+    await selfAuthor(relevant)
+    await selfAuthor(distractor)
+    // sanity：两条都过相似度+消费门、确实都被召回（否则下面的 1/2 是假的）。
+    const hits = await recallClaims(db, embedder, query, { minSimilarity: 0.4 })
+    expect(hits.length).toBe(2)
+
+    const golden = [{ id: 'p-exact', query, expectedClaimTexts: [relevant] }] as const
+    const dims = await computeSystemDimensions(db, embedder, { golden, k: 5 })
+    expect(dims.precisionAtK).toBe(1 / 2) // 召回 2、相关 1 → 1/2（分母数检索到的、分子只数命中 expected 的）
+    expect(dims.recallAtK).toBe(1) // 期望集 {relevant} 被覆盖
+  })
+
   it('grounding counts ONLY claims that drill back to provenance (a no-provenance claim is not counted)', async () => {
     await answerTwoGolden()
     const dims = await computeSystemDimensions(db, embedder)
@@ -431,15 +449,22 @@ describe('S30 L3 system dimensions (substrate-ready 7) — append-only events th
   })
 
   it('recordDimension rejects out-of-range values and empty runId (bad readings cannot pollute the series)', async () => {
-    await expect(
-      recordDimension(db, { runId: 'r', dimension: DIMENSION.ece, value: 1.5 }),
-    ).rejects.toThrow(/must be in \[0,1\]/)
-    await expect(
-      recordDimension(db, { runId: 'r', dimension: DIMENSION.ece, value: Number.NaN }),
-    ).rejects.toThrow(/must be in \[0,1\]/)
+    // 上界、NaN、下界(负)、+Infinity 全拒（[0,1] guard 最常见的 bug 是下界/<= off-by-one）。
+    for (const bad of [1.5, Number.NaN, -0.1, Number.POSITIVE_INFINITY]) {
+      await expect(
+        recordDimension(db, { runId: 'r', dimension: DIMENSION.ece, value: bad }),
+      ).rejects.toThrow(/must be in \[0,1\]/)
+    }
     await expect(
       recordDimension(db, { runId: '  ', dimension: DIMENSION.ece, value: 0.5 }),
     ).rejects.toThrow(/non-empty/)
+    // 闭区间端点 0 与 1 必须**被接受**（证明是 >=/<= 而非 >/<）。
+    await expect(
+      recordDimension(db, { runId: 'bound', dimension: DIMENSION.ece, value: 0 }),
+    ).resolves.toBeDefined()
+    await expect(
+      recordDimension(db, { runId: 'bound', dimension: DIMENSION.coverage, value: 1 }),
+    ).resolves.toBeDefined()
   })
 
   it('runGoldenItem only calls recall_claims (no write): scoring an empty KB writes zero claims', async () => {
