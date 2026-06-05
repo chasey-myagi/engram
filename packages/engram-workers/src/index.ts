@@ -85,3 +85,16 @@ export {
 } from './read/source-reader.js'
 export { makeFakeSourceReader, type FakeSourceReaderOptions } from './read/fake-source-reader.js'
 export { makeVlmSourceReader } from './read/vlm-source-reader.js'
+
+// S29 · 红队四类对抗样本注入器（经真 append_claim SPI）+ 免疫反应断言（驱动真 Verifier/Arbiter/Reconciler）+
+// per-class 免疫力维度打分。冻结世代 fixture 见 ./eval/redteam.gen.ts。
+export {
+  makeBoundEntailmentOracle,
+  makeArbiterFakeRuntime,
+  injectAndAssert,
+  runRedTeamGeneration,
+  type RedTeamRunDeps,
+  type InjectionOutcome,
+  type ClassScore,
+} from './eval/redteam-injector.js'
+export { REDTEAM_GENERATION_VERSION, REDTEAM_GENERATION_ITEMS } from './eval/redteam.gen.js'
