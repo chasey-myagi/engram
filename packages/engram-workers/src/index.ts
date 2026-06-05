@@ -109,3 +109,12 @@ export {
   type ItemAdmission,
   type BreachAttribution,
 } from './eval/red-blue-round.js'
+
+// P4b · EngramRunner —— 把内核 + 五工种 + 控制面(恒温器/校准) + 红蓝对抗接成**可跑自闭环**。S24 choreography 的
+// 生产化 + 补齐「内核能力齐了但没运行进程调起来」的缺口（恒温器/校准/dispatcher 真被 tick）。可跑 demo 见 ./runner/main.ts。
+export {
+  EngramRunner,
+  type EngramRunnerDeps,
+  type ClosedLoopInput,
+  type ClosedLoopReport,
+} from './runner/engram-runner.js'

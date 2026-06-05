@@ -21,7 +21,8 @@
     "build": "tsc -p .",
     "typecheck": "tsc -p . --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "demo": "node dist/runner/main.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
