@@ -48,7 +48,7 @@ export interface GateCheck {
   detail: string
 }
 
-/** 验收门裁决（确定性）。approved=5/5 全过；否则给出**首个**未过项（failedCheck）+ 全项明细。 */
+/** 验收门裁决（确定性）。approved=6/6 全过；否则给出**首个**未过项（failedCheck）+ 全项明细。 */
 export interface GateVerdict {
   approved: boolean
   checks: GateCheck[]
