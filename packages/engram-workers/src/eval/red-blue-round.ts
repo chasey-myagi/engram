@@ -162,6 +162,11 @@ async function admitViaA1(
   const { db, embedder } = deps
   // 来源 claim：一条**无关**背景事实（不与 item.claimText 同义 ⇒ 不会让 recall(item.claimText) 命中）。
   // candidate 溯源到它的出处（locatorsTraceable）；A1 在它上面验「库真没这道题的答案」。
+  // 确定性说明：fake 三元组嵌入器对短文本的桶碰撞噪声把任意两段文本的 cosine 抬到 ~0.05–0.09，本来源 claim
+  // 与 item.claimText 的相似度落这区间（< minSimilarity floor 0.1）。但 A1 是 **per-item reset 后单 claim 库**上
+  // 召回，且 recall 的 floor 过滤跑在 **精确**重算距离上（非 HNSW 近似序）—— 故「是否命中」与 cosine 0.085<0.1
+  // 是确定的（绝不抖），换文本也压不到噪声地板以下、无必要。回合曾见的 cold-run 闪退**不**源于此，而是重载下
+  // 连接耗尽（见 vitest.config.ts 的连接预算）。
   const sourceClaimId = await appendActiveSourceClaim(db, embedder, {
     claimText: `unrelated background fact for red-team item ${item.id}`,
   })
