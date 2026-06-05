@@ -59,7 +59,9 @@ export {
   type AgentRunResult,
   type AgentStopReason,
 } from './runtime/port.js'
-export { makeHarnessPiRuntime } from './runtime/harness-pi.js'
+export { makeHarnessPiRuntime, type HarnessPiRuntimeOptions } from './runtime/harness-pi.js'
+// 生产 agent loop 运行时:DashScope Qwen chat(env-gated,需 DASHSCOPE_API_KEY)。测试用 createFakeModel+makeHarnessPiRuntime。
+export { makeQwenRuntime, makeQwenChatModel } from './runtime/dashscope-runtime.js'
 
 // S24 · choreography 数据面路由器（极简确定性事件总线；按工种**声明的触发**路由，非在线 meta-orchestrator）。
 export {
