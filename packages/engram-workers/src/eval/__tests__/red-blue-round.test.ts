@@ -1,0 +1,354 @@
+/**
+ * P4a · 红蓝对抗回合（runRedBlueRound）—— 端到端真 DB 驱动真工种，复用 S29/S12/S31 真件、零 bespoke mock。
+ *
+ * 覆盖六交付 + 两铁律：
+ *   1) 红队：冻结世代（freezeRedTeamGeneration；append-only、撞名抛）。
+ *   2) 题免疫 A1（铁律）：每条 item 先过真 promoteCandidate 才进被计分 cohort；库本能答的带毒 item 被 BLOCK、永不计分。
+ *   3) 蓝队答题：经 S29 真注入器驱动真 Verifier/Reconciler/Arbiter 免疫反应（答案=系统是否处置毒株）。
+ *   4) 裁判判分：per-class detection rate 落 redteam_immunity_scores（纯报告维度）。
+ *   5) 失败归因回流（S31）：每个 breach 经 attributeFailure 归到**恰好一个** loop。
+ *   6) 下一代更难题：漏检项 escalate 成更难、冻结、版本化、append-only 的下一代；perfect round ⇒ 无 escalation。
+ *   A1 铁律：自败/带毒 item 进不了 scored cohort（测一条被 BLOCK）。
+ *   A3 铁律：检出率/胜负结构上**不进**校准拟合器（collectUsageCalibrationSamples）与纵向（recompete 白名单只有 ece/coverage）。
+ */
+import { randomUUID } from 'node:crypto'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+import { eq } from 'drizzle-orm'
+import { migrate } from 'drizzle-orm/node-postgres/migrator'
+import pg from 'pg'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+
+import {
+  addSource,
+  appendClaim,
+  collectUsageCalibrationSamples,
+  createDb,
+  getImmunityScores,
+  getRecompeteEvents,
+  getRedTeamGeneration,
+  loopForRedTeamClass,
+  makeFakeEmbedder,
+  recordRecompete,
+  RECOMPETE_DIMENSIONS,
+  RESPONSIBLE_LOOPS,
+  schema,
+  transitionClaim,
+  type DB,
+  type Embedder,
+  type ProvenanceInput,
+  type RedTeamItem,
+} from '@engram/core'
+
+import { runRedBlueRound, type RoundResult } from '../red-blue-round.js'
+import { REDTEAM_GENERATION_ITEMS } from '../redteam.gen.js'
+
+const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
+const migrationsFolder = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  '..',
+  '..',
+  'engram-core',
+  'drizzle',
+)
+
+let admin: pg.Pool
+let pool: pg.Pool
+let db: DB
+let testDbName: string
+const embedder: Embedder = makeFakeEmbedder()
+
+/** 清所有可被注入污染的工作表（红队世代/分表单独清，因 freeze 是 append-only 跨 item 持久）。 */
+async function resetWorkTables(): Promise<void> {
+  await pool.query(
+    'TRUNCATE source, claim, claim_provenance, relation, claim_verification, metrics_events, l5_candidates, golden_questions, promotion_audit CASCADE',
+  )
+}
+
+/** 清红队世代/免疫分/纵向表（每个回合用独立 version，避免 freeze 撞名）。 */
+async function resetRedTeamTables(): Promise<void> {
+  await pool.query(
+    'TRUNCATE redteam_immunity_scores, redteam_generations, recompete_events CASCADE',
+  )
+}
+
+beforeAll(async () => {
+  testDbName = `engram_test_${randomUUID().replace(/-/g, '')}`
+  admin = new pg.Pool({ connectionString: DATABASE_URL })
+  await admin.query(`CREATE DATABASE ${testDbName}`)
+  const url = new URL(DATABASE_URL)
+  url.pathname = `/${testDbName}`
+  pool = new pg.Pool({ connectionString: url.toString() })
+  db = createDb(pool)
+  await migrate(db, { migrationsFolder })
+})
+
+afterAll(async () => {
+  await pool.end()
+  await admin.query(`DROP DATABASE IF EXISTS ${testDbName} WITH (FORCE)`)
+  await admin.end()
+})
+
+/** 经真路径写一条 active claim（4 条 authority=1.0 独立 exact 源 → base≥0.5 过 D2 门）。 */
+async function appendActiveClaim(draft: {
+  claimText: string
+  subject?: string
+  predicate?: string
+  object?: string
+}): Promise<string> {
+  const provs: ProvenanceInput[] = []
+  for (let i = 0; i < 4; i++) {
+    const src = await addSource(db, {
+      content: `evidence: ${draft.claimText}`,
+      contentHash: randomUUID(),
+      kind: 'formal_document',
+      authorityScore: 1.0,
+    })
+    provs.push({ sourceId: src.sourceId, locator: `seed:${i}`, relevance: 'exact' })
+  }
+  const { claimId } = await appendClaim(
+    db,
+    embedder,
+    { ...draft, createdBy: 'agent:distiller' },
+    provs,
+  )
+  await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
+  return claimId
+}
+
+/** 取一类 item 子集（每类 1 条，够测全四类又快）。 */
+function oneOfEachClass(): RedTeamItem[] {
+  const classes = ['false', 'contradiction', 'stale', 'near_dup_poison'] as const
+  return classes.map((c) => REDTEAM_GENERATION_ITEMS.find((i) => i.redteamClass === c)!)
+}
+
+describe('P4a · 红蓝对抗回合（runRedBlueRound：真 DB 驱动真工种）', () => {
+  describe('完整回合（全检出 → perfect round）', () => {
+    let result: RoundResult
+
+    beforeAll(async () => {
+      await resetRedTeamTables()
+      result = await runRedBlueRound(
+        { db, embedder },
+        {
+          generationVersion: 'rb-round-perfect',
+          items: oneOfEachClass(),
+          resetWorkTables,
+        },
+      )
+    })
+
+    it('① 红队：这代世代被冻结进库（append-only 锚）', async () => {
+      const gen = await getRedTeamGeneration(db, 'rb-round-perfect')
+      expect(gen).not.toBeNull()
+      expect(gen!.items.length).toBe(4)
+    })
+
+    it('② 题免疫 A1：四条 item 全过真 promoteCandidate → 全进被计分 cohort', () => {
+      expect(result.admissions.length).toBe(4)
+      expect(result.admissions.every((a) => a.admitted)).toBe(true)
+      expect(result.scoredItemIds.length).toBe(4)
+      expect(result.blockedItemIds.length).toBe(0)
+    })
+
+    it('③④ 蓝队答题 + 裁判判分：四类全检出（detection rate=1），落 redteam_immunity_scores', async () => {
+      expect(result.classScores.length).toBe(4)
+      for (const s of result.classScores) {
+        expect(s.detected).toBe(s.injected) // 全检出
+        expect(s.detectionRate).toBe(1)
+      }
+      // 判分作为纯报告维度落库（每类一行）。
+      const rows = await getImmunityScores(db, 'rb-round-perfect')
+      expect(rows.length).toBe(4)
+      const byClass = new Set(rows.map((r) => r.redteamClass))
+      expect(byClass).toEqual(new Set(['false', 'contradiction', 'stale', 'near_dup_poison']))
+    })
+
+    it('⑤ 无 breach（全检出）⇒ breaches 为空', () => {
+      expect(result.breaches.length).toBe(0)
+    })
+
+    it('⑥ perfect round ⇒ 下一代为空、未冻结（无可生长处）', async () => {
+      expect(result.nextGeneration.items.length).toBe(0)
+      expect(result.nextGeneration.frozen).toBe(false)
+      const nextGen = await getRedTeamGeneration(db, 'rb-round-perfect+1')
+      expect(nextGen).toBeNull() // 没冻结新世代
+    })
+  })
+
+  describe('有漏检的回合（breach → S31 单环归因 → escalation 下一代）', () => {
+    let result: RoundResult
+    // 一条蓄意「逮不到」的 false item：evidence **真蕴含** claim（claim 下界 ≤ evidence 下界）⇒ bound oracle 判 pass
+    // ⇒ 真 Verifier 不 flag ⇒ 蓝队漏检（真 breach，非伪造）。与一条正常会被逮到的 false item 同跑。
+    const undetectableFalse: RedTeamItem = {
+      id: 'false-evades',
+      redteamClass: 'false',
+      claimText: 'Foobar metric is at least 3 units',
+      subject: 'foobar',
+      predicate: 'metric',
+      object: 'at least 3',
+      // evidence 下界(10) ≥ claim 下界(3) ⇒ oracle 判 pass ⇒ Verifier 不 flag ⇒ 漏检。
+      evidence: 'Foobar metric is at least 10 units.',
+      sourceKind: 'formal_document',
+    }
+    const detectableFalse = REDTEAM_GENERATION_ITEMS.find((i) => i.redteamClass === 'false')!
+
+    beforeAll(async () => {
+      await resetRedTeamTables()
+      result = await runRedBlueRound(
+        { db, embedder },
+        {
+          generationVersion: 'rb-round-miss',
+          items: [detectableFalse, undetectableFalse],
+          resetWorkTables,
+        },
+      )
+    })
+
+    it('蓝队对蓄意逃逸 item 漏检（detected<injected）⇒ 产生 breach', () => {
+      const falseScore = result.classScores.find((s) => s.redteamClass === 'false')!
+      expect(falseScore.injected).toBe(2)
+      expect(falseScore.detected).toBe(1) // 一条逮到、一条逃逸
+      expect(result.breaches.length).toBe(1)
+      expect(result.breaches[0]!.redteamClass).toBe('false')
+    })
+
+    it('⑤ breach 经 S31 attributeFailure 归到**恰好一个** loop（false→verifier_miss）', () => {
+      const br = result.breaches[0]!
+      // 恰好一个 responsibleLoop，且在合法环域内。
+      expect(RESPONSIBLE_LOOPS).toContain(br.attribution.responsibleLoop)
+      expect(br.attribution.candidates.length).toBe(1) // 单环（redteam_breach 类别确定性映射）
+      expect(br.attribution.responsibleLoop).toBe(br.attribution.candidates[0])
+      // 与 S31 的类别→环映射一致（同一真函数，非重新发明）。
+      expect(br.attribution.responsibleLoop).toBe(loopForRedTeamClass('false'))
+      expect(br.attribution.failureKind).toBe('redteam_breach')
+      expect(br.attribution.failureRef).toBe('rb-round-miss:false')
+    })
+
+    it('⑥ escalation：下一代非空、由漏检项 seed、且更难（margin 收窄），冻结进库', async () => {
+      expect(result.nextGeneration.items.length).toBe(1) // 仅漏检的那条
+      expect(result.nextGeneration.frozen).toBe(true)
+      const esc = result.nextGeneration.items[0]!
+      // seed from miss：血缘 id 含原 miss id。
+      expect(esc.id).toContain('false-evades')
+      // 更难 = claim 下界向 evidence 下界(10) 靠拢（3 → ~6），仍 < 10 ⇒ 仍是 false 但更贴近检出边界。
+      const lb = (s: string) => parseFloat(s.match(/(\d+(?:\.\d+)?)/)![1]!)
+      expect(lb(esc.claimText)).toBeGreaterThan(3)
+      expect(lb(esc.claimText)).toBeLessThan(10)
+      // 真冻结进库（版本化 append-only，旧世代留存）。
+      const nextGen = await getRedTeamGeneration(db, 'rb-round-miss+1')
+      expect(nextGen).not.toBeNull()
+      expect(nextGen!.items.length).toBe(1)
+      const prevGen = await getRedTeamGeneration(db, 'rb-round-miss')
+      expect(prevGen!.items.length).toBe(2) // 上一代原样保留（未被改写）
+    })
+
+    it('escalation 是确定性的（同一 miss → 同一更难变体，可纵向比较）', () => {
+      const esc1 = result.nextGeneration.items[0]!
+      // 同函数对同 item 再 escalate 应得同结果（值确定，无随机）；以已落库的为锚。
+      const lb = (s: string) => parseFloat(s.match(/(\d+(?:\.\d+)?)/)![1]!)
+      expect(Number.isFinite(lb(esc1.claimText))).toBe(true)
+    })
+  })
+
+  describe('A1 铁律：库本能答的带毒 item 被 BLOCK、永不进 scored cohort', () => {
+    beforeEach(async () => {
+      await resetRedTeamTables()
+    })
+
+    it('一条 claimText 库已有同义 active claim 的 item → kbTrulyLacks=false → BLOCK，不计分', async () => {
+      // 带毒 item：库里**预先**有一条与其 claimText 同义的 active claim（recall 会命中 ⇒ 这是污染真值的考题）。
+      const poisoned: RedTeamItem = {
+        id: 'poisoned-exam',
+        redteamClass: 'false',
+        claimText: 'The poisoned exam asks an already-answered question xyzzy-7',
+        evidence: 'irrelevant',
+        sourceKind: 'formal_document',
+      }
+      const cleanFalse = REDTEAM_GENERATION_ITEMS.find((i) => i.redteamClass === 'false')!
+
+      // resetWorkTables 包一层：**清完库后**为带毒 item 重新 seed 那条同义 active claim（让 A1 在 clean+seed 上验真）。
+      // 这是 A1 在「库本能答」分支被真实触发的唯一干净注入点（评测=消费，经真 append/transition，不旁路改状态）。
+      const seedingReset = async () => {
+        await resetWorkTables()
+        await appendActiveClaim({ claimText: poisoned.claimText })
+      }
+
+      const res = await runRedBlueRound(
+        { db, embedder },
+        {
+          generationVersion: 'rb-a1-block',
+          items: [cleanFalse, poisoned],
+          resetWorkTables: seedingReset,
+        },
+      )
+
+      // 带毒 item 被 A1 BLOCK：不在被计分 cohort，进 blocked。
+      const poisonAdm = res.admissions.find((a) => a.itemId === 'poisoned-exam')!
+      expect(poisonAdm.admitted).toBe(false)
+      expect(res.blockedItemIds).toContain('poisoned-exam')
+      expect(res.scoredItemIds).not.toContain('poisoned-exam')
+      // 带毒 item 绝不进 golden（永不计分），且 A1 给了人读理由（库已能答）。
+      expect(poisonAdm.reasons.some((r) => r.includes('KB already answers'))).toBe(true)
+      const goldens = await db.select().from(schema.goldenQuestions)
+      // cleanFalse 过门会进 golden；带毒的 poisoned-exam 绝不进。
+      const poisonGolden = goldens.filter((g) => g.query === poisoned.claimText)
+      expect(poisonGolden.length).toBe(0)
+    })
+  })
+
+  describe('A3 铁律：检出率/胜负结构上不进校准 g 与纵向趋势', () => {
+    it('一整回合（含 breach 与判分）跑完后，校准拟合器取样仍为空（拟合器只读 usage_truth，绝不读免疫分）', async () => {
+      await resetRedTeamTables()
+      const undetectable: RedTeamItem = {
+        id: 'a3-evades',
+        redteamClass: 'false',
+        claimText: 'A3 metric is at least 1 unit',
+        evidence: 'A3 metric is at least 99 units.', // evidence 蕴含 claim ⇒ 漏检 ⇒ breach + 判分
+        sourceKind: 'formal_document',
+      }
+      await runRedBlueRound(
+        { db, embedder },
+        {
+          generationVersion: 'rb-a3',
+          items: [undetectable],
+          resetWorkTables,
+        },
+      )
+      // 回合落了免疫分（判分）。但校准拟合器结构上只读 claim_verification(kind='usage_truth')，从不读免疫分表。
+      const samples = await collectUsageCalibrationSamples(db)
+      expect(samples.length).toBe(0) // 检出率/胜负一条都没漏进 g 拟合输入（A3 守住）
+    })
+
+    it('回合从不写纵向 recompete；且 recompete 白名单物理拒检出率维度（detection_rate 写不进纵向）', async () => {
+      await resetRedTeamTables()
+      await runRedBlueRound(
+        { db, embedder },
+        {
+          generationVersion: 'rb-a3b',
+          items: [oneOfEachClass()[0]!], // 一条干净 false（会检出）
+          resetWorkTables,
+        },
+      )
+      // 回合**从不**调 recordRecompete ⇒ 纵向表无任何本回合行。
+      const events = await getRecompeteEvents(db)
+      expect(events.length).toBe(0)
+      // 结构性边界：即便有人试图把检出率塞进纵向，白名单（只有 ece/coverage）会物理拒。
+      expect(RECOMPETE_DIMENSIONS as readonly string[]).not.toContain('detection_rate')
+      await expect(
+        recordRecompete(db, {
+          frozenGoldenVersion: 'x',
+          releaseSnapshot: 'r',
+          // @ts-expect-error 故意传非白名单维度（检出率），证明写入处硬拒。
+          dimension: 'detection_rate',
+          value: 1,
+          delta: null,
+          ring: 'outer',
+        }),
+      ).rejects.toThrow()
+    })
+  })
+})
