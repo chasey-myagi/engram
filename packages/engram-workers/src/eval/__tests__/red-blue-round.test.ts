@@ -23,13 +23,16 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import {
   addSource,
   appendClaim,
+  attributeFailure,
   collectUsageCalibrationSamples,
   createDb,
+  freezeRedTeamGeneration,
   getImmunityScores,
   getRecompeteEvents,
   getRedTeamGeneration,
   loopForRedTeamClass,
   makeFakeEmbedder,
+  recordImmunityScore,
   recordRecompete,
   RECOMPETE_DIMENSIONS,
   RESPONSIBLE_LOOPS,
@@ -38,10 +41,11 @@ import {
   type DB,
   type Embedder,
   type ProvenanceInput,
+  type RedTeamClass,
   type RedTeamItem,
 } from '@engram/core'
 
-import { runRedBlueRound, type RoundResult } from '../red-blue-round.js'
+import { runRedBlueRound, escalateMiss, type RoundResult } from '../red-blue-round.js'
 import { REDTEAM_GENERATION_ITEMS } from '../redteam.gen.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
@@ -246,12 +250,54 @@ describe('P4a · 红蓝对抗回合（runRedBlueRound：真 DB 驱动真工种�
       expect(prevGen!.items.length).toBe(2) // 上一代原样保留（未被改写）
     })
 
-    it('escalation 是确定性的（同一 miss → 同一更难变体，可纵向比较）', () => {
-      const esc1 = result.nextGeneration.items[0]!
-      // 同函数对同 item 再 escalate 应得同结果（值确定，无随机）；以已落库的为锚。
-      const lb = (s: string) => parseFloat(s.match(/(\d+(?:\.\d+)?)/)![1]!)
-      expect(Number.isFinite(lb(esc1.claimText))).toBe(true)
+    it('escalation 确定性（纯函数）：escalateMiss(item, ver, now) 同 (miss, now) 两次调用逐字段相等——四类全覆盖、无 Date.now() 泄漏', () => {
+      const fixedNow = new Date('2026-03-15T00:00:00.000Z')
+      for (const cls of ['false', 'contradiction', 'near_dup_poison', 'stale'] as const) {
+        const item = REDTEAM_GENERATION_ITEMS.find((i) => i.redteamClass === cls)!
+        const a = escalateMiss(item, 'detv1', fixedNow)
+        const b = escalateMiss(item, 'detv1', fixedNow)
+        expect(a).toEqual(b) // 纯函数：同输入逐字段相等（含 stale 的 asOf——注入 now，绝不烤 Date.now()）
+        expect(a.id).toBe(`${item.id}::esc:detv1`) // 血缘 id 含原 id
+        expect(a.redteamClass).toBe(cls)
+        if (cls === 'stale') {
+          // stale 的 asOf 确定性地**依赖注入的 now**（换 now → 不同 asOf；证明用的是注入时钟而非墙钟/常量）。
+          const c = escalateMiss(item, 'detv1', new Date('2026-09-15T00:00:00.000Z'))
+          expect(c.asOf).not.toBe(a.asOf)
+        }
+      }
     })
+  })
+
+  // class→loop 映射全覆盖（gate#1 test-review：此前只有 false 一类经 round 验过 breach→归因）。
+  // 注：contradiction/stale 的「真 e2e 漏检」无法构造——其病原属性本身即检出触发器（确定性检测器逮不住才反常）；
+  // 故对四类经 round 用的**同一** S31 attributeFailure 机制逐类钉死 class→单环映射。
+  describe('⑤ breach → S31 单环归因：四类 redteam_breach 各确定性映射到恰好一个 loop', () => {
+    it.each(['false', 'contradiction', 'near_dup_poison', 'stale'] as const)(
+      'redteam_breach[%s] → candidates 恰好一个 = loopForRedTeamClass(%s)',
+      async (cls: RedTeamClass) => {
+        const gen = `breach-${cls}-${randomUUID().slice(0, 8)}`
+        await freezeRedTeamGeneration(db, {
+          version: gen,
+          items: [REDTEAM_GENERATION_ITEMS.find((i) => i.redteamClass === cls)!],
+          reason: `breach mapping test ${cls}`,
+        })
+        await recordImmunityScore(db, {
+          generationVersion: gen,
+          redteamClass: cls,
+          injected: 2,
+          detected: 1, // breach: 漏检 1
+        })
+        const attribution = await attributeFailure(db, {
+          kind: 'redteam_breach',
+          generationVersion: gen,
+          redteamClass: cls,
+        })
+        expect(attribution.candidates.length).toBe(1) // 恰好一个（P3 门：单环）
+        expect(attribution.responsibleLoop).toBe(loopForRedTeamClass(cls))
+        expect(attribution.responsibleLoop).toBe(attribution.candidates[0])
+        expect(RESPONSIBLE_LOOPS).toContain(attribution.responsibleLoop)
+      },
+    )
   })
 
   describe('A1 铁律：库本能答的带毒 item 被 BLOCK、永不进 scored cohort', () => {

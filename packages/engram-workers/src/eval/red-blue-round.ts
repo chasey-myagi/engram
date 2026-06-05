@@ -30,6 +30,7 @@ import {
   appendClaim,
   attributeFailure,
   freezeRedTeamGeneration,
+  getRedTeamGeneration,
   promoteCandidate,
   schema,
   transitionClaim,
@@ -64,6 +65,11 @@ export interface RedBlueRoundOptions {
   autoFreeze?: boolean
   /** 下一代世代 version（默认 `${generationVersion}+1`）。 */
   nextGenerationVersion?: string
+  /**
+   * escalation 的参考时钟（stale 类把 asOf 向"现在"靠拢半步时用）。**注入它让 escalation 成纯函数、确定性可复现**
+   * ——冻结世代是纵向免疫比较的锚（A3 反-Goodhart 前提：敌手不可被悄悄改），绝不能烤进 wall-clock。默认捕获一次 `new Date()`。
+   */
+  now?: Date
 }
 
 /** A1 题免疫的逐条裁决（哪条进了被计分 cohort、哪条被 BLOCK）。 */
@@ -185,8 +191,11 @@ async function admitViaA1(
  *   - contradiction：被审 object 向 anchor object 靠拢一半（分歧更小，更难判矛盾）。
  *   - stale：asOf 向「现在」靠拢一半（更接近半衰期阈值，时效衰减更弱、更难压穿消费门）。
  * 无数字可调的 item ⇒ 原样升代（仍是 miss，至少要继续被攻击），只换 id/版本血缘。每个变体带新 id（`<id>::esc:<ver>`）。
+ *
+ * **确定性**：纯函数 of (item, nextVersion, now)。stale 类的参考"现在"由 `now` **注入**（绝不读 Date.now()），
+ * 故同一 miss + 同一 now → 同一更难变体，纵向可比、冻结世代可复现。导出供直接逐类测试。
  */
-function escalateMiss(item: RedTeamItem, nextVersion: string): RedTeamItem {
+export function escalateMiss(item: RedTeamItem, nextVersion: string, now: Date): RedTeamItem {
   const escId = `${item.id}::esc:${nextVersion}`
   const num = (s: string | undefined): number | null => {
     if (s === undefined) return null
@@ -208,7 +217,8 @@ function escalateMiss(item: RedTeamItem, nextVersion: string): RedTeamItem {
       const evidLb = num(item.evidence)
       if (claimLb !== null && evidLb !== null && claimLb !== evidLb) {
         const harder = Math.round((claimLb + evidLb) / 2)
-        if (harder !== claimLb) {
+        // 必须既 ≠ 原 claimLb（真有收窄）又 ≠ evidLb（别落到证据边界上、否则恰好被推出、不再是 false 探针）。
+        if (harder !== claimLb && harder !== evidLb) {
           return {
             ...base,
             claimText: replaceNum(item.claimText, claimLb, harder),
@@ -244,7 +254,8 @@ function escalateMiss(item: RedTeamItem, nextVersion: string): RedTeamItem {
       // asOf 向「现在」靠拢一半（更接近半衰期阈值，时效更弱、更难压穿消费门）。
       const old = item.asOf ? new Date(item.asOf) : null
       if (old && !Number.isNaN(old.getTime())) {
-        const mid = new Date((old.getTime() + Date.now()) / 2)
+        // **注入的 now**（非 Date.now()）→ 纯函数、可复现。向"现在"靠拢半步（更接近半衰期阈值、更难压穿消费门）。
+        const mid = new Date((old.getTime() + now.getTime()) / 2)
         return { ...base, asOf: mid.toISOString() }
       }
       return base
@@ -285,6 +296,7 @@ export async function runRedBlueRound(
   const confirmedBy = opts.confirmedBy ?? 'human:red-blue-curator'
   const autoFreeze = opts.autoFreeze ?? true
   const nextVersion = opts.nextGenerationVersion ?? `${opts.generationVersion}+1`
+  const now = opts.now ?? new Date() // 捕获一次 → escalation 确定性（绝不每次调 Date.now()）
 
   if (opts.items.length === 0) {
     throw new Error('runRedBlueRound: a round must run >=1 adversarial item')
@@ -298,6 +310,16 @@ export async function runRedBlueRound(
       reason: `red-blue round generation ${opts.generationVersion}`,
       createdBy: 'eval:red-blue',
     })
+  } else {
+    // autoFreeze=false：调用方须已预冻结本代——否则步④ recordImmunityScore 的 FK(generation_version) 会在
+    // 蓝队注入(②③)白跑之后才炸。这里先快速失败（不做任何昂贵工作）。
+    const existing = await getRedTeamGeneration(db, opts.generationVersion)
+    if (existing === null) {
+      throw new Error(
+        `runRedBlueRound: autoFreeze=false but generation '${opts.generationVersion}' is not pre-frozen ` +
+          `(recordImmunityScore would later FK-violate). Freeze it first or pass autoFreeze:true.`,
+      )
+    }
   }
 
   // ── ② 题免疫 A1（铁律）：每条 item 先过真 promoteCandidate；只 admitted 者进被计分 cohort。 ──
@@ -355,7 +377,7 @@ export async function runRedBlueRound(
   // ── ⑥ 下一代更难题：漏检项（per-item detected=false）escalate 成更难变体，seed from misses。 ──
   // perfect round（零 miss）⇒ 下一代为空、不冻结（无可生长处）。有 miss ⇒ 冻结新版本（append-only、旧世代留存）。
   const missedItems = collectMisses(classScores, scoredItems)
-  const escalated = missedItems.map((it) => escalateMiss(it, nextVersion))
+  const escalated = missedItems.map((it) => escalateMiss(it, nextVersion, now))
   let frozen = false
   if (escalated.length > 0) {
     await freezeRedTeamGeneration(db, {
