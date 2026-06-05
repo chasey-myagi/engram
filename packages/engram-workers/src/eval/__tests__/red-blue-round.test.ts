@@ -250,17 +250,35 @@ describe('P4a · 红蓝对抗回合（runRedBlueRound：真 DB 驱动真工种�
       expect(prevGen!.items.length).toBe(2) // 上一代原样保留（未被改写）
     })
 
-    it('escalation 确定性（纯函数）：escalateMiss(item, ver, now) 同 (miss, now) 两次调用逐字段相等——四类全覆盖、无 Date.now() 泄漏', () => {
+    it('escalation 确定性 + 方向正确：escalateMiss 纯函数(同输入逐字段相等)，且四类各把 margin **朝检出边界**收窄(不只是变了、是变难了；反转算术会失败本断言)', () => {
+      const num = (s: string | undefined): number =>
+        s ? parseFloat(s.match(/(\d+(?:\.\d+)?)/)?.[1] ?? 'NaN') : NaN
       const fixedNow = new Date('2026-03-15T00:00:00.000Z')
       for (const cls of ['false', 'contradiction', 'near_dup_poison', 'stale'] as const) {
         const item = REDTEAM_GENERATION_ITEMS.find((i) => i.redteamClass === cls)!
         const a = escalateMiss(item, 'detv1', fixedNow)
         const b = escalateMiss(item, 'detv1', fixedNow)
-        expect(a).toEqual(b) // 纯函数：同输入逐字段相等（含 stale 的 asOf——注入 now，绝不烤 Date.now()）
+        expect(a).toEqual(b) // 纯函数：同 (item, ver, now) 逐字段相等（含 stale 的 asOf——注入 now，绝不烤 Date.now()）
         expect(a.id).toBe(`${item.id}::esc:detv1`) // 血缘 id 含原 id
         expect(a.redteamClass).toBe(cls)
-        if (cls === 'stale') {
-          // stale 的 asOf 确定性地**依赖注入的 now**（换 now → 不同 asOf；证明用的是注入时钟而非墙钟/常量）。
+
+        // 方向：升代必须把对抗 margin **严格朝检出边界**收窄（反转 `<`/`>` 或 `+`/`-` 会让值远离边界 → 失败这里）。
+        if (cls === 'false') {
+          const evidLb = num(item.evidence) // claim 下界朝 evidence 下界(检出翻转边界)靠拢
+          const before = Math.abs(num(item.object ?? item.claimText) - evidLb)
+          const after = Math.abs(num(a.object ?? a.claimText) - evidLb)
+          expect(after).toBeLessThan(before)
+        } else if (cls === 'contradiction' || cls === 'near_dup_poison') {
+          const aObj = num(item.anchor?.object) // 被审 object 朝 anchor object 靠拢（分歧/投毒幅度更小）
+          const before = Math.abs(num(item.object) - aObj)
+          const after = Math.abs(num(a.object) - aObj)
+          expect(after).toBeLessThan(before)
+        } else {
+          const orig = new Date(item.asOf!).getTime() // stale：asOf 朝注入 now 靠拢半步（更接近半衰期阈值）
+          const escd = new Date(a.asOf!).getTime()
+          expect(escd).toBeGreaterThan(orig) // 更晚（朝 now）
+          expect(escd).toBeLessThan(fixedNow.getTime()) // 仍早于 now（半步、未越过）
+          // 且确定性地**依赖注入的 now**（换 now → 不同 asOf；证明用的是注入时钟而非墙钟/常量）。
           const c = escalateMiss(item, 'detv1', new Date('2026-09-15T00:00:00.000Z'))
           expect(c.asOf).not.toBe(a.asOf)
         }
