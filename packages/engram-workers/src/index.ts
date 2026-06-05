@@ -98,3 +98,14 @@ export {
   type ClassScore,
 } from './eval/redteam-injector.js'
 export { REDTEAM_GENERATION_VERSION, REDTEAM_GENERATION_ITEMS } from './eval/redteam.gen.js'
+
+// P4a · 红蓝对抗回合编排（北极星 MVP：单红队 + 冻结世代）。一回合端到端复用 S29 注入器（真工种）+ S12 A1 门 +
+// S31 单环归因 + 冻结世代 escalation。两条铁律（A1 题先验真才计分 / A3 检出率禁入 g 与纵向）结构性强制。
+export {
+  runRedBlueRound,
+  type RedBlueRoundDeps,
+  type RedBlueRoundOptions,
+  type RoundResult,
+  type ItemAdmission,
+  type BreachAttribution,
+} from './eval/red-blue-round.js'

@@ -45,11 +45,11 @@ const reader = makeFakeSourceReader()
 
 beforeAll(async () => {
   testDbName = `engram_test_${randomUUID().replace(/-/g, '')}`
-  admin = new pg.Pool({ connectionString: DATABASE_URL })
+  admin = new pg.Pool({ connectionString: DATABASE_URL, max: 2 })
   await admin.query(`CREATE DATABASE ${testDbName}`)
   const url = new URL(DATABASE_URL)
   url.pathname = `/${testDbName}`
-  pool = new pg.Pool({ connectionString: url.toString() })
+  pool = new pg.Pool({ connectionString: url.toString(), max: 4 })
   db = createDb(pool)
   await migrate(db, { migrationsFolder })
 })
