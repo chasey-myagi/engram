@@ -35,6 +35,7 @@ const ALLOWLIST = new Set<string>([
   'distiller.ts', // S5:产 claim + emit run trace(recordAgentRun),非 g-fit 路径
   'arbiter.ts', // S5:裁冲突 + emit run trace,非 g-fit 路径
   'eval/decision-value/learning-loop.ts', // S8:Plan A 闭环把决策结局落 decision_eval(recordDecisionEval),非 g-fit 路径
+  'eval/decision-value/diagnose.ts', // S9:错误决策→producing_run_id→agent_run_trace 的**只读**诊断 join(getAgentRunTrace),非 g-fit 路径
 ])
 
 function scanForbidden(text: string): string[] {
