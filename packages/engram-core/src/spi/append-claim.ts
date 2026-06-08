@@ -57,6 +57,8 @@ export interface DraftClaim {
   asOf?: Date
   /** 写入者 agent_id / user_id。 */
   createdBy?: string
+  /** S5(可观测):产出这条 claim 的 agent run 相关键(commit 事务内落 claim.producing_run_id;不影响 confidence/状态)。 */
+  producingRunId?: string
 }
 
 export interface ProvenanceInput {

@@ -15,14 +15,18 @@
  * judge≠athlete：Arbiter 跑在自己的 by_role（agent:arbiter）/ DB 角色下；它不产出 claim、不写 claim_verification，
  * 只落 contradicts 边 + conflict_adjudicated 事件（采信标记 / 主编队列）。
  */
+import { randomUUID } from 'node:crypto'
+
 import {
   adjudicateConflict,
   assertNcExactEvidence,
   escalateConflict,
   loadConflictSide,
+  recordAgentRun,
   resolveConflict,
   schema,
   adjudicatedPairKeys,
+  type AgentRunTraceInput,
   type ConflictSide,
   type DB,
 } from '@engram/core'
@@ -74,6 +78,10 @@ export interface ArbiterResult {
   skipped: number
   /** loop 终态原因（done / max_turns / error / …）。 */
   loopReason: string
+  /** S5:本轮 agent run 相关键(agent_run_trace.run_id;Arbiter 不产 claim,仅记 run 留痕)。 */
+  runId: string
+  /** S5:run trace 是否成功落库(best-effort;false=被吞,不影响裁决)。 */
+  traceRecorded: boolean
   outcomes: ArbiterOutcome[]
 }
 
@@ -142,6 +150,7 @@ export async function runArbiter(
 ): Promise<ArbiterResult> {
   const byRole = opts.byRole ?? DEFAULT_BY_ROLE
   const maxTurns = opts.maxTurns ?? DEFAULT_MAX_TURNS
+  const runId = randomUUID() // S5:本轮 agent run 相关键
 
   const result: ArbiterResult = {
     byRole,
@@ -149,6 +158,8 @@ export async function runArbiter(
     escalated: 0,
     skipped: 0,
     loopReason: 'done',
+    runId,
+    traceRecorded: false,
     outcomes: [],
   }
 
@@ -303,6 +314,33 @@ export async function runArbiter(
     maxTurns,
   })
   result.loopReason = run.reason
+
+  // S5:落本轮 run 留痕(best-effort、永不抛;ok=false 仅记一笔、不影响裁决收敛)。
+  const traceInput: AgentRunTraceInput = {
+    runId,
+    workerName: byRole,
+    byRole,
+    reason: run.reason,
+    turns: run.turns,
+    ...(run.usage !== undefined
+      ? {
+          inputTokens: run.usage.inputTokens,
+          outputTokens: run.usage.outputTokens,
+          ...(run.usage.reasoningTokens !== undefined
+            ? { reasoningTokens: run.usage.reasoningTokens }
+            : {}),
+        }
+      : {}),
+    ...(run.trace !== undefined
+      ? {
+          toolCalls: run.trace.toolCalls,
+          toolErrors: run.trace.toolErrors,
+          toolNames: run.trace.toolNames,
+        }
+      : {}),
+    payload: { pairs: pairs.length },
+  }
+  result.traceRecorded = (await recordAgentRun(deps.db, traceInput)).ok
 
   // 有界降级（红线）：loop 非正常收尾 **或** 仍有未裁对 → 把剩余对全升级主编，绝不无限重试。
   // （即使 reason='done'，若 LLM 漏裁某对，也兜底升级——确定性收敛不靠 LLM 跑全。）

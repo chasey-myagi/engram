@@ -189,6 +189,9 @@ async function insertNewClaim(
     createdBy: draft.createdBy ?? 'agent:unknown',
     embedding,
     embeddingVersion,
+    // S5:产出此 claim 的 agent run 相关键(纯元数据,供观测层按它 join 回那次 run;不进 confidence/状态/召回)。
+    // 合并路径不改既有 claim 的 producing_run_id(原产出者保留)。
+    producingRunId: draft.producingRunId ?? null,
   })
   for (const p of provenances) {
     await tx.insert(claimProvenance).values({

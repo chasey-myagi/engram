@@ -31,7 +31,10 @@ const FORBIDDEN_TOKENS = [
 ]
 
 /** 允许触碰 trace/decision 的非 g 路径文件(相对 workers/src)。S5/S8 显式扩;Harvester/Runner 永不入此集。 */
-const ALLOWLIST = new Set<string>([])
+const ALLOWLIST = new Set<string>([
+  'distiller.ts', // S5:产 claim + emit run trace(recordAgentRun),非 g-fit 路径
+  'arbiter.ts', // S5:裁冲突 + emit run trace,非 g-fit 路径
+])
 
 function scanForbidden(text: string): string[] {
   return FORBIDDEN_TOKENS.filter((tok) => text.includes(tok))
