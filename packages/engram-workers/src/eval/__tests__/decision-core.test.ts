@@ -82,6 +82,17 @@ describe('S4 · 决策核(answer-vs-abstain 选择性预测)', () => {
     expect(mG.answeredAccuracy).toBe(0)
   })
 
+  it('⑥ 空集边界(S4 carry-over):computeDecisionMetrics([]) → coverage/regret=0、accuracy/risk=NaN', () => {
+    const m = computeDecisionMetrics([], identity, 0.5)
+    expect(m.total).toBe(0)
+    expect(m.answered).toBe(0)
+    expect(m.coverage).toBe(0)
+    expect(m.regret).toBe(0)
+    expect(Number.isNaN(m.answeredAccuracy)).toBe(true)
+    expect(Number.isNaN(m.selectiveRisk)).toBe(true)
+    expect(Number.isNaN(overallAccuracy([]))).toBe(true) // 空集基线守卫
+  })
+
   it('⑤ 决策核零 import:物理上不触达 calibration/g/governance(A3)', () => {
     const src = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), '..', 'decision-value', 'decision-core.ts'),
