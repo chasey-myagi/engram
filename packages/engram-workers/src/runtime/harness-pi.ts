@@ -6,13 +6,22 @@
  * 生产注真 DashScope/Qwen model（env-gated）。pi-ai 的校验器对 plain JSON Schema 有回退路径，
  * 故端口的 plain-object parameters 可直接透传，无需 TypeBox。
  */
-import { AgentSession, type Api, type HarnessTool, type Model } from '@harness-pi/core'
+import {
+  AgentSession,
+  type Api,
+  type HarnessTool,
+  type LlmOptions,
+  type Model,
+} from '@harness-pi/core'
 
 import type { AgentRunRequest, AgentRunResult, AgentRuntime } from './port.js'
 
-/** harness-pi 运行时选项。llmOptions 透传给 pi-ai complete()（如真 model 的 `apiKey`)；signal 会被 session 覆盖。 */
+/**
+ * harness-pi 运行时选项。llmOptions 透传给 pi-ai complete()（如真 model 的 `apiKey`)；signal 由 session 覆盖。
+ * 0.2.1 起用 typed `LlmOptions`(闭 DX #39):`{apikey}` 这类 typo 编译期失败;provider 私有键走具名 `providerExtras`。
+ */
 export interface HarnessPiRuntimeOptions {
-  llmOptions?: Record<string, unknown>
+  llmOptions?: LlmOptions
 }
 
 export function makeHarnessPiRuntime(
