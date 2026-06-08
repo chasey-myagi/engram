@@ -48,7 +48,12 @@ function scanForbidden(text: string): string[] {
  * db/schema.ts(定义这两张表本身)。S3 起 trace SPI 模块路径须**显式**加进 allowlist(= 一次经评审的裁断:
  * 该模块允许碰 trace、且本身不在 g/纵向/在线判据路径上)。其余任何 core 文件出现 trace/decision token = 越界。
  */
-const ALLOWLIST = new Set<string>(['db/schema.ts'])
+const ALLOWLIST = new Set<string>([
+  'db/schema.ts', // 定义 agent_run_trace/decision_eval 表本身
+  'observability/agent-trace.ts', // S3 trace sink SPI:唯一合法读写 agent_run_trace 的模块(只留痕、不进 g/纵向)
+  'index.ts', // 公共 barrel:re-export trace SPI 给外部消费方(workers S5)。非 laundering 口子——任何 g 路径
+  // 文件即便经 ../index.js 导入 trace SPI,其**自身文本**也会出现 recordAgentRun 等 token → 仍被扫出。
+])
 
 function guardedFiles(): string[] {
   const out: string[] = []
