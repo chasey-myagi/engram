@@ -10,7 +10,15 @@ import { AgentSession, type Api, type HarnessTool, type Model } from '@harness-p
 
 import type { AgentRunRequest, AgentRunResult, AgentRuntime } from './port.js'
 
-export function makeHarnessPiRuntime(model: Model<Api>): AgentRuntime {
+/** harness-pi 运行时选项。llmOptions 透传给 pi-ai complete()（如真 model 的 `apiKey`)；signal 会被 session 覆盖。 */
+export interface HarnessPiRuntimeOptions {
+  llmOptions?: Record<string, unknown>
+}
+
+export function makeHarnessPiRuntime(
+  model: Model<Api>,
+  opts: HarnessPiRuntimeOptions = {},
+): AgentRuntime {
   return {
     async run(req: AgentRunRequest): Promise<AgentRunResult> {
       const tools: HarnessTool[] = req.tools.map((t) => ({
@@ -31,6 +39,8 @@ export function makeHarnessPiRuntime(model: Model<Api>): AgentRuntime {
         tools,
         systemPrompt: req.systemPrompt,
         maxTurns: req.maxTurns,
+        // 透传 provider options(真 model 的 apiKey 等);fake model 不读、无害。
+        ...(opts.llmOptions !== undefined ? { llmOptions: opts.llmOptions } : {}),
       })
       const stream = session.runStreaming(req.prompt)
       // 把 loop 跑完（S15 暂不转发 live 事件 —— streaming sink 是后续 adapter 的事）。

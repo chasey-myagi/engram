@@ -67,6 +67,13 @@ const SYSTEM_PROMPT =
   'When every atomic claim has been committed, call finish.'
 
 /**
+ * loop prompt 里「分块正文」段的起始标记 —— 渲染(本文件 renderForLoop)与离线 fake 抽取器(eval 的
+ * makeExtractingFakeRuntime,靠解析 prompt 还原分块)共用的**单一真相源**,杜绝两处各写一份 marker 跨模块漂移。
+ * 标记后紧跟每块一行「<locator>\t<text>」(真 tab 分隔)。
+ */
+export const LOOP_SEGMENTS_MARKER = 'Source content (each line is "<locator>\\t<text>"):\n'
+
+/**
  * 把 read_source 的分块渲染成 loop prompt：每块一行「<locator>\t<text>」，loop 据此逐块 cite。
  * 同时把本 kind 的 locator 形状提示拼进 system prompt，告诉 LLM 该 cite 成什么样（cell/turn/page…）。
  */
@@ -75,7 +82,7 @@ function renderForLoop(kind: string, read: ReadResult): { systemPrompt: string; 
   const body = read.segments.map((s) => `${s.locator}\t${s.text}`).join('\n')
   return {
     systemPrompt,
-    prompt: `Source kind: ${kind}\nRead strategy: ${read.strategy}\nSource content (each line is "<locator>\\t<text>"):\n${body}`,
+    prompt: `Source kind: ${kind}\nRead strategy: ${read.strategy}\n${LOOP_SEGMENTS_MARKER}${body}`,
   }
 }
 

@@ -18,9 +18,9 @@
 
 ## 仓库布局 + Agent 运行时
 
-- monorepo（pnpm workspace）：`packages/engram-core`（`@engram/core`，内核）+ `packages/bidding-adapter`（`@engram/bidding-adapter`，首个领域适配器，经 SPI 单调收紧、**不反向依赖**内核）。
-- **agent 运行时 = `harness-pi`**（自研，站在 `@mariozechner/pi-ai` 上；pi-coding-agent 的 sibling 而非扩展）。5 工种跑在 `@harness-pi/core`（AgentSession + hook/plugin/controller）；有界 loop（Distiller/Arbiter）= maxTurns + tokenBudget + LifecycleRestart。
-- 已知上游 gap（只在 P2 起承重）：harness-pi#1（PG metrics sink）/ #2（auto-compaction）/ #3（streaming）。
+- monorepo（pnpm workspace）三包：`packages/engram-core`（`@engram/core`，内核）+ `packages/engram-workers`（`@engram/workers`，5 工种 + S24 事件总线 + 红蓝对抗 + P4b `EngramRunner` 自闭环；只依赖 core 导出面）+ `packages/bidding-adapter`（`@engram/bidding-adapter`，首个领域适配器，经 SPI 单调收紧、**不反向依赖**内核）。
+- **agent 运行时 = `harness-pi`**（自研，站在 `@mariozechner/pi-ai` 上；pi-coding-agent 的 sibling 而非扩展）。5 工种跑在 `@harness-pi/core`（AgentSession + hook/plugin/controller）；有界 loop（Distiller/Arbiter）= maxTurns + tokenBudget + LifecycleRestart。真 chat model 经 `makeQwenRuntime`（DashScope，env-gated）/ 测试经 `createFakeModel`。
+- harness-pi 上游：曾标的 P2 gap **#1 PG metrics sink / #2 auto-compaction / #3 streaming 均已实现并 CLOSED**，不再是缺口。当前已知 DX nit（搭 engram 时上报、非阻断）：**#38**（自定义 OpenAI 兼容 model 需手搓 `Model` 字面量 + `as Model<Api>` 转 + 占位 `cost:0`，缺 `makeOpenAICompatibleModel` 帮手）/ **#39**（`AgentSessionOptions.llmOptions` 无类型，而它是非 env-resolved provider 传 apiKey 的主路径）。
 
 ## 永久红线（实现时不可破）
 
