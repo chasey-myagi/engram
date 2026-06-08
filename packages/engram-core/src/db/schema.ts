@@ -115,6 +115,9 @@ export const claim = pgTable(
     // S9：claim_text 的嵌入（pgvector）+ 版本锚。nullable —— 老行/未嵌入的为 null；写路径(append)落它。
     embedding: vector('embedding', { dimensions: EMBEDDING_DIM }),
     embeddingVersion: text('embedding_version'),
+    // S5(可观测):产出这条 claim 的 agent run 相关键 → join 到 agent_run_trace.run_id(「错误决策→产出它的 run」)。
+    // nullable —— 老行 / 非 agent loop 产出(人工/直接 seed)为 null;只在 commit 事务内由产出工种填,绝不进 confidence/状态/召回。
+    producingRunId: uuid('producing_run_id'),
   },
   // lineage_id 是跨版本身份，谱系回溯按它查 —— 核心读路径，建索引。HNSW 向量索引在迁移里用裸 SQL 建
   // (CREATE INDEX ... USING hnsw (embedding vector_cosine_ops))，drizzle 0.45 的 op-class 语法不稳。

@@ -13,10 +13,14 @@
  * （markSourceHumanPending），**不无限重试、不阻塞 ingestion**。工种身份（by_role）记在产出 claim 的
  * created_by（athlete 身份）上；Distiller **不**写 claim_verification（自背书违 judge≠athlete，那是 Verifier 的活）。
  */
+import { randomUUID } from 'node:crypto'
+
 import {
   commitClaim,
   getSource,
   markSourceHumanPending,
+  recordAgentRun,
+  type AgentRunTraceInput,
   type DB,
   type Embedder,
   type SameFactJudge,
@@ -57,6 +61,10 @@ export interface DistillResult {
   committed: number
   /** done / max_turns / aborted / error / unsupported_kind / empty_read。 */
   reason: string
+  /** S5:本次蒸馏的 agent run 相关键(盖到产出 claim 的 producing_run_id + agent_run_trace.run_id)。 */
+  runId: string
+  /** S5:本次 run trace 是否成功落库(best-effort;false=被吞,调用方可据此计失败数,不影响蒸馏本身)。 */
+  traceRecorded: boolean
 }
 
 const SYSTEM_PROMPT =
@@ -97,6 +105,8 @@ export async function runDistiller(
 ): Promise<DistillResult> {
   const byRole = opts.byRole ?? DEFAULT_BY_ROLE
   const maxTurns = opts.maxTurns ?? DEFAULT_MAX_TURNS
+  // S5:本次蒸馏的 agent run 相关键。盖到产出 claim 的 producing_run_id + agent_run_trace.run_id ⇒ 「错误决策 → 产出它的 run」可 join。
+  const runId = randomUUID()
 
   const src = await getSource(deps.db, sourceId)
   if (!src) {
@@ -109,7 +119,14 @@ export async function runDistiller(
       reason: `unsupported source kind '${src.kind}'`,
       byRole,
     })
-    return { sourceId, status: 'human_pending', committed: 0, reason: 'unsupported_kind' }
+    return {
+      sourceId,
+      status: 'human_pending',
+      committed: 0,
+      reason: 'unsupported_kind',
+      runId,
+      traceRecorded: false, // 未进 loop、无 agent run 可记
+    }
   }
 
   // ① read_source（S16）：按 kind 选读法，归一成带 locator 锚的分块（含图走 VLM，经注入端口，零硬编码模型）。
@@ -125,7 +142,14 @@ export async function runDistiller(
       reason: `read_source (strategy='${read.strategy}') yielded no locatable segments`,
       byRole,
     })
-    return { sourceId, status: 'human_pending', committed: 0, reason: 'empty_read' }
+    return {
+      sourceId,
+      status: 'human_pending',
+      committed: 0,
+      reason: 'empty_read',
+      runId,
+      traceRecorded: false, // 未进 loop、无 agent run 可记
+    }
   }
 
   let committed = 0
@@ -165,6 +189,7 @@ export async function runDistiller(
       const draft = {
         claimText,
         createdBy: `${byRole}:${sourceId}`,
+        producingRunId: runId, // S5:盖 join 键到 claim.producing_run_id(纯元数据,不进 confidence/状态/召回)
         ...(typeof args.subject === 'string' ? { subject: args.subject } : {}),
         ...(typeof args.predicate === 'string' ? { predicate: args.predicate } : {}),
         ...(typeof args.object === 'string' ? { object: args.object } : {}),
@@ -202,6 +227,33 @@ export async function runDistiller(
     maxTurns,
   })
 
+  // S5:把本次 run 的 usage + 工具 rollup 落 agent_run_trace(best-effort、永不抛;ok=false 仅记一笔、不影响蒸馏)。
+  const traceInput: AgentRunTraceInput = {
+    runId,
+    workerName: byRole,
+    byRole,
+    reason: result.reason,
+    turns: result.turns,
+    ...(result.usage !== undefined
+      ? {
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens,
+          ...(result.usage.reasoningTokens !== undefined
+            ? { reasoningTokens: result.usage.reasoningTokens }
+            : {}),
+        }
+      : {}),
+    ...(result.trace !== undefined
+      ? {
+          toolCalls: result.trace.toolCalls,
+          toolErrors: result.trace.toolErrors,
+          toolNames: result.trace.toolNames,
+        }
+      : {}),
+    payload: { sourceId, committed },
+  }
+  const traceRecorded = (await recordAgentRun(deps.db, traceInput)).ok
+
   if (result.reason !== 'done') {
     // 有界 loop 耗尽 / 出错 / 中断 → 降级人工（已提交的 claim 保留），不无限重试、不阻塞 ingestion。
     await markSourceHumanPending(deps.db, {
@@ -209,7 +261,14 @@ export async function runDistiller(
       reason: `bounded distill loop ended with reason='${result.reason}' after ${result.turns} turns`,
       byRole,
     })
-    return { sourceId, status: 'human_pending', committed, reason: result.reason }
+    return {
+      sourceId,
+      status: 'human_pending',
+      committed,
+      reason: result.reason,
+      runId,
+      traceRecorded,
+    }
   }
-  return { sourceId, status: 'done', committed, reason: result.reason }
+  return { sourceId, status: 'done', committed, reason: result.reason, runId, traceRecorded }
 }
