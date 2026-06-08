@@ -27,10 +27,37 @@ export interface AgentTool {
 /** 归一化终态原因（对齐 harness-pi RunSummary.reason）。done 之外都表示异常/耗尽收尾。 */
 export type AgentStopReason = 'done' | 'max_turns' | 'aborted' | 'error' | 'max_continuations'
 
+/**
+ * 本轮 token 用量(来自 harness-pi RunSummary.usage)。一次 run = 一个独立 session,故该「session 累计」即本轮量、
+ * 无跨 run 重复计数。adapter 取得到才填;fake/旧 adapter 省略(可选,向后兼容)。
+ */
+export interface AgentRunUsage {
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  /** reasoning/thinking token(provider 提供才有)。 */
+  reasoningTokens?: number
+}
+
+/**
+ * 本轮工具调用的 run-level rollup。adapter 在工具 execute 包装里**纯观测**计数(不改执行顺序/结果 ⇒ 决策不变),
+ * 与是否采集无关、对工种透明。per-step 明细(逐 turn args)是后续切片。
+ */
+export interface AgentRunTrace {
+  toolCalls: number
+  toolErrors: number
+  /** 调用过的工具名(去重、按首次出现序)。 */
+  toolNames: string[]
+}
+
 export interface AgentRunResult {
   reason: AgentStopReason
   /** 本轮跑了多少 turn（步）。 */
   turns: number
+  /** 本轮 token 用量(adapter 能取到才填)。可观测第三层(S2 起)。 */
+  usage?: AgentRunUsage
+  /** 本轮工具调用 rollup(adapter 能取到才填)。可观测第三层(S2 起)。 */
+  trace?: AgentRunTrace
 }
 
 export interface AgentRunRequest {
