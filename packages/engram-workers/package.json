@@ -34,7 +34,7 @@
   },
   "dependencies": {
     "@engram/core": "workspace:*",
-    "@harness-pi/core": "^0.2.0",
+    "@harness-pi/core": "^0.2.1",
     "drizzle-orm": "^0.45.2"
   }
 }
