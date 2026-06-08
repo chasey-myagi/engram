@@ -35,7 +35,12 @@ import {
   measureFromSamples,
   type CalibrationMeasurement,
 } from '../calibration-pilot/pilot.js'
-import { buildCorroboratedCorpus, buildRealWorldCorpus, type RealWorldFact } from './corpus.js'
+import {
+  buildCorroboratedCorpus,
+  buildRealWorldCorpus,
+  type CorroboratedFact,
+  type RealWorldFact,
+} from './corpus.js'
 
 export interface RealWorldDeps {
   db: DB
@@ -395,9 +400,15 @@ export interface CorroboratedResult {
  */
 export async function runCorroboratedEce(
   deps: CorroboratedDeps,
-  opts: { binCount?: number; heldoutEvery?: number; limit?: number } = {},
+  opts: {
+    facts?: CorroboratedFact[]
+    binCount?: number
+    heldoutEvery?: number
+    limit?: number
+  } = {},
 ): Promise<CorroboratedResult> {
-  const allFacts = buildCorroboratedCorpus()
+  // facts 可注入(Option C=buildCorroboratedCorpus 公共事实;M3-B=buildPrivateCorpus 私域事实)。缺省公共。
+  const allFacts = opts.facts ?? buildCorroboratedCorpus()
   // limit 仅供真 Qwen 微冒烟核对接线(切片会破坏 tier 平衡/真值率,测量无意义、只验「真模型下确实晋升」)。
   const facts = opts.limit ? allFacts.slice(0, Math.max(1, opts.limit)) : allFacts
   const distillerDeps: DistillerDeps = {
