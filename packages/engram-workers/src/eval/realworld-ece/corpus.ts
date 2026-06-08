@@ -190,17 +190,16 @@ function indepSupport(n: number): number {
 }
 
 /**
- * Option C 语料:48 条事实分 3 个连续 tier 块(各 16 条);heldoutEvery=3 的按序切分会从每块各取 ~5–6 条 ⇒ fit/heldout
- * 两侧都含三档。每条多源印证(n=4)+ tier 内按注入真值率 Bresenham **均匀铺开** isTrue(确定性、精确命中率)。
- * 用来在真 recall/usage/g 上量真 ECE:emergent 置信落 [~0.52,0.58] 窄带、被注入单调过自信,g 在留出事实上压低 ECE。
+ * 把一张真值表(48 行)铺成多源印证语料:3 个连续 tier 块(各 16 条);heldoutEvery=3 的按序切分会从每块各取 ~5–6 条
+ * ⇒ fit/heldout 两侧都含三档。每条多源印证(n=4)+ tier 内按注入真值率 Bresenham **均匀铺开** isTrue(确定性、精确)。
+ * tier 纯按 index 连续切块,**与真值表里的族无关**(只决定 authority/真值率;族与置信/真值无因果)。
+ * isTrue = 「源所述值 == 真值」(false = 源记错;claim 忠实抄源,故 claim 也错)。Option C / M3-B 共用本铺法。
  */
-export function buildCorroboratedCorpus(): CorroboratedFact[] {
-  const rows = buildRows().slice(0, TIERS.length * TIER_SIZE) // 取前 48 条,整除成 3×16
+function buildCorroboratedFrom(rows: FactRow[], idPrefix: string): CorroboratedFact[] {
+  const slice = rows.slice(0, TIERS.length * TIER_SIZE) // 取前 48 条,整除成 3×16
   const indep = indepSupport(CORROBORATION_COUNT)
 
-  return rows.map((r, i) => {
-    // tier 纯按 index 连续切块(0–15 / 16–31 / 32–47),**与首都/元素族无关**(块 1 跨两族)——tier 只决定 authority/真值率,
-    // 族与置信/真值无因果,故无需对齐。
+  return slice.map((r, i) => {
     const tier = Math.floor(i / TIER_SIZE)
     const cfg = TIERS[tier]!
     const j = i % TIER_SIZE
@@ -211,7 +210,7 @@ export function buildCorroboratedCorpus(): CorroboratedFact[] {
     const object = isTrue ? r.trueObject : r.alt
     const auth = cfg.authority
     return {
-      id: `co-${String(i).padStart(2, '0')}`,
+      id: `${idPrefix}-${String(i).padStart(2, '0')}`,
       subject: r.subject,
       predicate: r.predicate,
       docText: `${r.subject} ${r.predicate} ${object}.`,
@@ -224,4 +223,82 @@ export function buildCorroboratedCorpus(): CorroboratedFact[] {
       expectedConfidence: Math.round((0.3 * auth + 0.15 + 0.15 * indep) * 1000) / 1000,
     }
   })
+}
+
+/**
+ * Option C 语料:可世界核验的**公共事实**(首都/元素)。真跑里真 Verifier 会事实核查、把假 claim 挡在 active 外
+ * ⇒ 量不到过自信(见 run-corroborated.ts 真跑发现)。
+ */
+export function buildCorroboratedCorpus(): CorroboratedFact[] {
+  return buildCorroboratedFrom(buildRows(), 'co')
+}
+
+// ───────────────────────── M3-B：判官无法核查的私域/新颖事实 ─────────────────────────
+
+/** 私域事实族:虚构实体 + 数值属性(LLM 无先验 ⇒ entailment 判官无法世界核查)。各 12 条 → 48。 */
+const PRIVATE_FAMILIES: {
+  subject: (code: string) => string
+  unit: string
+  base: number
+  step: number
+  code: (k: number) => string
+}[] = [
+  {
+    subject: (c) => `The torque rating of actuator ${c}`,
+    unit: 'N·m',
+    base: 60,
+    step: 7,
+    code: (k) => `VX-${210 + k}`,
+  },
+  {
+    subject: (c) => `The resonance frequency of alloy ${c}`,
+    unit: 'Hz',
+    base: 410,
+    step: 13,
+    code: (k) => `KX-${330 + k}`,
+  },
+  {
+    subject: (c) => `The allocated budget of project ${c}`,
+    unit: 'k credits',
+    base: 180,
+    step: 11,
+    code: (k) => `MRLN-${40 + k}`,
+  },
+  {
+    subject: (c) => `The rated capacity of module ${c}`,
+    unit: 'units',
+    base: 24,
+    step: 5,
+    code: (k) => `QP-${500 + k}`,
+  },
+]
+const PRIVATE_PER_FAMILY = 12
+/** 错源用的偏移:erroneous source 把真值 +ERR_DELTA 记错(同格式、确定性、≠真值)。 */
+const ERR_DELTA = 17
+
+/** 构造 48 条虚构事实真值表:trueObject=真值、alt=错记值(真值+ERR_DELTA)。LLM 无先验 ⇒ 判官只能靠源、无法核查。 */
+function buildPrivateRows(): FactRow[] {
+  const rows: FactRow[] = []
+  for (const fam of PRIVATE_FAMILIES) {
+    for (let k = 0; k < PRIVATE_PER_FAMILY; k++) {
+      const code = fam.code(k)
+      const trueVal = fam.base + k * fam.step
+      rows.push({
+        subject: fam.subject(code),
+        predicate: 'is',
+        trueObject: `${trueVal} ${fam.unit}`,
+        alt: `${trueVal + ERR_DELTA} ${fam.unit}`,
+      })
+    }
+  }
+  return rows
+}
+
+/**
+ * M3-B 语料:判官**无法世界核查**的私域/新颖事实。结构同 Option C(3 tier、n=4、单调注入过自信),但真跑里真 Verifier
+ * 查不出假 claim(无先验)⇒ 假货能进 active ⇒ 可消费集**真带过自信** ⇒ g 该把置信**向下**修正。这才是真实世界过自信 ECE。
+ * isTrue=「源所述值==真值」:false 即 erroneous source(把真值记成 真值+17),claim 忠实抄错。
+ */
+export function buildPrivateCorpus(): CorroboratedFact[] {
+  return buildCorroboratedFrom(buildPrivateRows(), 'pv')
 }
