@@ -51,8 +51,9 @@ function scanForbidden(text: string): string[] {
 const ALLOWLIST = new Set<string>([
   'db/schema.ts', // 定义 agent_run_trace/decision_eval 表本身
   'observability/agent-trace.ts', // S3 trace sink SPI:唯一合法读写 agent_run_trace 的模块(只留痕、不进 g/纵向)
-  'index.ts', // 公共 barrel:re-export trace SPI 给外部消费方(workers S5)。非 laundering 口子——任何 g 路径
-  // 文件即便经 ../index.js 导入 trace SPI,其**自身文本**也会出现 recordAgentRun 等 token → 仍被扫出。
+  'observability/decision-eval.ts', // S8 decision_eval sink SPI:唯一合法读写 decision_eval 的模块(只记决策实验、不读 usage_truth/不触 g——③b 钉死)
+  'index.ts', // 公共 barrel:re-export trace/decision SPI 给外部消费方(workers S5/S8)。非 laundering 口子——任何 g 路径
+  // 文件即便经 ../index.js 导入 SPI,其**自身文本**也会出现 recordAgentRun/recordDecisionEval 等 token → 仍被扫出。
 ])
 
 function guardedFiles(): string[] {
@@ -100,6 +101,15 @@ describe('A3 防火墙:trace/决策 ops 信号永不进 g/纵向(结构性、永
     const fitter = readFileSync(join(SRC, 'calibration', 'fit-from-usage.ts'), 'utf8')
     expect(fitter).toContain('usage_truth') // 燃料只认真消费真值流
     expect(scanForbidden(fitter)).toEqual([]) // 且绝不引用 trace/decision
+  })
+
+  it('③b 对偶(S8):decision_eval sink 只记决策实验、**绝不**反向触 g-燃料(usage_truth / 拟合 / 取样)', () => {
+    // ③ 守「g 不读决策」;③b 守反方向「决策不喂 g」——decision-eval.ts 不得出现任何 g-燃料符号,
+    // 否则 Plan A 决策指标可能从这里渗回 g(Goodhart)。两条对偶断言夹死 A3 双向隔离。
+    const sink = readFileSync(join(SRC, 'observability', 'decision-eval.ts'), 'utf8')
+    for (const fuel of ['usage_truth', 'fitIsotonic', 'collectUsage', 'reportUsage', 'applyGMap']) {
+      expect(sink.includes(fuel)).toBe(false)
+    }
   })
 
   it('④ RECOMPETE_DIMENSIONS 冻结 = {ece, coverage}(纵向 Δ 物理上无路承载 trace/决策信号)', () => {
