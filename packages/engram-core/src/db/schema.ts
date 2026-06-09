@@ -115,6 +115,9 @@ export const claim = pgTable(
     // S9：claim_text 的嵌入（pgvector）+ 版本锚。nullable —— 老行/未嵌入的为 null；写路径(append)落它。
     embedding: vector('embedding', { dimensions: EMBEDDING_DIM }),
     embeddingVersion: text('embedding_version'),
+    // S5(可观测):产出这条 claim 的 agent run 相关键 → join 到 agent_run_trace.run_id(「错误决策→产出它的 run」)。
+    // nullable —— 老行 / 非 agent loop 产出(人工/直接 seed)为 null;只在 commit 事务内由产出工种填,绝不进 confidence/状态/召回。
+    producingRunId: uuid('producing_run_id'),
   },
   // lineage_id 是跨版本身份，谱系回溯按它查 —— 核心读路径，建索引。HNSW 向量索引在迁移里用裸 SQL 建
   // (CREATE INDEX ... USING hnsw (embedding vector_cosine_ops))，drizzle 0.45 的 op-class 语法不稳。
@@ -588,6 +591,82 @@ export const knowledgeGrewEvents = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('idx_knowledge_grew_release').on(t.releaseSnapshot)],
+)
+
+/**
+ * agent_run_trace：**agent-loop 可观测**(第三层,trace/metric)的 append-only run-LEVEL 留痕(S1 起)。
+ * harness-pi AgentSession 一次 runtime.run = 一行:终态 reason / turns / token 用量 / 工具调用 rollup(次数+失败数+名字)。
+ * runId 是相关键(S5 起盖到 claim.producing_run_id,使「错误决策→产出它的 agent run」可 join)。
+ *
+ * **A3 红线(结构性边界)**:本表是**纯 ops/eval 留痕**,**绝不**进任何在线判据/校准 g/纵向趋势——
+ * 拟合器(fit-from-usage.ts)只读 claim_verification(kind='usage_truth');calibration/* 与 longitudinal-recompete.ts
+ * **永不** import 本表/其 SPI(由 a3-firewall 测试静态钉死)。trace token/turns 这类信号若被接进 recall/confidence,
+ * trace 就成了在线信号——firewall 测试 + import-graph 守卫专防此事。per-step 明细(逐 turn 工具 args)是后续切片。
+ */
+export const agentRunTrace = pgTable(
+  'agent_run_trace',
+  {
+    id: uuid('id').primaryKey(),
+    // 一次 runtime.run 的相关键(S5 盖到 claim.producing_run_id 供 join)。
+    runId: uuid('run_id').notNull(),
+    // 工种标签(如 'agent:distiller')+ 角色(by_role)。
+    workerName: text('worker_name').notNull(),
+    byRole: text('by_role').notNull(),
+    // 归一终态(AgentStopReason:done/max_turns/aborted/error/max_continuations)+ 跑了几轮。
+    reason: text('reason').notNull(),
+    turns: integer('turns').notNull(),
+    // token 用量(RunSummary.usage;自定义 Qwen model cost 占位、可能缺,故 nullable)。
+    inputTokens: integer('input_tokens'),
+    outputTokens: integer('output_tokens'),
+    reasoningTokens: integer('reasoning_tokens'),
+    // 工具调用 run-level rollup:总次数 / 失败次数 / 调用过的工具名(去重数组)。
+    toolCalls: integer('tool_calls').notNull().default(0),
+    toolErrors: integer('tool_errors').notNull().default(0),
+    toolNames: jsonb('tool_names')
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    // 诊断负载(model id / 截断标记等),离线分析用,**不进任何计分**。
+    payload: jsonb('payload')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('idx_agent_run_trace_run').on(t.runId),
+    index('idx_agent_run_trace_worker_created').on(t.workerName, t.createdAt),
+  ],
+)
+
+/**
+ * decision_eval：**Plan A 决策价值实验**的 append-only 计分台(S1 起,S8 填)。一行 = 一次实验 run 某 variant 的一个
+ * **有符号**指标读数(decisionLift / roundDelta 可负)——这正是它**不能**塞 dimension_events 的原因(那里 value 硬卡
+ * [0,1] 且 DimensionName 冻结)、也不能塞 recompete(白名单只 {ece,coverage})。
+ *
+ * **A3 红线**:决策动作**不走** report_usage(否则决策会反过来训练 g);决策结局只落本表。本表与 trace 同属 ops/eval,
+ * **绝不**被 g/纵向读取(firewall 测试静态钉死)。signed value 让 lift/delta 保号(clamp 到 [0,1] 会丢号、丢掉重点)。
+ */
+export const decisionEval = pgTable(
+  'decision_eval',
+  {
+    id: uuid('id').primaryKey(),
+    // 实验 run 标签(如 'A:R1' / 'A:R2');同 run 多 variant 多指标共享。
+    runLabel: text('run_label').notNull(),
+    // 基线变体:'identity' | 'fitted' | 'oracle'(纯文本,内核不解释)。
+    variant: text('variant').notNull(),
+    // 指标名:'answeredAccuracy' | 'coverage' | 'selectiveRisk' | 'regret' | 'decisionLift' | 'roundDelta' …
+    metric: text('metric').notNull(),
+    // **有符号**读数(lift/delta 可负)。
+    value: doublePrecision('value').notNull(),
+    // bootstrap 置信区间(可空)+ 样本数:小样本下「lift>0」是否真信靠这俩判。
+    ciLow: doublePrecision('ci_low'),
+    ciHigh: doublePrecision('ci_high'),
+    sampleN: integer('sample_n'),
+    payload: jsonb('payload')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('idx_decision_eval_run').on(t.runLabel, t.metric)],
 )
 
 export type SourceKind = (typeof sourceKind.enumValues)[number]

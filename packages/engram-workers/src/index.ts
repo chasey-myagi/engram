@@ -57,6 +57,8 @@ export {
   type AgentToolResult,
   type AgentRunRequest,
   type AgentRunResult,
+  type AgentRunUsage,
+  type AgentRunTrace,
   type AgentStopReason,
 } from './runtime/port.js'
 export { makeHarnessPiRuntime, type HarnessPiRuntimeOptions } from './runtime/harness-pi.js'

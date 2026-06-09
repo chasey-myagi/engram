@@ -185,6 +185,23 @@ export {
   type RedTeamGeneration,
   type ImmunityScore,
 } from './spi/redteam-generation.js'
+// 可观测第三层(S3)· agent-loop trace sink:把 harness-pi 采到的 run-level 留痕落库 + 按 runId 读回(S9 诊断 join 用)。
+// best-effort、永不抛进 worker;A3 边界——只写/读留痕,绝不进 g/纵向(a3-firewall allowlist 内的唯一 trace 引用点)。
+export {
+  recordAgentRun,
+  getAgentRunTrace,
+  type AgentRunTraceInput,
+  type AgentRunTraceRecord,
+} from './observability/agent-trace.js'
+// 可观测第三层(S8)· decision_eval sink:把 Plan A 决策价值实验的有符号读数(lift/delta 可负)落库 + 按 runLabel 读回。
+// fail-loud(实验记录、丢行即污染结论);A3 红线——决策只落本表、绝不走 report_usage,且本模块不读 usage_truth/不触 g(firewall ③b 钉死)。
+export {
+  recordDecisionEval,
+  getDecisionEval,
+  type DecisionEvalInput,
+  type DecisionEvalRecord,
+} from './observability/decision-eval.js'
+
 // S30 · L3 系统维度（substrate-ready 七维）的 append-only 度量脊柱 + 离线幂等聚合 + 时间序列读路径。
 export {
   recordDimension,
