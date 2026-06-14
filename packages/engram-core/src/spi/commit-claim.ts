@@ -29,7 +29,7 @@ import {
   type ClaimShape,
   type SameFactJudge,
 } from '../same-fact/same-fact.js'
-import { computeConfidenceFromProvenances } from './append-claim.js'
+import { computeConfidenceFromProvenances, validateProvenanceInput } from './append-claim.js'
 import type { DraftClaim, ProvenanceInput } from './append-claim.js'
 
 export interface CommitResult {
@@ -225,11 +225,7 @@ export async function commitClaim(
   draft: DraftClaim,
   provenances: ProvenanceInput[],
 ): Promise<CommitResult> {
-  if (!Array.isArray(provenances) || provenances.length < 1) {
-    throw new Error(
-      'commit_claim: D1 violation — a claim requires >=1 provenance (forced provenance)',
-    )
-  }
+  validateProvenanceInput(provenances) // D1 完整门：≥1 出处 + 每条 sourceId/locator 可钻回（与 append 同一 guard）
   const embedding = await embedder.embed(draft.claimText, 'document') // 事务外算（纯计算/远程）
   const me = shapeOf(draft)
   const candidates = await findCandidates(db, embedding, me.subject)

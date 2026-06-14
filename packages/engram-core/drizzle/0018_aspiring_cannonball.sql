@@ -1,0 +1,1 @@
+ALTER TABLE "claim_provenance" ADD CONSTRAINT "claim_provenance_locator_nonblank" CHECK (length(btrim("claim_provenance"."locator")) > 0);

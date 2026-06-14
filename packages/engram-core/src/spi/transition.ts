@@ -166,6 +166,13 @@ export async function transitionClaimInTx(
     )
   }
   if (opts.evidence) {
+    // EGR-CR-023：留痕的 exact 证据必须能钻回原文。空/全空白 locator → 整个放松被拒（claim 不翻 active、
+    // 不落幽灵 evidence），沿用 append 同一错误语义（D1 locator 不变量在 core 层统一表达）。
+    if (typeof opts.evidence.locator !== 'string' || opts.evidence.locator.trim().length < 1) {
+      throw new Error(
+        'append_claim: D1 violation — provenance.locator must be a non-empty, non-whitespace string (drill-back anchor required)',
+      )
+    }
     // 给了新正向 exact 证据 → append-only 留痕（"找到新正向 exact 证据" 那条放松路）。
     await tx.insert(claimProvenance).values({
       id: randomUUID(),

@@ -98,6 +98,42 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
     expect(await db.select().from(claimProvenance)).toHaveLength(0)
   })
 
+  // EGR-CR-023: locator 必须能钻回原文锚点。空/全空白 locator = 不可点击的幽灵出处，core guard 连事务都不开就拒。
+  it.each([
+    ['empty string', ''],
+    ['all whitespace', '   '],
+  ])(
+    'appendClaim rejects a blank locator (%s) before opening a tx and writes NOTHING (EGR-CR-023 core guard)',
+    async (_label, locator) => {
+      const { sourceId } = await seedSource() // a real source so the FK passes — isolates the locator guard
+      await expect(
+        appendClaim(db, embedder, { claimText: 'ghost' }, [{ sourceId, locator }]),
+      ).rejects.toThrow(/locator/i)
+      expect(await db.select().from(claim)).toHaveLength(0)
+      expect(await db.select().from(claimProvenance)).toHaveLength(0)
+    },
+  )
+
+  it.each([
+    ['empty string', ''],
+    ['all whitespace', '   '],
+  ])(
+    'supersedeClaim rejects a blank locator (%s) — old head stays, no new version, no supersedes edge (EGR-CR-023)',
+    async (_label, locator) => {
+      const { sourceId } = await seedSource()
+      const { claimId: headId } = await appendClaim(db, embedder, { claimText: 'v1' }, [
+        { sourceId, locator: 'page 1' },
+      ])
+      await expect(
+        supersedeClaim(db, embedder, headId, { claimText: 'v2' }, [{ sourceId, locator }]),
+      ).rejects.toThrow(/locator/i)
+      const head = (await db.select().from(claim).where(eq(claim.id, headId)))[0]!
+      expect(head.status).toBe('draft') // old head untouched, NOT marked superseded
+      expect(await db.select().from(claim)).toHaveLength(1) // no v2 written
+      expect(await db.select().from(relation)).toHaveLength(0) // no supersedes edge
+    },
+  )
+
   it('rolls back the whole append when a provenance points at a nonexistent source (NOT NULL FK)', async () => {
     await expect(
       appendClaim(db, embedder, { claimText: 'bad-prov' }, [
@@ -312,6 +348,29 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
       ),
     ).rejects.toThrow()
   })
+
+  it.each([
+    ['empty string', ''],
+    ['all whitespace', '   '],
+  ])(
+    'EGR-CR-023 DB-layer backstop: a blank locator (%s) is physically rejected even when bypassing the SPI guard (CHECK constraint)',
+    async (_label, locator) => {
+      const { sourceId } = await seedSource()
+      const { claimId } = await appendClaim(db, embedder, { claimText: 'real' }, [
+        { sourceId, locator: 'page 1' },
+      ])
+      // bypass the SPI guard, hit the table directly via drizzle: the DB CHECK must reject a blank locator
+      await expect(
+        db.insert(claimProvenance).values({
+          id: randomUUID(),
+          claimId,
+          sourceId,
+          locator,
+          relevance: 'supporting',
+        }),
+      ).rejects.toThrow()
+    },
+  )
 
   it('命门 end-to-end: 1 source vs 3 independent sources vs a stale source → three distinct continuous confidences', async () => {
     const s1 = await seedSource()

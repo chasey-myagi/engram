@@ -214,6 +214,33 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
     expect(rec.excerpt).toBe('p.4: the figure was re-measured') // excerpt round-trips on the relax path
   })
 
+  // EGR-CR-023: red-edge evidence must be drill-back-able. A blank locator makes the "leave a trail" exact
+  // evidence a ghost — the whole relaxation is rejected, the claim stays quarantined, no ghost provenance lands.
+  it.each([
+    ['empty string', ''],
+    ['all whitespace', '   '],
+  ])(
+    'A.4 red line — evidence with a blank locator (%s) is rejected; claim stays quarantined, no ghost provenance (EGR-CR-023)',
+    async (_label, locator) => {
+      const id = await seedClaim({
+        query: 'quarantined claim C',
+        status: 'quarantined',
+        profile: HIGH,
+      })
+      const { sourceId } = await aSource()
+      const provBefore = (
+        await db.select().from(claimProvenance).where(eq(claimProvenance.claimId, id))
+      ).length
+      await expect(
+        transitionClaim(db, id, 'active', { by: 'human:judge', evidence: { sourceId, locator } }),
+      ).rejects.toThrow(/locator/i)
+      expect(await statusOf(id)).toBe('quarantined') // relaxation rejected as a whole — NOT flipped to active
+      expect(
+        (await db.select().from(claimProvenance).where(eq(claimProvenance.claimId, id))).length,
+      ).toBe(provBefore) // no ghost evidence row landed
+    },
+  )
+
   it('A.4 red line — flagged→active (amnesty) and superseded→active (rollback) are human-only and need no new evidence', async () => {
     const flagged = await seedClaim({ query: 'flagged claim', status: 'flagged', profile: HIGH })
     await expect(transitionClaim(db, flagged, 'active', { by: 'agent:x' })).rejects.toThrow(
