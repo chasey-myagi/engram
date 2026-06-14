@@ -15,18 +15,12 @@
  */
 import { randomUUID } from 'node:crypto'
 
-import { and, desc, eq, inArray, or } from 'drizzle-orm'
+import { and, desc, eq, or } from 'drizzle-orm'
 
-import {
-  claim,
-  claimProvenance,
-  metricsEvents,
-  relation,
-  source,
-  type ClaimStatus,
-} from '../db/schema.js'
+import { claim, claimProvenance, metricsEvents, relation, type ClaimStatus } from '../db/schema.js'
 import type { DB, Tx } from '../db/client.js'
-import { countIndependentSupports, type SourceIndep } from '../same-fact/independent.js'
+import { countIndependentSupports } from '../same-fact/independent.js'
+import { loadSourcesWithAncestors } from './append-claim.js'
 import { isHumanRole } from './reflux.js'
 import type { Adjudication, ConflictSide, LadderRung } from './conflict-ladder.js'
 
@@ -80,21 +74,15 @@ export async function loadConflictSide(q: Queryable, claimId: string): Promise<C
         .map((p) => p.sourceId),
     ),
   ]
-  const sources = supportSourceIds.length
-    ? await q
-        .select({
-          id: source.id,
-          contentHash: source.contentHash,
-          kind: source.kind,
-          authorityScore: source.authorityScore,
-          derivedFromSourceId: source.derivedFromSourceId,
-        })
-        .from(source)
-        .where(inArray(source.id, supportSourceIds))
-    : []
-  const authority = sources.reduce((max, s) => (s.authorityScore > max ? s.authorityScore : max), 0)
-  // countIndependentSupports 只看 SourceIndep 的字段面（id/contentHash/kind/derivedFromSourceId）；authorityScore 是 f0 用、不入印证。
-  const indepSupport = countIndependentSupports(sources)
+  // EGR-CR-024：连同 derived_from 祖先链一起取（与 computeConfidenceFromProvenances 同口径），否则 sibling 共享一个
+  // 未被引用的上游会把 ⑤ 独立印证数刷高、污染裁决阶梯。authority 仍只取**被引用源**最强（祖先不抬权威）。
+  const sources = await loadSourcesWithAncestors(q, supportSourceIds)
+  const citedSet = new Set(supportSourceIds)
+  const authority = sources
+    .filter((s) => s.cited)
+    .reduce((max, s) => (s.authority > max ? s.authority : max), 0)
+  // countIndependentSupports 折叠到血缘根、只在被引用源上计数（祖先只作折叠锚点）。
+  const indepSupport = countIndependentSupports(sources, citedSet)
 
   // A.5 ②：本 claim 作为 supersedes 边的 from 端时取代的 to 端集合（append 新版本时 supersedeClaim 落的边）。
   const superRows = await q

@@ -194,6 +194,42 @@ describe('S20 conflict-arbiter SPI (A.5): deterministic adjudication, no status 
     expect(s.supersedes.size).toBe(0)
   })
 
+  // EGR-CR-024 (#102) — T4: the SECOND f3 consumer (the ladder's ⑤ indepSupport) must collapse sibling
+  // sources that share an un-cited ancestor too, else a same-upstream derived source pads the rung ⑤ count.
+  it('loadConflictSide collapses sibling derived sources sharing an un-cited ancestor for ladder ⑤ (shared ancestor — EGR-CR-024)', async () => {
+    const R = await addSource(db, {
+      content: `root-${randomUUID()}`,
+      contentHash: randomUUID(),
+      kind: 'structured_spec',
+      authorityScore: 0.5,
+    })
+    const B = await addSource(db, {
+      content: `derivedB-${randomUUID()}`,
+      contentHash: randomUUID(),
+      kind: 'structured_spec',
+      authorityScore: 0.5,
+      derivedFromSourceId: R.sourceId,
+    })
+    const C = await addSource(db, {
+      content: `derivedC-${randomUUID()}`,
+      contentHash: randomUUID(),
+      kind: 'structured_spec',
+      authorityScore: 0.5,
+      derivedFromSourceId: R.sourceId,
+    })
+    const { claimId } = await appendClaim(
+      db,
+      embedder,
+      { claimText: 'sibling ladder f3', subject: 'sku-s', predicate: 'p', object: 'o' },
+      [
+        { sourceId: B.sourceId, locator: 'L1', relevance: 'exact' },
+        { sourceId: C.sourceId, locator: 'L2', relevance: 'exact' }, // cites only B, C — never R
+      ],
+    )
+    const s = await loadConflictSide(db, claimId)
+    expect(s.indepSupport).toBe(1) // B, C collapse to root R ⇒ ONE independent support, not 2
+  })
+
   it('loadConflictSide ignores tangential/irrelevant provenance when scoring authority/indepSupport (anti-Goodhart: an off-relevance source cannot inflate the ladder ④/⑤)', async () => {
     // one LOW-authority EXACT source (counts) + a HIGH-authority TANGENTIAL and a HIGH-authority IRRELEVANT (must NOT count)
     const id = randomUUID()

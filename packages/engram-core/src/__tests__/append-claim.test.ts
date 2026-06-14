@@ -466,6 +466,41 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
     expect(cf.factors.indepSupport).toBe(0) // 1 distinct source → no independent corroboration, not 2
   })
 
+  // EGR-CR-024 (#102): two derived siblings (B, C) sharing an un-cited ancestor R must NOT inflate f3.
+  // The claim cites only B and C; the fix recursively loads R via derived_from so the two collapse to the
+  // single root lineage → 1 independent support → independentSupportScore(1) = 0, NOT 0.5.
+  it('indepSupport collapses sibling derived sources sharing an un-cited ancestor (shared ancestor f3 — EGR-CR-024)', async () => {
+    const R = await addSource(db, {
+      content: 'datasheet',
+      contentHash: randomUUID(),
+      kind: 'structured_spec',
+      authorityScore: 0.5,
+    })
+    const B = await addSource(db, {
+      content: 'derivedB',
+      contentHash: randomUUID(),
+      kind: 'structured_spec',
+      authorityScore: 0.5,
+      derivedFromSourceId: R.sourceId,
+    })
+    const C = await addSource(db, {
+      content: 'derivedC',
+      contentHash: randomUUID(),
+      kind: 'structured_spec',
+      authorityScore: 0.5,
+      derivedFromSourceId: R.sourceId,
+    })
+    const { claimId } = await appendClaim(db, embedder, { claimText: 'sibling f3' }, [
+      { sourceId: B.sourceId, locator: 'l1' },
+      { sourceId: C.sourceId, locator: 'l2' }, // cites only B, C — never R
+    ])
+    const cf = (await db.select().from(claim).where(eq(claim.id, claimId)))[0]!
+      .confidenceFactors as {
+      factors: { indepSupport: number }
+    }
+    expect(cf.factors.indepSupport).toBe(0) // collapse to root R ⇒ 1 independent support ⇒ score 0, not 0.5
+  })
+
   it('all five enums match Appendix A.1 exactly', () => {
     expect(sourceKind.enumValues).toEqual([
       'formal_document',

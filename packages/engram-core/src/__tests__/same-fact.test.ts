@@ -158,6 +158,69 @@ describe('S14 same-fact pure functions (A.6)', () => {
     ).toBe(0) // mutual cycle: both collapse, terminates
   })
 
+  // EGR-CR-024 (#102): two cited siblings sharing an UN-cited common ancestor R must collapse to ONE
+  // independent support, not two. The fix feeds the full ancestor chain to countIndependentSupports and
+  // passes citedIds so R is only a collapse anchor, never counted as its own corroboration.
+  it('countIndependentSupports: cited siblings sharing an un-cited ancestor collapse to ONE (shared ancestor / 未引用 / sibling)', () => {
+    const R: SourceIndep = {
+      id: 'R',
+      contentHash: 'hR',
+      kind: 'structured_spec',
+      derivedFromSourceId: null,
+    }
+    const B: SourceIndep = {
+      id: 'B',
+      contentHash: 'hB',
+      kind: 'structured_spec',
+      derivedFromSourceId: 'R',
+    }
+    const C: SourceIndep = {
+      id: 'C',
+      contentHash: 'hC',
+      kind: 'structured_spec',
+      derivedFromSourceId: 'R',
+    }
+    // claim only cites [B, C]; R is pulled in only to complete the lineage (citedIds excludes R).
+    expect(countIndependentSupports([R, B, C], new Set(['B', 'C']))).toBe(1)
+    // reverse-error guard (A2): when R is ALSO cited, it must still be 1 — R is the root, B/C collapse,
+    // and R is not double-counted on top of its own descendants.
+    expect(countIndependentSupports([R, B, C], new Set(['R', 'B', 'C']))).toBe(1)
+    // sanity: the legacy in-set behaviour (citedIds omitted ⇒ all cited) still collapses to the root R.
+    expect(countIndependentSupports([R, B, C])).toBe(1)
+  })
+
+  // EGR-CR-024 (#102) — A3: multiple agent_synthesis siblings off one structured_spec root collapse to the
+  // root; the 0.5 discount is NOT applied per-sibling (root kind decides the discount, applied once).
+  it('countIndependentSupports: multi-level chain + agent_synthesis discount applied AFTER collapse (A3)', () => {
+    const R: SourceIndep = {
+      id: 'R',
+      contentHash: 'hR',
+      kind: 'structured_spec',
+      derivedFromSourceId: null,
+    }
+    const S1: SourceIndep = {
+      id: 'S1',
+      contentHash: 'hS1',
+      kind: 'agent_synthesis',
+      derivedFromSourceId: 'R',
+    }
+    const S2: SourceIndep = {
+      id: 'S2',
+      contentHash: 'hS2',
+      kind: 'agent_synthesis',
+      derivedFromSourceId: 'R',
+    }
+    // claim cites [S1, S2]; both collapse to root R (structured_spec) ⇒ 1, NOT 0.5 + 0.5.
+    expect(countIndependentSupports([R, S1, S2], new Set(['S1', 'S2']))).toBe(1)
+    // contrast: two INDEPENDENT agent_synthesis roots (no shared ancestor) still each take the 0.5 discount.
+    expect(
+      countIndependentSupports([
+        { ...S1, derivedFromSourceId: null },
+        { ...S2, derivedFromSourceId: null },
+      ]),
+    ).toBeCloseTo(1.0) // 0.5 + 0.5
+  })
+
   it('adjudicate spends the gray-zone LLM exactly at the 0.65 boundary (>=)', async () => {
     const j = makeFakeSameFactJudge({ verdictOf: () => 'same' })
     expect(
