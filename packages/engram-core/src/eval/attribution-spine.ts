@@ -137,13 +137,26 @@ async function isMisaligned(db: DB, claimId: string): Promise<boolean> {
 }
 
 /**
- * 判 claim 是否「被某次 resolved 冲突裁为败者」（Arbiter 裁错的判据）：存在一条 conflict_adjudicated(resolved)
- * 其 loserId === 该 claim —— 即 Arbiter 当时判它输了，而它却是被用错/推翻的失败 claim ⇒ 裁错（本该信它/本不该判它败）。
+ * 判 claim 是否「被某次 resolved 冲突裁为败者」：存在一条 conflict_adjudicated(resolved) 其 loserId === 该 claim。
+ * **极性（EGR-CR-057）**：这只是「该 claim 在裁决里是输方」的事实，是否构成 Arbiter 裁错取决于来路——
+ *   - human_overturn（误隔离的好 claim）：好 claim 被判输 ⇒ Arbiter 把好 claim 压下 ⇒ **裁错**，用本判据。
+ *   - reflux（被证伪的错 claim）：错 claim 被判输是**正确**裁决，不是裁错 ⇒ 用 wasAdjudicatedWinner。
  * 确定性纯读（getResolvedConflicts 已按 (created_at,id) 排序）。
  */
 async function wasAdjudicatedLoser(db: DB, claimId: string): Promise<boolean> {
   const resolved = await getResolvedConflicts(db)
   return resolved.some((r) => r.payload.loserId === claimId)
+}
+
+/**
+ * 判 claim 是否「被某次 resolved 冲突裁为赢家」：存在一条 conflict_adjudicated(resolved) 其 winnerId === 该 claim。
+ * **极性（EGR-CR-057）**：对 reflux 的失败 claim（usage truth 证伪的错 claim），「被 Arbiter 捧成赢家」才是真·裁错
+ * （把错的捧成赢家），故 reflux 用本判据而非 wasAdjudicatedLoser。与 wasAdjudicatedLoser 对称、复用同一只读源。
+ * 确定性纯读（getResolvedConflicts 已按 (created_at,id) 排序）。
+ */
+async function wasAdjudicatedWinner(db: DB, claimId: string): Promise<boolean> {
+  const resolved = await getResolvedConflicts(db)
+  return resolved.some((r) => r.payload.winnerId === claimId)
 }
 
 /**
@@ -160,14 +173,31 @@ async function wasNeverPatrolled(db: DB, claimId: string): Promise<boolean> {
 }
 
 /**
+ * 「Arbiter 裁错」判据的**极性（EGR-CR-057）**：失败 claim 在裁决里应处的角色——
+ *   - `'won'`（reflux）：失败 claim = 被证伪的**错** claim ⇒ Arbiter 把它捧成赢家才是裁错（读 winnerId）。
+ *   - `'lost'`（human_overturn）：失败 claim = 被误隔离的**好** claim ⇒ Arbiter 把它判输才是裁错（读 loserId）。
+ * 不能用一个判据套所有来路——两条来路里失败 claim 的「对错」相反，故 Arbiter 裁错的极性也相反。
+ */
+export type ArbiterMisAdjudicateWhen = 'won' | 'lost'
+
+/**
  * 一条牵连具体 claim 的失败（reflux / overturn）的**候选环**集合。四个判据各自确定性、互不依赖顺序；
  * 收敛由 PRECEDENCE 在 pickSingleLoop 里做。**至少给一个**候选（calibration_drift 是兜底环——出处齐、非误裁、
  * 巡查过却仍错，只剩「g 过自信」一种解释），故空集不可能。
+ * `opts.arbiterMisAdjudicateWhen` 显式指定 Arbiter 裁错极性（见 ArbiterMisAdjudicateWhen），由来路决定。
  */
-async function loopCandidatesForClaim(db: DB, claimId: string): Promise<Set<ResponsibleLoop>> {
+async function loopCandidatesForClaim(
+  db: DB,
+  claimId: string,
+  opts: { arbiterMisAdjudicateWhen: ArbiterMisAdjudicateWhen },
+): Promise<Set<ResponsibleLoop>> {
   const candidates = new Set<ResponsibleLoop>()
   if (await isMisaligned(db, claimId)) candidates.add(RESPONSIBLE_LOOP.distillerMisExtract)
-  if (await wasAdjudicatedLoser(db, claimId)) candidates.add(RESPONSIBLE_LOOP.arbiterMisAdjudicate)
+  const arbiterMisAdjudicated =
+    opts.arbiterMisAdjudicateWhen === 'won'
+      ? await wasAdjudicatedWinner(db, claimId)
+      : await wasAdjudicatedLoser(db, claimId)
+  if (arbiterMisAdjudicated) candidates.add(RESPONSIBLE_LOOP.arbiterMisAdjudicate)
   if (await wasNeverPatrolled(db, claimId)) candidates.add(RESPONSIBLE_LOOP.verifierMiss)
   // 兜底：以上皆否（出处齐 + 非误裁 + 巡查过）却仍是失败 claim ⇒ 只剩 g 过自信（calibration 漂移）。
   if (candidates.size === 0) candidates.add(RESPONSIBLE_LOOP.calibrationDrift)
@@ -186,13 +216,16 @@ export async function attributeFailure(db: DB, input: FailureInput): Promise<Att
       if (!item) {
         throw new Error(`attributeFailure: regression item ${input.regressionId} not found`)
       }
-      const candidates = pickSingleLoop(await loopCandidatesForClaim(db, item.claimId))
+      // EGR-CR-057 极性='won'：reflux 失败 claim 是被证伪的错 claim ⇒ Arbiter 把它捧成赢家才是裁错。
+      const candidates = pickSingleLoop(
+        await loopCandidatesForClaim(db, item.claimId, { arbiterMisAdjudicateWhen: 'won' }),
+      )
       return {
         failureKind: 'reflux_regression',
         failureRef: item.id,
         responsibleLoop: candidates[0]!,
         candidates,
-        reason: reasonFor(candidates[0]!, item.claimId, `reflux outcome=${item.outcome}`),
+        reason: reasonFor(candidates[0]!, item.claimId, `reflux outcome=${item.outcome}`, 'won'),
         claimId: item.claimId,
       }
     }
@@ -233,15 +266,23 @@ export async function attributeFailure(db: DB, input: FailureInput): Promise<Att
           `attributeFailure: overturn ${input.overturnEventId} is '${ov.payload.overturn}', only un_quarantine is a mis-quarantine failure`,
         )
       }
-      // 人解隔离 = agent 误隔离了一条本该 active 的 claim。误隔离的根因经同一张 claim 证据表归因（确定性）。
+      // 人解隔离 = agent 误隔离了一条本该 active 的**好** claim。误隔离的根因经同一张 claim 证据表归因（确定性）。
+      // EGR-CR-057 极性='lost'：好 claim 被 Arbiter 判输才是裁错（把好 claim 压下）——与 reflux 相反。
       const claimId = ov.payload.claimId
-      const candidates = pickSingleLoop(await loopCandidatesForClaim(db, claimId))
+      const candidates = pickSingleLoop(
+        await loopCandidatesForClaim(db, claimId, { arbiterMisAdjudicateWhen: 'lost' }),
+      )
       return {
         failureKind: 'human_overturn_mis_quarantine',
         failureRef: ov.eventId,
         responsibleLoop: candidates[0]!,
         candidates,
-        reason: reasonFor(candidates[0]!, claimId, 'human un-quarantined a mis-quarantined claim'),
+        reason: reasonFor(
+          candidates[0]!,
+          claimId,
+          'human un-quarantined a mis-quarantined claim',
+          'lost',
+        ),
         claimId,
       }
     }
@@ -276,11 +317,20 @@ export function loopForRedTeamClass(klass: RedTeamClass): ResponsibleLoop {
   }
 }
 
-/** 组装人读理由（凭何归此环）。 */
-function reasonFor(loop: ResponsibleLoop, claimId: string, context: string): string {
+/** 组装人读理由（凭何归此环）。`arbiterWhen` 决定 Arbiter 裁错理由的极性（EGR-CR-057）。 */
+function reasonFor(
+  loop: ResponsibleLoop,
+  claimId: string,
+  context: string,
+  arbiterWhen: ArbiterMisAdjudicateWhen,
+): string {
+  const arbiterWhy =
+    arbiterWhen === 'won'
+      ? `claim ${claimId} was crowned the winner of a resolved conflict yet proved wrong (wrong winner adjudicated)`
+      : `claim ${claimId} was the loser of a resolved conflict yet was a good claim (a good claim wrongly ruled down)`
   const why: Record<ResponsibleLoop, string> = {
     distiller_mis_extract: `claim ${claimId} has no exact/supporting provenance (mis-extracted / mis-aligned)`,
-    arbiter_mis_adjudicate: `claim ${claimId} was the loser of a resolved conflict (wrong winner adjudicated)`,
+    arbiter_mis_adjudicate: arbiterWhy,
     verifier_miss: `claim ${claimId} was never patrolled by the Verifier (should have flagged, didn't)`,
     calibration_drift: `claim ${claimId} was grounded, patrolled, not mis-adjudicated, yet wrong (g over-confident)`,
   }
