@@ -340,6 +340,7 @@ export {
 export { makeDashScopeEntailmentJudge } from './verifier/dashscope-entailment-judge.js'
 export {
   writePatrolVerdict,
+  markPatrolVerdictRefused,
   latestPatrolVerdict,
   computeEntailmentFactor,
   latestEntailmentFactors,

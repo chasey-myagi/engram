@@ -13,7 +13,7 @@
  */
 import { randomUUID } from 'node:crypto'
 
-import { and, desc, eq, inArray } from 'drizzle-orm'
+import { and, desc, eq, inArray, sql } from 'drizzle-orm'
 
 import { NEUTRAL_FACTORS } from '../confidence/confidence.js'
 import type { DB, Tx } from '../db/client.js'
@@ -30,6 +30,11 @@ export interface PatrolVerdict {
   conflictsWith?: string
   /** 判官版本（可审计：哪个模型/版本判的）。 */
   judgeVersion?: string
+  /**
+   * true = 该 not_co_true 巡查判负被 NC-exact 红线（红线#3 / A.6）拒判（缺 ≥1 条 exact 反向证据）：仅留审计，**绝不进 f2 计分**。
+   * 读侧（latestPatrolVerdict / latestEntailmentFactors）跳过此行、继续往更旧的行找有效巡查。默认 absent = 计分（历史行向后兼容）。
+   */
+  refusedByNcExact?: boolean
 }
 
 /** DB 或事务 Tx（recall 用前者、commit 合并重算用后者；drizzle select 链在两者上同形）。 */
@@ -55,6 +60,23 @@ export async function writePatrolVerdict(
 }
 
 /**
+ * 把一条已落的 patrol 行标成「被 NC-exact 红线拒判、非计分」（EGR-CR-001）。
+ * Verifier 在 not_co_true 判负被红线拒判时调用：保留巡查留痕 + conflictsWith 信号，但读侧据此跳过它、绝不让它压 f2（红线#3）。
+ * 用 jsonb_set 就地补 refusedByNcExact，不读出再写回。verificationId 由 writePatrolVerdict 回传。
+ */
+export async function markPatrolVerdictRefused(
+  q: Queryable,
+  verificationId: string,
+): Promise<void> {
+  await q
+    .update(claimVerification)
+    .set({
+      verdict: sql`jsonb_set(${claimVerification.verdict}, '{refusedByNcExact}', 'true'::jsonb, true)`,
+    })
+    .where(eq(claimVerification.id, verificationId))
+}
+
+/**
  * 取一条 claim 最新一条 **entailment** 巡查裁决的 entailment 态。无 entailment 巡查 → null。
  * 接受 DB 或 Tx（recall 用前者、commit 合并重算用后者）。
  *
@@ -73,6 +95,8 @@ export async function latestPatrolVerdict(
     .orderBy(desc(claimVerification.createdAt), desc(claimVerification.id))
   for (const r of rows) {
     const v = r.verdict as Partial<PatrolVerdict> | null
+    // EGR-CR-001：被 NC-exact 红线拒判的 not_co_true 行非计分——跳过、继续往更旧的行找有效巡查（红线#3）。
+    if (v?.refusedByNcExact === true) continue
     const e = v?.entailment
     if (e === 'pass' || e === 'fail' || e === 'not_co_true') return e
   }
@@ -122,8 +146,10 @@ export async function latestEntailmentFactors(
     .where(and(eq(claimVerification.kind, 'patrol'), inArray(claimVerification.claimId, claimIds)))
     .orderBy(desc(claimVerification.createdAt), desc(claimVerification.id))
   for (const r of rows) {
-    if (out.has(r.claimId)) continue // 已倒序：每个 claim 第一次见到的即最新一条
+    if (out.has(r.claimId)) continue // 已倒序：每个 claim 第一次定下因子即最新一条有效巡查
     const v = r.verdict as Partial<PatrolVerdict> | null
+    // EGR-CR-001：拒判行非计分——跳过且**不**入 Map，继续扫该 claim 更旧的行（与 latestPatrolVerdict 同口径）。
+    if (v?.refusedByNcExact === true) continue
     const e = v?.entailment
     if (e === 'pass' || e === 'fail' || e === 'not_co_true') {
       out.set(r.claimId, entailmentVerdictToFactor(e))

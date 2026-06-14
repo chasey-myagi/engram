@@ -392,6 +392,51 @@ describe('S17 Verifier worker (D3 patrol: 函数/统计 + 点状一次 LLM) — 
     expect(res.outcomes[0]!.ncExactRefused?.eventId).toBe(refused[0]!.eventId)
   })
 
+  // EGR-CR-001 (#82): the recall-side dual of the refused-not_co_true case above. The red line keeps the STATUS
+  // (target stays active), but the refused not_co_true patrol row must NOT bleed into f2 on the read side — recall's
+  // live-recomputed entailment factor must stay neutral 0.5, never 0. (Before the fix, latestEntailmentFactors reads
+  // the refused not_co_true and maps it to f2=0, silently suppressing confidence below the recall floor.)
+  //
+  // Setup uses the NO-contradicting-peer refusal path (cf. the line-415 case above): not_co_true with no peer is
+  // refused (own exact is support, not reverse evidence). No contradicts edge is inserted, so there is NO conflictDecay
+  // confound — the only thing that could move the target's value is the (refused) entailment factor. That isolates the
+  // finding: with the fix, factors.entailment stays 0.5 and value/recall are untouched; without it, f2=0 drops the
+  // target below the 0.4 floor and out of recall entirely.
+  it('EGR-CR-001: a refused not_co_true does NOT pollute recall f2 — target stays active AND its entailment factor stays neutral 0.5 (never 0)', async () => {
+    // recallable target with its OWN exact support + independent support, so it clears the recall floor at neutral f2.
+    const target = await mkClaim({
+      status: 'active',
+      recallable: true,
+      claimText: 'k p A',
+      relevance: 'exact',
+      factors: { indepSupport: 1 },
+    })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'not_co_true' })
+
+    // baseline: before any patrol, the target is recalled with neutral entailment 0.5.
+    const before = await recallClaims(db, embedder, 'k p A')
+    const beforeHit = before.find((h) => h.claim.id === target.claimId)
+    expect(beforeHit).toBeDefined()
+    expect(beforeHit!.confidence.factors.entailment).toBe(0.5)
+    const neutralValue = beforeHit!.confidence.value
+
+    const res = await verifyEnqueued({ db, judge }, [target.claimId]) // patrol only the target
+
+    // confirm we really walked the refusal path: no contradicting peer → not_co_true refused (own exact is NOT reverse
+    // evidence); red line #2 held the status; escalation fired.
+    expect(res.ncExactRefusals).toBe(1)
+    expect(res.transitions).toBe(0)
+    expect(await statusOf(target.claimId)).toBe('active')
+    expect(await getRefusedRulings(db)).toHaveLength(1)
+
+    // the finding: recall's live f2 must be neutral 0.5, NOT 0 — the refused not_co_true is non-scoring.
+    const after = await recallClaims(db, embedder, 'k p A')
+    const afterHit = after.find((h) => h.claim.id === target.claimId)
+    expect(afterHit).toBeDefined() // still recalled (would drop out at f2=0)
+    expect(afterHit!.confidence.factors.entailment).toBe(0.5)
+    expect(afterHit!.confidence.value).toBe(neutralValue) // value unchanged — never suppressed
+  })
+
   it('NC-exact: a not_co_true ruling whose contradicting PEER carries an EXACT reverse proposition PROCEEDS — active→flagged, no escalation', async () => {
     // Discriminator: the TARGET has only supporting provenance; the EXACT lives on the peer. Under the old
     // (inverted) gate this would refuse (target has no own-exact); under the fix it proceeds.
