@@ -95,7 +95,10 @@ export interface DispatchTrace {
 }
 
 export interface RunToConvergenceResult {
-  /** 总共派发了多少次（事件 × 命中的工种）。 */
+  /**
+   * 总共派发了多少次（事件 × 命中的工种）。单位 = **一次 worker dispatch**（同一事件命中 N 个工种计 N 次）。
+   * `maxEvents` 是对本计数的**硬上限**：`dispatched <= maxEvents` 恒成立（含「同事件多工种命中」时整批不越界）。
+   */
   dispatched: number
   /** 因处理器抛错被吞掉的次数（单点失效的计数证明：>0 时级联仍跑完）。 */
   failures: number
@@ -103,7 +106,11 @@ export interface RunToConvergenceResult {
   firedByWorker: Record<string, number>
   /** 全程逐次派发留痕（确定性顺序）。 */
   traces: DispatchTrace[]
-  /** 是否因 maxEvents 上限被截断（有界证明）。 */
+  /**
+   * 是否因 `maxEvents` 硬上限被截断（有界证明）。**当且仅当**因触上界提前停止时为 true——
+   * 即截断点上当前事件剩余 worker、队列剩余事件都未派发；正常跑到队列空（含 `dispatched === maxEvents`
+   * 但队列恰好已清空）时为 false。
+   */
   truncated: boolean
 }
 
@@ -134,6 +141,10 @@ export class EventDispatcher {
    * 从一个种子事件跑到收敛（队列空）。BFS：取队首 → 派给所有声明了该事件的工种（注册序）→ 把它们返回的
    * 后继事件入队尾 → 直到队列空或派发次数触 maxEvents 上界（有界，防环/失控）。
    * 处理器抛错被吞（计 failures），级联不中断（单点失效证明）。
+   *
+   * `maxEvents` 的单位是 **worker dispatch 次数**（事件 × 命中工种，每个 worker 派发计 1），且为**硬上限**：
+   * 上限检查与计数同在 per-worker 粒度、检查在自增之前——`result.dispatched <= maxEvents` 恒成立，
+   * 「同事件多工种命中」也不会整批越界。触上界即停（硬，不派完当前事件剩余 worker），`truncated` 同步置 true。
    */
   async runToConvergence(
     seed: EngramEvent,
@@ -150,13 +161,16 @@ export class EventDispatcher {
     }
 
     while (queue.length > 0) {
-      if (result.dispatched >= maxEvents) {
-        result.truncated = true
-        break
-      }
       const event = queue.shift()!
       const hits = this.workers.filter((w) => w.triggers.includes(event.type))
       for (const w of hits) {
+        // 上限检查下沉到 per-worker 粒度，与计数单位（result.dispatched 每 worker 自增 1）对齐：
+        // 触界即停（硬上限），当前事件剩余 worker 与队列剩余事件都不再派发，truncated 同步置 true。
+        // 这是唯一计数+置位点（单一事实源），保证 dispatched <= maxEvents 恒成立。
+        if (result.dispatched >= maxEvents) {
+          result.truncated = true
+          return result
+        }
         result.dispatched += 1
         result.firedByWorker[w.name] = (result.firedByWorker[w.name] ?? 0) + 1
         try {
