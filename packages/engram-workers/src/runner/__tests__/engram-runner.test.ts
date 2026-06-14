@@ -26,6 +26,7 @@ import {
   createDb,
   getImmunityScores,
   getResolvedConflicts,
+  getWorkerFailures,
   makeFakeEmbedder,
   makeFakeEntailmentJudge,
   makeFakeSameFactJudge,
@@ -438,6 +439,101 @@ describe('P4b · EngramRunner 把北极星接成可跑自闭环', () => {
       expect(await getResolvedConflicts(db)).toHaveLength(0)
       // 控制面两拍仍走完（runner 一拍完整）。
       expect(report.governance.ran).toBe(true)
+    })
+
+    it('⑤b EGR-CR-039：arbiter 抛错被吞后 runner 落 durable failure 审计，级联不掀翻、主干不污染', async () => {
+      // 复用 ⑤ 的构造：注入会抛错的 arbiter 工厂 + 一对 active 矛盾让 arbiter 臂必被触发。
+      await pool.query('TRUNCATE worker_failure CASCADE') // 隔离本用例的审计断言（worker_failure 不在 resetWorkTables 清单内）。
+      await seedActivePair({
+        query: 'kpC throughput',
+        aAsOf: new Date('2025-06-01T00:00:00.000Z'),
+        bAsOf: new Date('2025-01-01T00:00:00.000Z'),
+      })
+      const runner = buildRunner(
+        [
+          commitTurn({
+            claimText: 'sku-y spec 7',
+            subject: 'sku-y',
+            predicate: 'spec',
+            object: '7',
+            locator: 'L9',
+          }),
+          finishTurn(),
+          stopTurn,
+        ],
+        () => {
+          throw new Error('arbiter runtime down (injected single-point failure)')
+        },
+      )
+      const sourceId = await aSource()
+      const report = await runner.runClosedLoop({ sources: [sourceId] })
+      const cascade = report.ingests[0]!.result
+
+      // 1) 不掀翻级联（沿用 ⑤ 既有断言）：失败被计、其余工种照常、无机判、控制面走完。
+      expect(cascade.failures).toBeGreaterThanOrEqual(1)
+      expect(cascade.firedByWorker.distiller).toBe(1)
+      expect(cascade.firedByWorker.reconciler).toBe(1)
+      expect(cascade.firedByWorker.verifier).toBe(1)
+      expect(await getResolvedConflicts(db)).toHaveLength(0)
+      expect(report.governance.ran).toBe(true)
+
+      // 2) durable 审计可查（EGR-CR-039 新增）：worker_failure 落了 arbiter 的失败行，字段完整、可告警/重放。
+      const failures = await getWorkerFailures(db)
+      expect(failures.length).toBeGreaterThanOrEqual(1)
+      const arbiterFail = failures.find((f) => f.workerName === 'arbiter')
+      expect(arbiterFail).toBeDefined()
+      expect(arbiterFail!.eventType).toBe('conflict.detected')
+      expect(arbiterFail!.error).toContain('arbiter runtime down')
+
+      // 3) 读写主干不污染（沿用 ⑤）：distiller 抽的那条新 claim 仍真落库（2 seeded + ≥1 新抽）。
+      const seeded = await db.select({ id: schema.claim.id }).from(schema.claim)
+      expect(seeded.length).toBeGreaterThanOrEqual(3)
+    })
+
+    it('⑤c EGR-CR-039：审计写库抛错也不反噬级联（fail-silent）', async () => {
+      // 注入一个 db.insert 会抛的「坏 db」给 recordWorkerFailure（其它读写仍走真 db），证明审计写失败被吞、级联仍收敛。
+      await seedActivePair({
+        query: 'kpD throughput',
+        aAsOf: new Date('2025-06-01T00:00:00.000Z'),
+        bAsOf: new Date('2025-01-01T00:00:00.000Z'),
+      })
+      const runner = buildRunner(
+        [
+          commitTurn({
+            claimText: 'sku-z spec 1',
+            subject: 'sku-z',
+            predicate: 'spec',
+            object: '1',
+            locator: 'L8',
+          }),
+          finishTurn(),
+          stopTurn,
+        ],
+        () => {
+          throw new Error('arbiter runtime down (injected single-point failure)')
+        },
+      )
+      // 用 Proxy 让本 runner 的 db.insert 一律抛（仅审计落库走 insert；级联的 distiller/verifier 等走它们自己的真 db deps）。
+      const failingInsertDb = new Proxy(db, {
+        get(target, prop, receiver) {
+          if (prop === 'insert') {
+            return () => {
+              throw new Error('db.insert blew up (injected audit-sink failure)')
+            }
+          }
+          return Reflect.get(target, prop, receiver)
+        },
+      }) as typeof db
+      ;(runner as unknown as { deps: { db: typeof db } }).deps.db = failingInsertDb
+
+      const sourceId = await aSource()
+      // 审计写库抛错被 persistFailures 的 try/catch 吞掉 ⇒ runClosedLoop 不抛、数据面级联仍收敛。
+      // （注：本用例的 Proxy 让 runner.deps.db 的所有 insert 抛错，故控制面 governance 走 fail-silent 路径、ran=false——
+      //  那是被注入故障的预期表现，不是回归；本用例只证审计写失败不外抛、不掀翻数据面级联。）
+      const report = await runner.runClosedLoop({ sources: [sourceId] })
+      const cascade = report.ingests[0]!.result
+      expect(cascade.failures).toBeGreaterThanOrEqual(1)
+      expect(cascade.truncated).toBe(false) // 级联跑到收敛、没被审计写失败掀翻。
     })
   })
 

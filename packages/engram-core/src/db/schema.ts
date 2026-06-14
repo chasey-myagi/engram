@@ -673,6 +673,35 @@ export const decisionEval = pgTable(
   (t) => [index('idx_decision_eval_run').on(t.runLabel, t.metric)],
 )
 
+/**
+ * worker_failure：dispatcher 吞掉的工种处理器抛错的 **durable dead-letter / 审计专表**（EGR-CR-039）。
+ * 沿 redteam_immunity_scores / dimension_events 的独立 append-only 范式，零触碰冻结枚举 metrics_event_kind（红线#4）。
+ * 纯审计 / 可恢复性用：记录 workerName、eventType、payload 摘要、error、createdAt。绝不进任何在线判据 / 校准 g / 计分。
+ *
+ * 总线 EventDispatcher 按设计零 db 依赖（吞错只计内存 failures / traces），落库责任上移到持有 db 的 EngramRunner：
+ * 它每次数据面级联后 best-effort 把 result.traces 里 ok:false 的失败行经 recordWorkerFailure 落到本表（审计写库
+ * 失败不反噬级联）。这样「吞错保命」与「失败可恢复」解耦——级联仍不掀翻，失败信号不再随进程内存翻篇而永久丢失。
+ */
+export const workerFailure = pgTable(
+  'worker_failure',
+  {
+    id: uuid('id').primaryKey(),
+    // 抛错工种名（'distiller' | 'verifier' | …；纯文本标签，内核不解释）。
+    workerName: text('worker_name').notNull(),
+    // 触发该工种的事件类型字符串（'source.ingested' / 'conflict.detected' …；EngramEventType 的值）。
+    eventType: text('event_type').notNull(),
+    // 处理器抛错的 message（被总线吞掉、不掀翻级联的那条原因）。
+    error: text('error').notNull(),
+    // 事件 payload 摘要（claimIds 计数 / sourceId 等，避免存大块；离线排查用，不进任何计分）。
+    payloadDigest: jsonb('payload_digest')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // 按工种 + 时间取某工种最近的失败序列（告警 / 重放 / 「谁在持续挂」）。
+  (t) => [index('idx_worker_failure_worker_created').on(t.workerName, t.createdAt)],
+)
+
 export type SourceKind = (typeof sourceKind.enumValues)[number]
 export type ClaimStatus = (typeof claimStatus.enumValues)[number]
 export type RelationType = (typeof relationType.enumValues)[number]

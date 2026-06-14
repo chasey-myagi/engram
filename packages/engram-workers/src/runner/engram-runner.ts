@@ -25,6 +25,7 @@ import { eq } from 'drizzle-orm'
 
 import {
   fitAndMaybeRecalibrate,
+  recordWorkerFailure,
   runGovernanceCycle,
   schema,
   type DB,
@@ -105,22 +106,29 @@ export class EngramRunner {
   }
 
   /** 数据面：一次 source 摄入 → 级联到收敛（Distiller → Reconciler/Verifier/Arbiter）。 */
-  ingest(sourceId: string, opts: { maxEvents?: number } = {}): Promise<RunToConvergenceResult> {
-    return this.dispatcher.runToConvergence(
+  async ingest(
+    sourceId: string,
+    opts: { maxEvents?: number } = {},
+  ): Promise<RunToConvergenceResult> {
+    const result = await this.dispatcher.runToConvergence(
       { type: 'source.ingested', payload: { sourceId } },
       opts,
     )
+    await this.persistFailures(result, { sourceId })
+    return result
   }
 
   /** 数据面：使用上报 → Harvester 纯统计（闭合「使用→升信」f4）。 */
-  harvestUsage(
+  async harvestUsage(
     claimIds: readonly string[],
     opts: { maxEvents?: number } = {},
   ): Promise<RunToConvergenceResult> {
-    return this.dispatcher.runToConvergence(
+    const result = await this.dispatcher.runToConvergence(
       { type: 'report_usage', payload: { claimIds: [...claimIds] } },
       opts,
     )
+    await this.persistFailures(result, { claimCount: claimIds.length })
+    return result
   }
 
   /** 控制面：恒温器一拍（S26，fail-silent —— 抛错只让本拍 no-op，不传染主干）。 */
@@ -154,7 +162,8 @@ export class EngramRunner {
    *
    * **不 fail-silent**：runClosedLoop 自身是裸 await —— 控制面两拍的「失效静音」保护落在被调函数内部
    * （runGovernanceCycle 整轮 try/catch、fitAndMaybeRecalibrate 纯读+受控写）；数据面级联的单点失效落在
-   * EventDispatcher（吞处理器抛错、计 failures、不掀翻级联）。本方法不另加 guard，依赖这两层既有契约。
+   * EventDispatcher（吞处理器抛错、计 failures、不掀翻级联），其失败信号经 ingest/harvestUsage 里的
+   * persistFailures 落 durable dead-letter 审计专表 worker_failure（EGR-CR-039，best-effort 不掀翻级联）。
    */
   async runClosedLoop(input: ClosedLoopInput = {}): Promise<ClosedLoopReport> {
     const ingests: ClosedLoopReport['ingests'] = []
@@ -172,6 +181,33 @@ export class EngramRunner {
     const recalibrate = await this.recalibrateTick(input.recalibrate ?? {})
 
     return { ingests, usageHarvest, governance, recalibrate }
+  }
+
+  /**
+   * **EGR-CR-039 落库点**：把一次数据面级联里被 EventDispatcher 吞掉的工种失败（traces 里 ok:false 的行）落到
+   * durable dead-letter 审计专表 worker_failure。总线按设计零 db 依赖（吞错只计内存 failures/traces），落库责任
+   * 上移到持有 db 的本层 —— 失败信号不再随进程内存翻篇而永久丢失，ops/editor 可在 DB 看到「谁在持续挂」。
+   *
+   * **必须 fail-silent**：审计写库绝不能反过来掀翻级联（否则就把「吞错保命」破坏了）。整段 try/catch 吞掉，与
+   * 控制面两拍的 fail-silent 风格一致；写库失败只丢这次审计、级联与读写主干照常。
+   */
+  private async persistFailures(
+    result: RunToConvergenceResult,
+    payloadDigest: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      for (const t of result.traces) {
+        if (t.ok) continue
+        await recordWorkerFailure(this.deps.db, {
+          workerName: t.workerName,
+          eventType: t.eventType,
+          error: t.error ?? '',
+          payloadDigest,
+        })
+      }
+    } catch {
+      // 审计 best-effort：写库失败不外抛、不掀翻级联（与控制面两拍的失效静音同款）。
+    }
   }
 
   // ── 数据面接线（S24 wireDispatcher 的生产化；路由键全解自各工种导出的 TRIGGER 常量）─────────────────
