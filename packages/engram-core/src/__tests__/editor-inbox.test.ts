@@ -553,10 +553,21 @@ describe('S23 humanAdjudicateConflict — rung ① human ruling ON TOP of the ma
 
   it('EGR-CR-015: human-resolved pair no longer inflates conflictQueueDepth governance signal', async () => {
     const sameAsOf = new Date('2023-06-01T00:00:00Z')
-    const { a, b } = await aConflictPair({ aAsOf: sameAsOf, bAsOf: sameAsOf, aAuth: 0.8, bAuth: 0.8 })
+    const { a, b } = await aConflictPair({
+      aAsOf: sameAsOf,
+      bAsOf: sameAsOf,
+      aAuth: 0.8,
+      bAuth: 0.8,
+    })
     const adj = adjudicateConflict(await loadConflictSide(db, a), await loadConflictSide(db, b))
     expect(adj.outcome).toBe('escalate')
-    await escalateConflict(db, { a, b, rung: adj.rung, reason: adj.reason, byRole: 'agent:arbiter' })
+    await escalateConflict(db, {
+      a,
+      b,
+      rung: adj.rung,
+      reason: adj.reason,
+      byRole: 'agent:arbiter',
+    })
     expect(await readConflictQueueDepth(db)).toBe(1) // 升级后压力 = 1
 
     await humanAdjudicateConflict(db, { a, b, winnerId: a, by: EDITOR })
@@ -568,8 +579,17 @@ describe('S23 humanAdjudicateConflict — rung ① human ruling ON TOP of the ma
     const p1 = await aConflictPair({ aAsOf: sameAsOf, bAsOf: sameAsOf, aAuth: 0.8, bAuth: 0.8 })
     const p2 = await aConflictPair({ aAsOf: sameAsOf, bAsOf: sameAsOf, aAuth: 0.8, bAuth: 0.8 })
     for (const p of [p1, p2]) {
-      const adj = adjudicateConflict(await loadConflictSide(db, p.a), await loadConflictSide(db, p.b))
-      await escalateConflict(db, { a: p.a, b: p.b, rung: adj.rung, reason: adj.reason, byRole: 'agent:arbiter' })
+      const adj = adjudicateConflict(
+        await loadConflictSide(db, p.a),
+        await loadConflictSide(db, p.b),
+      )
+      await escalateConflict(db, {
+        a: p.a,
+        b: p.b,
+        rung: adj.rung,
+        reason: adj.reason,
+        byRole: 'agent:arbiter',
+      })
     }
     expect(await getEditorConflictQueue(db)).toHaveLength(2)
 
