@@ -134,7 +134,12 @@ async function aSource(opts: { kind?: SourceKind; content?: string } = {}) {
 
 describe('S15 Distiller worker (bounded loop on harness-pi) — A.7 five-stage spine', () => {
   it('source.ingested → distills to provenance-backed claims: equivalents merge, contradictions kept with a contradicts edge, athlete identity on created_by', async () => {
-    const { sourceId } = await aSource({ kind: 'structured_spec' })
+    // 3 lines → fake reader yields locators L1/L2/L3, all valid anchors for the script below.
+    const { sourceId } = await aSource({
+      kind: 'structured_spec',
+      content:
+        'sku-7 maxThroughput 500mbps\nthroughput of sku-7 is 500 mbps\nsku-7 maxThroughput 1gbps',
+    })
     const script: FakeAssistantResponse[] = [
       commitTurn({
         claimText: 'sku-7 maxThroughput 500mbps',
@@ -187,7 +192,7 @@ describe('S15 Distiller worker (bounded loop on harness-pi) — A.7 five-stage s
     expect(verifs).toHaveLength(0)
   })
 
-  it('forced provenance: a commit_claim with an empty locator is rejected and not committed', async () => {
+  it('forced provenance: a commit_claim with an empty locator is rejected, not committed, and the ungrounded attempt degrades the source to human-pending (auditable)', async () => {
     const { sourceId } = await aSource()
     const script: FakeAssistantResponse[] = [
       commitTurn({
@@ -196,7 +201,7 @@ describe('S15 Distiller worker (bounded loop on harness-pi) — A.7 five-stage s
         predicate: 'p',
         object: 'o',
         locator: '',
-      }), // rejected
+      }), // rejected (empty locator counts as an unknown-locator attempt → degrade)
       commitTurn({
         claimText: 'grounded fact',
         subject: 'y',
@@ -208,18 +213,120 @@ describe('S15 Distiller worker (bounded loop on harness-pi) — A.7 five-stage s
       stopTurn,
     ]
     const res = await runDistiller(deps({ runtime: runtimeOf(script) }), sourceId)
-    expect(res.status).toBe('done')
-    expect(res.committed).toBe(1) // only the grounded claim
+    // an ungrounded commit attempt is an auditable signal: the loop finished, but not a clean 'done'.
+    expect(res.status).toBe('human_pending')
+    expect(res.reason).toBe('unknown_locator')
+    expect(res.committed).toBe(1) // only the grounded claim got written
     expect(await db.select().from(schema.claim)).toHaveLength(1)
+  })
+
+  // EGR-CR-022 — commit_claim must constrain the model-reported locator to the set produced by
+  // read_source (read.segments). A non-empty-but-fabricated locator (e.g. L999) used to be persisted
+  // verbatim as a relevance:'exact' provenance; now it is rejected before commitClaim and the source
+  // degrades to human-pending so the abuse is auditable.
+  it('a commit_claim citing an unknown locator (not in read.segments) is rejected, not persisted, and the source degrades to human-pending with an auditable reason', async () => {
+    // default single-line source → fake reader yields exactly one valid anchor: L1. So L999 is unknown.
+    const { sourceId } = await aSource()
+    const script: FakeAssistantResponse[] = [
+      commitTurn({
+        claimText: 'fabricated fact',
+        subject: 'x',
+        predicate: 'p',
+        object: 'o',
+        locator: 'L999', // not a segment of this source
+      }),
+      finishTurn(),
+      stopTurn,
+    ]
+    const res = await runDistiller(deps({ runtime: runtimeOf(script) }), sourceId)
+
+    expect(res.status).toBe('human_pending')
+    expect(res.reason).toBe('unknown_locator')
+    expect(res.committed).toBe(0)
+    // the fabricated locator never reached commitClaim: nothing persisted.
+    expect(await db.select().from(schema.claim)).toHaveLength(0)
+    expect(await db.select().from(schema.claimProvenance)).toHaveLength(0)
+    // the degrade is auditable in the human-pending queue under the Distiller's identity.
+    const pending = await getHumanPendingSources(db)
+    expect(pending.some((p) => p.sourceId === sourceId && p.byRole === 'agent:distiller')).toBe(
+      true,
+    )
+  })
+
+  it('a commit_claim with a known locator but an excerpt that is not a substring of that segment is rejected; a verbatim-substring excerpt on the same locator is committed', async () => {
+    const { sourceId } = await aSource({ content: 'sku-7 maxThroughput 500mbps' }) // single line → anchor L1
+    const script: FakeAssistantResponse[] = [
+      commitTurn({
+        claimText: 'sku-7 throughput',
+        subject: 'sku-7',
+        predicate: 'maxThroughput',
+        object: '500mbps',
+        locator: 'L1',
+        excerpt: 'THIS TEXT IS NOT IN THE SEGMENT', // not a substring of segment L1 → rejected
+      }),
+      finishTurn(),
+      stopTurn,
+    ]
+    const res = await runDistiller(deps({ runtime: runtimeOf(script) }), sourceId)
+    // the only commit on this source was rejected: nothing persisted, zero clean claims.
+    expect(await db.select().from(schema.claim)).toHaveLength(0)
+    expect(res.committed).toBe(0)
+    expect(res.status).toBe('human_pending')
+    expect(res.reason).toBe('no_claims') // excerpt mismatch rejects the claim but is not an unknown-locator attempt
+
+    // positive control: a verbatim-substring excerpt on the same known locator is accepted and persisted exact.
+    const { sourceId: sourceId2 } = await aSource({ content: 'sku-7 maxThroughput 500mbps' })
+    const okScript: FakeAssistantResponse[] = [
+      commitTurn({
+        claimText: 'sku-7 throughput',
+        subject: 'sku-7',
+        predicate: 'maxThroughput',
+        object: '500mbps',
+        locator: 'L1',
+        excerpt: '500mbps', // verbatim substring of segment L1
+      }),
+      finishTurn(),
+      stopTurn,
+    ]
+    const ok = await runDistiller(deps({ runtime: runtimeOf(okScript) }), sourceId2)
+    expect(ok.status).toBe('done')
+    expect(ok.committed).toBe(1)
+    const claims = await db
+      .select()
+      .from(schema.claim)
+      .where(eq(schema.claim.createdBy, `agent:distiller:${sourceId2}`))
+    expect(claims).toHaveLength(1)
+    const prov = await db
+      .select()
+      .from(schema.claimProvenance)
+      .where(eq(schema.claimProvenance.claimId, claims[0]!.id))
+    expect(prov).toHaveLength(1)
+    expect(prov[0]!.locator).toBe('L1')
+    expect(prov[0]!.excerpt).toBe('500mbps')
+    expect(prov[0]!.relevance).toBe('exact')
+  })
+
+  it('a loop that finishes without committing any claim degrades to human-pending rather than reporting done', async () => {
+    const { sourceId } = await aSource()
+    const script: FakeAssistantResponse[] = [finishTurn(), stopTurn] // commit nothing
+    const res = await runDistiller(deps({ runtime: runtimeOf(script) }), sourceId)
+    expect(res.status).toBe('human_pending')
+    expect(res.reason).toBe('no_claims')
+    expect(res.committed).toBe(0)
+    const pending = await getHumanPendingSources(db)
+    expect(pending.some((p) => p.sourceId === sourceId && p.byRole === 'agent:distiller')).toBe(
+      true,
+    )
   })
 
   it('cross-source equivalents merge: distilling the same fact from two independent sources raises indepSupport (single recallable claim)', async () => {
     const triple = { subject: 'sku-9', predicate: 'weight', object: '5kg' }
+    // each single-line default source yields exactly one valid anchor: L1.
     const a = await aSource()
     await runDistiller(
       deps({
         runtime: runtimeOf([
-          commitTurn({ claimText: 'sku-9 weight 5kg', ...triple, locator: 'A1' }),
+          commitTurn({ claimText: 'sku-9 weight 5kg', ...triple, locator: 'L1' }),
           finishTurn(),
           stopTurn,
         ]),
@@ -231,7 +338,7 @@ describe('S15 Distiller worker (bounded loop on harness-pi) — A.7 five-stage s
     await runDistiller(
       deps({
         runtime: runtimeOf([
-          commitTurn({ claimText: 'the sku-9 weighs 5 kg', ...triple, locator: 'B1' }),
+          commitTurn({ claimText: 'the sku-9 weighs 5 kg', ...triple, locator: 'L1' }),
           finishTurn(),
           stopTurn,
         ]),
@@ -250,7 +357,8 @@ describe('S15 Distiller worker (bounded loop on harness-pi) — A.7 five-stage s
   })
 
   it('bounded loop: budget (maxTurns) exhaustion degrades the source to human-pending without blocking (no infinite retry)', async () => {
-    const { sourceId } = await aSource()
+    // 3 lines → valid anchors L1/L2/L3 for the script below.
+    const { sourceId } = await aSource({ content: 'fact one\nfact two\nfact three' })
     // never calls finish; with maxTurns=2 the loop is cut off → reason max_turns
     const script: FakeAssistantResponse[] = [
       commitTurn({

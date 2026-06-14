@@ -361,7 +361,9 @@ describe('S16 · runDistiller drives the right read strategy per kind through th
           // real harness-pi runtime + scripted fake model: same loop the production path uses.
           runtime: makeHarnessPiRuntime(
             createFakeModel([
-              commitTurn({ claimText: c.claimText, locator: c.locator, excerpt: c.claimText }),
+              // claimText is a paraphrase (not a verbatim quote); omit excerpt so the substring gate
+              // doesn't reject it. This test asserts on locator/relevance, not excerpt (EGR-CR-022).
+              commitTurn({ claimText: c.claimText, locator: c.locator }),
               finishTurn(),
               stopTurn,
             ]),
