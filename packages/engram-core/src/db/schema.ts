@@ -6,6 +6,7 @@
 import { sql } from 'drizzle-orm'
 import {
   type AnyPgColumn,
+  check,
   doublePrecision,
   index,
   integer,
@@ -140,9 +141,12 @@ export const claimProvenance = pgTable(
     relevance: provRelevance('relevance').notNull().default('supporting'),
   },
   // provenance 扇出按 claim / source 查（钻回原文、印证计数）—— 建索引。
+  // EGR-CR-023：locator 必须能钻回原文锚点 —— DB 层物理拒空/全空白 locator（NOT NULL 挡不住空串），
+  // 作为绕过 SPI 直写的兜底（core guard 是第一道，见 spi/append-claim.ts validateProvenanceInput）。
   (t) => [
     index('idx_claim_provenance_claim').on(t.claimId),
     index('idx_claim_provenance_source').on(t.sourceId),
+    check('claim_provenance_locator_nonblank', sql`length(btrim(${t.locator})) > 0`),
   ],
 )
 

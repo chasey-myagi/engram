@@ -68,12 +68,27 @@ export interface ProvenanceInput {
   relevance?: ProvRelevance
 }
 
-/** D1 硬门（前置 guard）：无出处直接拒，连事务都不开。DB 层 NOT NULL FK 是第二道兜底。 */
-function requireProvenance(provenances: ProvenanceInput[]): void {
+/**
+ * D1 完整 guard（前置）：provenance 不仅要存在（≥1 条），每条还必须能钻回原文——
+ * sourceId 非空、locator 去空白后非空。空/全空白 locator = 不可点击的幽灵出处，连事务都不开就拒。
+ * DB 层 NOT NULL FK + CHECK(length(btrim(locator))>0) 是第二道兜底（防绕过 SPI 的直写）。
+ * 所有 core 写路径（append / supersede / commit / 红边 evidence）共用这道门，错误语义统一、可测。
+ */
+export function validateProvenanceInput(provenances: ProvenanceInput[]): void {
   if (!Array.isArray(provenances) || provenances.length < 1) {
     throw new Error(
       'append_claim: D1 violation — a claim requires >=1 provenance (forced provenance)',
     )
+  }
+  for (const p of provenances) {
+    if (typeof p.sourceId !== 'string' || p.sourceId.length < 1) {
+      throw new Error('append_claim: D1 violation — provenance.sourceId must be a non-empty string')
+    }
+    if (typeof p.locator !== 'string' || p.locator.trim().length < 1) {
+      throw new Error(
+        'append_claim: D1 violation — provenance.locator must be a non-empty, non-whitespace string (drill-back anchor required)',
+      )
+    }
   }
 }
 
@@ -299,7 +314,7 @@ export async function appendClaim(
   draft: DraftClaim,
   provenances: ProvenanceInput[],
 ): Promise<{ claimId: string }> {
-  requireProvenance(provenances)
+  validateProvenanceInput(provenances)
   const embedding = await embedder.embed(draft.claimText, 'document') // 嵌入在事务外算（纯计算/远程调用，不持锁）
   return db.transaction(async (tx) => {
     const conf = await computeClaimConfidence(tx, draft, provenances)
@@ -318,7 +333,7 @@ export async function supersedeClaim(
   draft: DraftClaim,
   provenances: ProvenanceInput[],
 ): Promise<{ claimId: string }> {
-  requireProvenance(provenances)
+  validateProvenanceInput(provenances)
   const embedding = await embedder.embed(draft.claimText, 'document') // 事务外算（纯计算/远程调用，不持锁）
   return db.transaction((tx) =>
     supersedeClaimInTx(tx, oldClaimId, draft, provenances, embedding, embedder.version),
@@ -339,7 +354,7 @@ export async function supersedeClaimInTx(
   embedding: number[],
   embeddingVersion: string,
 ): Promise<{ claimId: string }> {
-  requireProvenance(provenances)
+  validateProvenanceInput(provenances)
   const old = await tx
     .select({ lineageId: claim.lineageId, status: claim.status })
     .from(claim)
