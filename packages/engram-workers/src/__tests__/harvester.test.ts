@@ -276,6 +276,38 @@ describe('S19 Harvester worker — usage→confidence loop (pure statistics, A.6
     expect(await storedOf(other).then((s) => s.usageCorrect)).toBe(0) // other left alone (not in batch)
   })
 
+  it('EGR-CR-037: an EMPTY batch is a no-op — harvestBatch([]) does NOT degrade into a full-table cron recompute', async () => {
+    // 造 ≥2 条会被「全库 cron 扫描」命中的 usage-claim：各 3 个独立 consumer adopted → cron 会把 f4 从 0→1。
+    const a = await mkClaim({ claimText: 'sku empty-batch A' })
+    const b = await mkClaim({ claimText: 'sku empty-batch B' })
+    for (const id of [a, b]) {
+      for (const u of ['x', 'y', 'z']) {
+        await reportUsage(db, id, 'adopted', {
+          byRole: `consumer:${u}:${id}`,
+          taskId: `t:${u}:${id}`,
+        })
+      }
+    }
+    const beforeA = await storedOf(a)
+    const beforeB = await storedOf(b)
+    expect(beforeA.usageCorrect).toBe(0) // 起始 neutral（未 harvest）
+    expect(beforeB.usageCorrect).toBe(0)
+
+    // 空 batch：本应 no-op。修前 harvestBatch([]) 透传空数组 → selector length>0 判 false → 落 cron 全库扫描 → 每条 f4 0→1、harvested≥2。
+    const res = await harvestBatch({ db }, [])
+
+    expect(res.harvested).toBe(0)
+    expect(res.skipped).toBe(0)
+    expect(res.outcomes).toEqual([])
+    // 每条 claim 一字未动（未被全库重算）。
+    const afterA = await storedOf(a)
+    const afterB = await storedOf(b)
+    expect(afterA.usageCorrect).toBe(beforeA.usageCorrect)
+    expect(afterA.raw).toBe(beforeA.raw)
+    expect(afterB.usageCorrect).toBe(beforeB.usageCorrect)
+    expect(afterB.raw).toBe(beforeB.raw)
+  })
+
   it('claims with no usage are never touched (Harvester only visits claims with usage_truth)', async () => {
     const used = await mkClaim({ claimText: 'sku used' })
     const unused = await mkClaim({ claimText: 'sku unused' })

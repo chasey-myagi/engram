@@ -562,6 +562,30 @@ describe('S24 choreography integration — A.7 event-driven cascade, no online m
       expect(Object.keys(usageResult.firedByWorker)).toEqual(['harvester'])
       expect(usageResult.firedByWorker.harvester).toBe(1)
     })
+
+    it('EGR-CR-037: an empty claim.draft batch does NOT reach the Verifier (no judge call, no patrol, no transition) — empty batch never degrades into a full-table cron patrol', async () => {
+      // 造若干会被「全库 cron 巡查」命中的 active claim；judge 用计数 fake（'fail' → 若真巡查会 active→flagged 收紧，便于反证）。
+      const a = await seedActiveClaim({ query: 'empty draft A', object: 'A', asOf: new Date() })
+      const b = await seedActiveClaim({ query: 'empty draft B', object: 'B', asOf: new Date() })
+      const judge = makeFakeEntailmentJudge({ verdictOf: () => 'fail' })
+      const dispatcher = wireDispatcher({
+        distillerScript: conflictingDistillScript(),
+        entailment: judge,
+      })
+
+      // 空 claim.draft batch：修前会被派进 verifier handler → verifyEnqueued([]) 退化全库巡查；修后（B）总线源头丢弃空 batch。
+      const result = await dispatcher.runToConvergence({
+        type: 'claim.draft',
+        payload: { claimIds: [] },
+      })
+
+      // A+B 双层：空 batch 不入工种 —— verifier 一次没派、judge 一次没调、无迁移。
+      expect(result.firedByWorker['verifier'] ?? 0).toBe(0)
+      expect(result.dispatched).toBe(0)
+      expect(judge.callCount()).toBe(0)
+      expect(await statusOf(a)).toBe('active') // 无收紧
+      expect(await statusOf(b)).toBe('active')
+    })
   })
 
   // ── 断言 2：静默降级 / 无单点失效 ──────────────────────────────────────────────────────────

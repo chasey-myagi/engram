@@ -403,11 +403,28 @@ export const VERIFIER_TRIGGER = {
   enqueueOn: ['draft', 'flagged'] as const,
 } as const
 
-/** 处理入队事件：对单个（或一批）draft/flagged claim 立即跑巡查。薄包装 runVerifier。 */
+/**
+ * 处理入队事件：对单个（或一批）draft/flagged claim 立即跑巡查。薄包装 runVerifier。
+ *
+ * EGR-CR-037 空 batch 守卫（根治点）：入队触发语义是「我带了一批 id」。带了一批但批为空 = 没有任何 claim 要巡查 = no-op。
+ * 这里直接短路返回零结果、绝不调 runVerifier、绝不调 judge —— 否则空数组会被 runVerifier→selector 的 `length > 0` 误判成
+ * 「未传 claimIds」而退化成 cron 全库巡查（对全库 draft/active/flagged 逐条调 judge + 蓝边收紧）。runVerifier 的
+ * `claimIds === undefined`（cron）路径不受影响。
+ */
 export async function verifyEnqueued(
   deps: VerifierDeps,
   claimIds: string[],
   opts: Omit<VerifierOptions, 'claimIds'> = {},
 ): Promise<VerifierResult> {
+  if (claimIds.length === 0) {
+    return {
+      byRole: opts.byRole ?? DEFAULT_BY_ROLE,
+      patrolled: 0,
+      skipped: 0,
+      transitions: 0,
+      ncExactRefusals: 0,
+      outcomes: [],
+    }
+  }
   return runVerifier(deps, { ...opts, claimIds })
 }

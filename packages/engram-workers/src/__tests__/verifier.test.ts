@@ -285,6 +285,29 @@ describe('S17 Verifier worker (D3 patrol: 函数/统计 + 点状一次 LLM) — 
     expect(await statusOf(target.claimId)).toBe('flagged')
   })
 
+  it('EGR-CR-037: an EMPTY batch is a no-op — verifyEnqueued([]) does NOT degrade into a full-table cron patrol (no judge call, no transition, no verdict)', async () => {
+    // 造若干会被「全库 cron 巡查」命中的 active/draft/flagged claim。judge 用 'fail'：若真巡查会 active→flagged 收紧，便于反证。
+    const a = await mkClaim({ status: 'active', claimText: 'empty-batch active' })
+    const d = await mkClaim({ status: 'draft', claimText: 'empty-batch draft' })
+    const f = await mkClaim({ status: 'flagged', claimText: 'empty-batch flagged' })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'fail' })
+
+    // 空 batch：本应 no-op。修前 verifyEnqueued([]) 透传空数组 → selector length>0 判 false → 落 cron 全库巡查 → judge 被调多次、status 被收紧。
+    const res = await verifyEnqueued({ db, judge }, [])
+
+    expect(res.patrolled).toBe(0)
+    expect(judge.callCount()).toBe(0) // 点状 LLM 一次都没调
+    expect(res.transitions).toBe(0)
+    expect(res.outcomes).toEqual([])
+    // 每条 claim 状态不变（无迁移）、无 patrol 裁决写入。
+    expect(await statusOf(a.claimId)).toBe('active')
+    expect(await statusOf(d.claimId)).toBe('draft')
+    expect(await statusOf(f.claimId)).toBe('flagged')
+    expect(await patrolRows(a.claimId)).toHaveLength(0)
+    expect(await patrolRows(d.claimId)).toHaveLength(0)
+    expect(await patrolRows(f.claimId)).toHaveLength(0)
+  })
+
   // S20 routed follow-up: S17 deferred the conflict signal's peer id (conflictsWith). The Verifier now populates it
   // on a not_co_true verdict, finding the contradicting peer via the contradicts edge — handing the pairwise
   // conflict to the Arbiter (the owner of pairwise resolution).
