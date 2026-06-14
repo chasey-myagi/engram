@@ -80,9 +80,10 @@ export {
   type CalibrationProposal,
   type AdvisorOptions,
 } from './calibration/advisor.js'
-// S27 · 确定性验收门（权力：5 项全过才 approve，逐项可咬；A.8 否决在线 meta-orchestrator）。
+// S27 · 确定性验收门（权力：全项通过才 approve，逐项可咬；A.8 否决在线 meta-orchestrator）。
 export {
   runAcceptanceGate,
+  GATE_CHECK_IDS,
   MAX_GATE_FLIP_FRACTION,
   MIN_SAMPLES_PER_BIN,
   MIN_OUTPUT_SPREAD,
@@ -91,7 +92,7 @@ export {
   type GateVerdict,
   type GateInputs,
 } from './calibration/acceptance-gate.js'
-// S27 · 控制面链路：Advisor→验收门→（5/5 原子换 / 否则 fail-silent HOLD）。活动 g 的唯一写入路径（除即时回退）。
+// S27 · 控制面链路：Advisor→验收门→（验收门全项通过则原子换 / 否则 fail-silent HOLD）。活动 g 的唯一写入路径（除即时回退）。
 export {
   evaluateAndMaybeSwap,
   type SwapResult,

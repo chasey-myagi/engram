@@ -9,7 +9,7 @@
  *      产出一个 CalibrationProposal（纯数据对象）后**就此打住**——它从不替换 g、不写库。是否采纳由验收门（权力）拍板。
  *
  * 这就是「能力/权力分离」在代码里的硬兑现：Advisor 的返回值进不了活动 g，除非 evaluateAndMaybeSwap 把它喂过验收门
- * 且 5/5 通过、再由 store 原子提交。Advisor 单测可断言它的返回值从不改变 getActiveCalibrationVersion。
+ * 且验收门全项通过、再由 store 原子提交。Advisor 单测可断言它的返回值从不改变 getActiveCalibrationVersion。
  *
  * 领域无关；A3 红线（ELO/胜负率严禁进 g 的拟合）在**样本输入边界**守：样本只有 (rawPredicted, correct) 两字段，
  * 结构上无任何 ELO/胜负率入口（与 S5 computeCalibrationFromUsage 同源同口径）。

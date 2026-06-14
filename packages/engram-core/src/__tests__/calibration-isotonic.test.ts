@@ -4,7 +4,7 @@
  * 覆盖（每条都被对抗式门禁盯着）：
  *   1) ≥200 门：<200 不拟合（g 维持 identity）；≥200 才拟合 g'。
  *   2) usage_truth 取样（独立用户/不同 task 门控，A.6 反刷单）：同身份刷单只算一票。
- *   3) 经 S27 验收门原子换：5/5 才换、calibration_version 翻版；**换后 golden 上 ECE < identity 基线**（ECE 下降证明）。
+ *   3) 经 S27 验收门原子换：全项通过才换、calibration_version 翻版；**换后 golden 上 ECE < identity 基线**（ECE 下降证明）。
  *   4) 老快照冻结：换 g 前拍的快照保留旧版本/旧 conf；只有钉新版本的 claim 用 g'。
  *   5) w/g 分离：改权重不重拟 g；重拟 g 不改权重。
  *   6) g=identity 回退：真换上 g' 后回退仍退回裸 raw。
@@ -218,7 +218,7 @@ describe('S28 ≥200 门 + usage_truth 取样（独立门控）', () => {
 })
 
 describe('S28 经验收门原子换 + ECE 下降证明', () => {
-  it('5/5 approve → 原子换、calibration_version 翻版、evidence 落 ΔECE + codeVersion', async () => {
+  it('全项通过 approve → 原子换、calibration_version 翻版、evidence 落 ΔECE + codeVersion', async () => {
     const cid = await seedClaim('ece claim')
     await seedMiscalibratedUsage(cid, 300)
     const res = await fitAndMaybeRecalibrate(db, { version: 'iso-ece-1' })
