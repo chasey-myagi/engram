@@ -6,6 +6,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
+import { computeCalibrationFromUsage, DEFAULT_BIN_COUNT } from '../calibration/calibration.js'
 import { createDb, type DB } from '../db/client.js'
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { addSource, appendClaim } from '../spi/append-claim.js'
@@ -141,7 +142,7 @@ describe('S31 longitudinal frozen-golden recompete — the 8th dimension (reloca
     }
   })
 
-  it('ΔECE-down: as calibration improves across releases, ECE drops and delta (prev−curr) is positive', async () => {
+  it('ΔECE-down: as calibration improves across releases (DISTINCT identities), ECE drops and delta (prev−curr) is positive', async () => {
     // T0: a single high-confidence-but-refused usage ⇒ non-zero ECE
     await seedMiscalibration(L3_GOLDEN[0]!.expectedClaimTexts[0]!, L3_GOLDEN[0]!.query)
     const t0 = await runRecompeteSnapshot(db, embedder, 'T0')
@@ -149,23 +150,61 @@ describe('S31 longitudinal frozen-golden recompete — the 8th dimension (reloca
     expect(t0ece.value).toBeGreaterThan(0)
     expect(t0ece.delta).toBeNull()
 
-    // T1: add many well-calibrated usages (adopted at low confidence is irrelevant; here just dilute the error
-    // by adding correctly-low predictions) ⇒ ECE drops vs T0
+    // T1: add many well-calibrated usages under DISTINCT (byRole, taskId) identities so the gated reader
+    // actually admits them as separate samples ⇒ ECE drops vs T0. (Same-identity spam would NOT move it —
+    // EGR-CR-027: the gate blocks spam, not real distinct-identity signal.)
     const claimId = await selfAuthor(L3_GOLDEN[1]!.expectedClaimTexts[0]!)
     const [hit] = await recallClaims(db, embedder, L3_GOLDEN[1]!.query)
     for (let i = 0; i < 10; i++) {
+      // hit.confidence.value is a high recall confidence; adopted at high confidence is WELL-calibrated,
+      // diluting the one mis-calibrated high-conf-refuted sample from T0 ⇒ ECE falls.
       await reportUsage(db, claimId, 'adopted', {
-        byRole: 'consumer:test',
+        byRole: `consumer:wc-${i}`,
+        taskId: `task-${i}`,
         confidenceAtRecall: hit!.confidence.value,
         calibrationVersion: hit!.confidence.calibrationVersion,
       })
     }
     const t1 = await runRecompeteSnapshot(db, embedder, 'T1')
     const t1ece = t1.results.find((r) => r.dimension === DIMENSION.ece)!
-    // ECE dropped (more well-calibrated samples) ⇒ ΔECE-down delta (prev - curr) > 0
+    // ECE dropped (more well-calibrated DISTINCT samples) ⇒ ΔECE-down delta (prev - curr) > 0
     expect(t1ece.value).toBeLessThan(t0ece.value)
     expect(t1ece.delta!).toBeGreaterThan(0)
     expect(t1ece.delta!).toBeCloseTo(t0ece.value - t1ece.value, 10)
+  })
+
+  it('EGR-CR-027 — spamming the SAME (byRole, taskId) does NOT move gated ΔECE (no faked "better-with-use")', async () => {
+    // T0: one high-confidence-but-refused usage ⇒ non-zero ECE baseline.
+    await seedMiscalibration(L3_GOLDEN[0]!.expectedClaimTexts[0]!, L3_GOLDEN[0]!.query)
+    const t0 = await runRecompeteSnapshot(db, embedder, 'T0')
+    const t0ece = t0.results.find((r) => r.dimension === DIMENSION.ece)!
+    expect(t0ece.value).toBeGreaterThan(0)
+
+    // T1: a single consumer spams the SAME (byRole, taskId) 100× with well-calibrated adopted reports.
+    // Under the OLD raw reader this would flood the diagram and drop ECE (faking "the system got better").
+    const claimId = await selfAuthor(L3_GOLDEN[1]!.expectedClaimTexts[0]!)
+    const [hit] = await recallClaims(db, embedder, L3_GOLDEN[1]!.query)
+    for (let i = 0; i < 100; i++) {
+      await reportUsage(db, claimId, 'adopted', {
+        byRole: 'consumer:spam',
+        taskId: 't-spam',
+        confidenceAtRecall: hit!.confidence.value,
+        calibrationVersion: hit!.confidence.calibrationVersion,
+      })
+    }
+    const t1 = await runRecompeteSnapshot(db, embedder, 'T1')
+    const t1ece = t1.results.find((r) => r.dimension === DIMENSION.ece)!
+    // The 100 spam rows fold to ONE gated sample ⇒ ECE moves only by that single legitimate vote, not by spam volume.
+    // Assert the spam cannot be used to manufacture a downward ΔECE far beyond a single sample's effect.
+    // Concretely: with T0 having 1 sample and T1 adding exactly 1 gated sample, ECE shifts to the 2-sample value,
+    // NOT toward 0 as 100 raw rows would force. We pin the gated outcome: ECE stays > 0 and the drop is bounded.
+    expect(t1ece.value).toBeGreaterThan(0) // a single extra well-calibrated vote can't zero out the error
+
+    // Direct proof the gate folded the spam: the raw reader sees 101 rows, the gated reader sees 2.
+    const gated = await computeCalibrationFromUsage(db)
+    const raw = await computeCalibrationFromUsage(db, DEFAULT_BIN_COUNT, 'raw-events')
+    expect(gated.sampleCount).toBe(2) // T0's 1 refuted + T1's folded-to-1 spam identity
+    expect(raw.sampleCount).toBe(101) // 1 + 100 spam rows actually written
   })
 
   it('cross-release comparability: the SAME frozen golden version anchors the series (same questions across releases)', async () => {
