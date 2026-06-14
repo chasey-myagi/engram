@@ -210,6 +210,7 @@ export {
   getDimensionSeries,
   DIMENSION,
   DIMENSION_NAMES,
+  isDimensionName,
   type DimensionName,
   type DimensionEvent,
   type RecordDimensionInput,

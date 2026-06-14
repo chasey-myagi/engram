@@ -45,6 +45,11 @@ export const DIMENSION_NAMES: readonly DimensionName[] = Object.freeze(
   Object.values(DIMENSION),
 ) as readonly DimensionName[]
 
+/** runtime 白名单守卫：dimension 必须 ∈ DIMENSION_NAMES（与 longitudinal-recompete 的 isRecompeteDimension 同款）。 */
+export function isDimensionName(x: string): x is DimensionName {
+  return (DIMENSION_NAMES as readonly string[]).includes(x)
+}
+
 /** dimension_events 一行的读出形状。 */
 export interface DimensionEvent {
   id: string
@@ -87,6 +92,13 @@ export async function recordDimension(
 ): Promise<{ eventId: string }> {
   if (typeof input.runId !== 'string' || input.runId.trim().length === 0) {
     throw new Error('recordDimension: runId must be a non-empty string')
+  }
+  // A3 硬门：非白名单维度物理写不进（ELO/胜负率/reward 等绝不进评测脊柱）。
+  if (typeof input.dimension !== 'string' || !isDimensionName(input.dimension)) {
+    throw new Error(
+      `recordDimension: dimension must be one of ${DIMENSION_NAMES.join(', ')} ` +
+        `(A3: ELO/win-rate/reward barred from the eval spine), got ${JSON.stringify(input.dimension)}`,
+    )
   }
   if (!(input.value >= 0 && input.value <= 1)) {
     throw new Error(

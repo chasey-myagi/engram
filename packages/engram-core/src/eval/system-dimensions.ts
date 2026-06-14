@@ -26,7 +26,9 @@ import { getImmunityScores } from '../spi/redteam-generation.js'
 import { recallClaims, type RecallContext, type RecallResult } from '../spi/recall-claims.js'
 import {
   DIMENSION,
+  DIMENSION_NAMES,
   getDimensionEvents,
+  isDimensionName,
   recordDimension,
   type DimensionEvent,
   type DimensionName,
@@ -378,7 +380,14 @@ export async function aggregateLatest(
   const latest: Partial<Record<DimensionName, number>> = {}
   // events 已按 (createdAt,id) 升序；逐条覆盖 ⇒ 末值即该维最新。确定性：同 log 同序同结果。
   for (const e of events) {
-    latest[e.dimension as DimensionName] = e.value
+    // 读侧 fail-loud：历史脏行或绕过写口的直接 DB 写一旦含非白名单维度，即报脊柱被污染（不再盲目强转）。
+    if (!isDimensionName(e.dimension)) {
+      throw new Error(
+        `aggregateLatest: dimension_events contains non-whitelisted dimension ${JSON.stringify(e.dimension)} ` +
+          `(eval spine corrupted; expected one of ${DIMENSION_NAMES.join(', ')})`,
+      )
+    }
+    latest[e.dimension] = e.value
   }
   return latest
 }

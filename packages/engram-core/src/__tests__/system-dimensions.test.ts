@@ -469,6 +469,45 @@ describe('S30 L3 system dimensions (substrate-ready 7) — append-only events th
     ).resolves.toBeDefined()
   })
 
+  // EGR-CR-053 (#128): recordDimension() 须 runtime 拒非白名单 dimension，读侧不强转未知标签。
+  it('recordDimension rejects non-whitelisted dimensions (A3: elo/win_rate/reward barred from the eval spine)', async () => {
+    for (const bad of ['elo', 'win_rate', 'reward', 'downstream_ab', '']) {
+      await expect(
+        recordDimension(db, { runId: 'r', dimension: bad as never, value: 0.5 }),
+      ).rejects.toThrow(/dimension must be one of/)
+    }
+    // 白名单端点仍被接受（证明守卫不误杀合法维度）。
+    for (const ok of DIMENSION_NAMES) {
+      await expect(
+        recordDimension(db, { runId: 'ok', dimension: ok, value: 0.5 }),
+      ).resolves.toBeDefined()
+    }
+  })
+
+  it('rejected dimension writes no row to dimension_events (fail-loud, not half-batch)', async () => {
+    await expect(
+      recordDimension(db, { runId: 'r2', dimension: 'elo' as never, value: 0.5 }),
+    ).rejects.toThrow(/dimension must be one of/)
+    const series = await getDimensionSeries(db, DIMENSION.ece)
+    const rows = (
+      await pool.query<{ c: string }>('SELECT count(*)::text AS c FROM dimension_events')
+    ).rows
+    expect(rows[0]!.c).toBe('0') // 校验在 insert 之前，零行落库
+    expect(series).toHaveLength(0)
+  })
+
+  it('aggregateLatest fails loud on a non-whitelisted dimension already in the table (no blind cast)', async () => {
+    // 绕过 recordDimension 直接 DB 写，模拟历史脏行或外部直写。
+    await pool.query(
+      `INSERT INTO dimension_events (id, run_id, dimension, value, payload, created_by, created_at)
+       VALUES ($1, 'dirty', 'reward', 0.9, '{}'::jsonb, 'test', now())`,
+      [randomUUID()],
+    )
+    await expect(aggregateLatest(db, { runId: 'dirty' })).rejects.toThrow(
+      /non-whitelisted dimension/,
+    )
+  })
+
   it('runGoldenItem only calls recall_claims (no write): scoring an empty KB writes zero claims', async () => {
     const obs = await runGoldenItem(db, embedder, L3_GOLDEN[0]!, 5)
     expect(obs.answered).toBe(false)
