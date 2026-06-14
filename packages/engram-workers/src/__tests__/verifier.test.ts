@@ -229,6 +229,35 @@ describe('S17 Verifier worker (D3 patrol: 函数/统计 + 点状一次 LLM) — 
     expect(hits.find((h) => h.claim.id === claimId)!.confidence.factors.entailment).toBe(1)
   })
 
+  // EGR-CR-025: same passing-entailment draft as above, but it carries an ACTIVE contradicts edge. The promote gate
+  // must recompute conf with the LIVE active-conflictDecay (parity with recall) — pulling live conf <0.5 — so the
+  // draft is NOT promoted by the agent and stays in the draft shadow zone (not recallable). Mirrors the pass case
+  // above (no conflict → promotes) as a no-conflict/conflict contrast; orthogonal to the not_co_true→Arbiter routing.
+  it('draft→active is BLOCKED when an active contradicts edge drops live conf<0.5 — verifier patrols pass yet the draft stays draft and unrecallable (EGR-CR-025)', async () => {
+    const peer = await mkClaim({ status: 'active', claimText: 'peer X' }) // the contradicting active peer
+    const { claimId } = await mkClaim({
+      status: 'draft',
+      recallable: true,
+      claimText: 'sku-p spec 9',
+      factors: { authority: 1, indepSupport: 0.75, entailment: 0.5 }, // identical to the passing case above
+    })
+    await db.insert(schema.relation).values({
+      id: randomUUID(),
+      fromClaim: claimId,
+      toClaim: peer.claimId,
+      type: 'contradicts',
+    })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'pass' })
+    const res = await runVerifier({ db, judge })
+
+    // patrol still passes (live-f2 is raised) — but the promote gate's live conflictDecay blocks the promotion
+    expect(res.outcomes.find((o) => o.claimId === claimId)!.entailment).toBe('pass')
+    // red (pre-fix): gate's archival conflictDecay=1 ⇒ conf 0.5625≥0.5 ⇒ promoted to active (assertion fails)
+    // green (post-fix): live conflictDecay 0.6667 ⇒ conf ≈0.375 <0.5 ⇒ transitionClaim throws, catch keeps draft
+    expect(await statusOf(claimId)).toBe('draft')
+    expect(await recallClaims(db, embedder, 'sku-p spec 9')).toHaveLength(0) // correctly left in the draft shadow zone
+  })
+
   it('judge≠athlete: the Verifier never patrols/endorses a claim it itself authored (skipped, no verdict, status unchanged, LLM never called)', async () => {
     const { claimId } = await mkClaim({ status: 'active', createdBy: VERIFIER_ROLE })
     const judge = judgeOf('throw') // would throw if ever called — proves it isn't
