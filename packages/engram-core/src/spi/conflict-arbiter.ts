@@ -295,16 +295,27 @@ function toAdjudication(row: typeof metricsEvents.$inferSelect): ConflictAdjudic
 }
 
 /**
- * 读主编裁决队列（outcome='escalated' 的 conflict_adjudicated 事件），最新在前。
- * 主编（人）从这里取待裁冲突，用同一张优先级表 + ① 人工裁定手裁。
+ * 读主编裁决队列：按（无序）pair-key 把 append-only 的 conflict_adjudicated 事件投影成「待裁视图」，最新在前。
+ * 每个 pair 只看其**最新一条**裁决——仅当最新仍为 escalated（升级后未被任何 human resolve 关闭）才入队。
+ * 旧 escalated 事件被后来的 resolved 关闭后不再泄漏进队列（event log 全留、queue 是只读 projection；
+ * 不撤回事件、不动冻结枚举/append-only 红线）。pair-key 与 adjudicatedPairKeys 同款 min|max 规则。
  */
 export async function getEditorConflictQueue(db: DB): Promise<ConflictAdjudication[]> {
   const rows = await db
     .select()
     .from(metricsEvents)
     .where(eq(metricsEvents.kind, CONFLICT_ADJUDICATED))
-    .orderBy(desc(metricsEvents.createdAt), desc(metricsEvents.id))
-  return rows.map(toAdjudication).filter((a) => a.payload.outcome === 'escalated')
+    .orderBy(desc(metricsEvents.createdAt), desc(metricsEvents.id)) // 最新在前
+  const seen = new Set<string>()
+  const queue: ConflictAdjudication[] = []
+  for (const adj of rows.map(toAdjudication)) {
+    const { claimA: x, claimB: y } = adj.payload
+    const key = x < y ? `${x}|${y}` : `${y}|${x}`
+    if (seen.has(key)) continue // 只看每个 pair 最新一条
+    seen.add(key)
+    if (adj.payload.outcome === 'escalated') queue.push(adj) // 最新仍 escalated 才入队
+  }
+  return queue
 }
 
 /** 读机判自裁的采信/信任标记（outcome='resolved'），最新在前。可解释/审计用。 */
