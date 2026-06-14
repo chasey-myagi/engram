@@ -363,6 +363,56 @@ describe('P4a · 红蓝对抗回合（runRedBlueRound：真 DB 驱动真工种�
       const poisonGolden = goldens.filter((g) => g.query === poisoned.claimText)
       expect(poisonGolden.length).toBe(0)
     })
+
+    it('结构化自败题（同 S/P、反 object）经 admitViaA1 真路径 → S8 自相矛盾门 → BLOCK，不计分', async () => {
+      // EGR-CR-018 回归：A1 admission 必须把 item 的结构化 S/P/O 透传给 promoteCandidate 的 poison，
+      // 否则 S8（noSelfContradiction）对结构化自败题恒为 true、永不发火，带毒考题混进被计分 cohort。
+      // 走 runRedBlueRound / admitViaA1 真 admission 路径（**非**手传 poison 的 SPI 门测试）——bug 仍在时此测必失败。
+      const contra = REDTEAM_GENERATION_ITEMS.find((i) => i.redteamClass === 'contradiction')!
+      // claimText（= A1 的 recall query）换成与库内任何 active claim 无 trigram 交集的独特 token 串 → kbTrulyLacks=true，
+      // 判定真正走到 S8 造毒株步（否则会被 kbTrulyLacks=false 提前 BLOCK，测不到 noSelfContradiction）。
+      // fake 嵌入器是字符三元组袋：若沿用 contra 原 claimText（与下面 seed 的 anchor 句几乎全词重叠）会 recall 命中、
+      // kbTrulyLacks=false——故 query 必须与 anchor 句 trigram 无交集（与 redteam-immunity.test.ts 同款做法）。
+      // 矛盾**不靠 claimText**：透传后毒株 claim 带 contra 的结构化 S/P/O（同 S/P、反 object），与 seed 的 anchor 落
+      // contradicts 边（recordContradictions 只比 subject+predicate+object，与 claimText 无关）。
+      const selfContra: RedTeamItem = {
+        ...contra,
+        id: 'contra-self-failing',
+        claimText: 'zqxwvk-uniq-7 gap question with no kb answer',
+      }
+
+      // resetWorkTables 包一层：清完库后 seed 那条与 item 同 S/P、正 object 的 active 锚（item 自身 object 反向）。
+      // 透传后 A1 造毒株（item 的 S/P + 反 object）会与该锚落 contradicts 边 → noSelfContradiction=false → BLOCK。
+      const anchor = contra.anchor!
+      const seedingReset = async () => {
+        await resetWorkTables()
+        await appendActiveClaim({
+          claimText: anchor.claimText,
+          ...(anchor.subject !== undefined ? { subject: anchor.subject } : {}),
+          ...(anchor.predicate !== undefined ? { predicate: anchor.predicate } : {}),
+          ...(anchor.object !== undefined ? { object: anchor.object } : {}),
+        })
+      }
+
+      const res = await runRedBlueRound(
+        { db, embedder },
+        {
+          generationVersion: 'rb-a1-selfcontra',
+          items: [selfContra],
+          resetWorkTables: seedingReset,
+        },
+      )
+
+      const adm = res.admissions.find((a) => a.itemId === 'contra-self-failing')!
+      expect(adm.admitted).toBe(false) // A1 BLOCK
+      expect(res.blockedItemIds).toContain('contra-self-failing')
+      expect(res.scoredItemIds).not.toContain('contra-self-failing')
+      // 给了人读理由：自相矛盾（对齐 exam-immunity.ts 的 reason 文案）。
+      expect(adm.reasons.some((r) => r.includes('self-contradict'))).toBe(true)
+      // 永不进 golden（带 unique token 的 query 一条都不该落 golden）。
+      const goldens = await db.select().from(schema.goldenQuestions)
+      expect(goldens.filter((g) => g.query.includes('zqxwvk-uniq-7')).length).toBe(0)
+    })
   })
 
   describe('A3 铁律：检出率/胜负结构上不进校准 g 与纵向趋势', () => {

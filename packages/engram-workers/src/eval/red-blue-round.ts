@@ -179,7 +179,18 @@ async function admitViaA1(
     confirmedBy,
     status: 'queued',
   })
-  const res = await promoteCandidate(db, embedder, candidateId, { confirmedBy })
+  // 透传 item 的结构化框架（S/P/O）给 A1 的 poison，让 S8 自相矛盾门对结构化自败题（同 S/P、反 object）能发火——
+  // 否则毒株 claim 仅有 claimText、S8 恒 noSelfContradiction=true，带毒考题混进被计分 cohort（EGR-CR-018）。
+  // 沿 exactOptionalPropertyTypes 惯例：仅在字段非 undefined 时塞入；纯文本 item（无 S/P/O）不传 poison、行为不变。
+  const poison = {
+    ...(item.subject !== undefined ? { subject: item.subject } : {}),
+    ...(item.predicate !== undefined ? { predicate: item.predicate } : {}),
+    ...(item.object !== undefined ? { object: item.object } : {}),
+  }
+  const res = await promoteCandidate(db, embedder, candidateId, {
+    confirmedBy,
+    ...(Object.keys(poison).length > 0 ? { poison } : {}),
+  })
   return {
     itemId: item.id,
     redteamClass: item.redteamClass,
