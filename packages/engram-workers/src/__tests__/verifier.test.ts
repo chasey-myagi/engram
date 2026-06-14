@@ -285,6 +285,33 @@ describe('S17 Verifier worker (D3 patrol: 函数/统计 + 点状一次 LLM) — 
     expect(await statusOf(target.claimId)).toBe('flagged')
   })
 
+  // EGR-CR-037 (#112): an EMPTY claimIds batch is a no-op — it must NOT degrade into the cron full-DB patrol.
+  // Pre-fix: verifyEnqueued([]) → runVerifier({claimIds: []}) → selector's `length > 0` is false → cron branch
+  // patrols EVERY draft/active/flagged claim (each = one judge call + possible tighten). Post-fix: short-circuits.
+  it('EGR-CR-037: verifyEnqueued([]) is a no-op — no patrol, no judge call, no transition, no verdict written', async () => {
+    // claims the cron patrol WOULD hit; a 'fail' judge would tighten active→flagged, proving any patrol by side-effect.
+    const c1 = await mkClaim({ status: 'active', claimText: 'empty-batch active' })
+    const c2 = await mkClaim({ status: 'draft', claimText: 'empty-batch draft' })
+    const c3 = await mkClaim({ status: 'flagged', claimText: 'empty-batch flagged' })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'fail' }) // would flag active / quarantine flagged if patrolled
+
+    const res = await verifyEnqueued({ db, judge }, [])
+
+    expect(res.patrolled).toBe(0)
+    expect(res.skipped).toBe(0)
+    expect(res.transitions).toBe(0)
+    expect(res.outcomes).toEqual([])
+    expect(judge.callCount()).toBe(0) // 点状 LLM 一次都没调 — no full-DB judge fan-out
+    expect(res.byRole).toBe(VERIFIER_ROLE)
+    // statuses untouched (no tighten) and no patrol verdict written for any claim.
+    expect(await statusOf(c1.claimId)).toBe('active')
+    expect(await statusOf(c2.claimId)).toBe('draft')
+    expect(await statusOf(c3.claimId)).toBe('flagged')
+    expect(await patrolRows(c1.claimId)).toHaveLength(0)
+    expect(await patrolRows(c2.claimId)).toHaveLength(0)
+    expect(await patrolRows(c3.claimId)).toHaveLength(0)
+  })
+
   // S20 routed follow-up: S17 deferred the conflict signal's peer id (conflictsWith). The Verifier now populates it
   // on a not_co_true verdict, finding the contradicting peer via the contradicts edge — handing the pairwise
   // conflict to the Arbiter (the owner of pairwise resolution).

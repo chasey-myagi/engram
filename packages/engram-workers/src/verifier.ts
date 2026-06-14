@@ -409,5 +409,17 @@ export async function verifyEnqueued(
   claimIds: string[],
   opts: Omit<VerifierOptions, 'claimIds'> = {},
 ): Promise<VerifierResult> {
+  // EGR-CR-037 (根治点)：空 batch 永远是 no-op。「带了一批但批为空」≠「没传 claimIds（cron）」——
+  // 不能透传给 runVerifier（其 selector 的 `length > 0` 会把 [] 误判进 cron 全库巡查、白调全库 judge）。在此短路。
+  if (claimIds.length === 0) {
+    return {
+      byRole: opts.byRole ?? DEFAULT_BY_ROLE,
+      patrolled: 0,
+      skipped: 0,
+      transitions: 0,
+      ncExactRefusals: 0,
+      outcomes: [],
+    }
+  }
   return runVerifier(deps, { ...opts, claimIds })
 }

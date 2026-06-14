@@ -558,6 +558,48 @@ describe('S24 choreography integration — A.7 event-driven cascade, no online m
       expect(Object.keys(usageResult.firedByWorker)).toEqual(['harvester'])
       expect(usageResult.firedByWorker.harvester).toBe(1)
     })
+
+    // EGR-CR-037 (#112): an EMPTY claim.draft batch through the cascade must NOT degrade into a full-DB patrol.
+    // Pre-fix: the empty claim.draft is dispatched, the Verifier handler runs verifyEnqueued([]) →
+    // runVerifier({claimIds: []}) → selector cron branch patrols EVERY draft/active/flagged claim (judge fan-out +
+    // possible tighten). Post-fix (A+B): the worker short-circuits on the empty batch — no patrol, no judge call.
+    it('EGR-CR-037: an empty claim.draft batch does NOT degrade into a full-DB Verifier patrol (no judge call, no transition)', async () => {
+      // claims the cron patrol WOULD hit; the judge is 'fail' so any patrol would tighten active→flagged (provable by side-effect).
+      const c1 = await seedActiveClaim({
+        query: 'kpEmptyDraft A',
+        object: 'A',
+        asOf: new Date('2025-06-01T00:00:00.000Z'),
+      })
+      const c2 = await seedActiveClaim({
+        query: 'kpEmptyDraft B',
+        object: 'B',
+        asOf: new Date('2025-06-01T00:00:00.000Z'),
+      })
+      const judge = makeFakeEntailmentJudge({ verdictOf: () => 'fail' })
+      const dispatcher = wireDispatcher({
+        distillerScript: conflictingDistillScript(),
+        entailment: judge,
+      })
+
+      const result = await dispatcher.runToConvergence({
+        type: 'claim.draft',
+        payload: { claimIds: [] },
+      })
+
+      // A: the Verifier short-circuits the empty batch — zero judge calls, zero full-DB patrol.
+      expect(judge.callCount()).toBe(0)
+      // statuses untouched (no tighten) — the decisive anti-degradation assertion.
+      expect(await statusOf(c1)).toBe('active')
+      expect(await statusOf(c2)).toBe('active')
+      // no patrol verdicts written for the full-DB set.
+      const patrols = await db
+        .select()
+        .from(schema.claimVerification)
+        .where(eq(schema.claimVerification.kind, 'patrol'))
+      expect(patrols).toHaveLength(0)
+      // dispatch stayed clean (no failures).
+      expect(result.failures).toBe(0)
+    })
   })
 
   // ── 断言 2：静默降级 / 无单点失效 ──────────────────────────────────────────────────────────

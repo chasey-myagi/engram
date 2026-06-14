@@ -21,6 +21,8 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
+import { eq } from 'drizzle-orm'
+
 import {
   addSource,
   createDb,
@@ -133,6 +135,16 @@ function buildRunner(
     harvester,
     arbiterRuntimeFor,
   })
+}
+
+/** 读 claim 存档的 f4 usageCorrect + raw（断言「空 batch 没触发全库重算」用）。 */
+async function storedOf(claimId: string): Promise<{ usageCorrect: number; raw: number }> {
+  const [row] = await db
+    .select({ f: schema.claim.confidenceFactors, raw: schema.claim.confidenceRaw })
+    .from(schema.claim)
+    .where(eq(schema.claim.id, claimId))
+  const stored = row!.f as { factors: { usageCorrect: number } }
+  return { usageCorrect: stored.factors.usageCorrect, raw: row!.raw }
 }
 
 async function aSource(content?: string): Promise<string> {
@@ -345,6 +357,37 @@ describe('P4b · EngramRunner 把北极星接成可跑自闭环', () => {
       // 控制面两拍仍走完。
       expect(report.governance.ran).toBe(true)
       expect(report.recalibrate.fitted).toBe(false)
+    })
+
+    // EGR-CR-037 (#112): public SPI harvestUsage([]) must NOT degrade into a full-DB Harvester recompute.
+    // Pre-fix: an empty report_usage event is dispatched, the Harvester handler runs harvestBatch([]) →
+    // runHarvester({claimIds: []}) → selector cron branch recomputes EVERY usage_truth claim (here f4 0.8→1.0).
+    // Post-fix (A+B): the SPI short-circuits and never publishes the empty event, so the Harvester is not fired
+    // and no claim is touched.
+    it('⑥ EGR-CR-037: public harvestUsage([]) is a no-op — Harvester not fired, no full-DB recompute', async () => {
+      const a = await seedActiveClaim({
+        query: 'kpEmpty throughput',
+        object: 'A',
+        asOf: new Date('2025-06-01T00:00:00.000Z'),
+      })
+      // give it usage that a cron recompute WOULD fold into f4 (3 independent adopted → f4 would become 1.0).
+      for (const u of ['p', 'q', 'r']) {
+        await reportUsage(db, a, 'adopted', { taskId: `t-${u}`, byRole: `agent:consumer-${u}` })
+      }
+      const before = await storedOf(a)
+      expect(before.usageCorrect).toBe(0.8) // seeded snapshot (cron recompute would push this to 1.0)
+
+      const runner = buildRunner(oneClaimScript())
+      const res = await runner.harvestUsage([])
+
+      // A+B: the empty event is not published → Harvester never dispatched, dispatch trace is clean.
+      expect(res.firedByWorker.harvester ?? 0).toBe(0)
+      expect(res.dispatched).toBe(0)
+      expect(res.failures).toBe(0)
+      // the decisive anti-degradation assertion: the claim's f4/raw were NOT recomputed.
+      const after = await storedOf(a)
+      expect(after.usageCorrect).toBe(before.usageCorrect) // still 0.8 — untouched
+      expect(after.raw).toBe(before.raw)
     })
 
     it('④ runner 真把 Arbiter 接进运行进程：一对 active 矛盾经 runClosedLoop 被路由到 Arbiter 并确定性裁决', async () => {

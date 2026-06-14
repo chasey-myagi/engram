@@ -117,6 +117,17 @@ export class EngramRunner {
     claimIds: readonly string[],
     opts: { maxEvents?: number } = {},
   ): Promise<RunToConvergenceResult> {
+    // EGR-CR-037 (纵深防御 B)：空 batch 不 publish 空 report_usage —— 否则它会被派进 Harvester handler，再退化成
+    // cron 全库重算（A 在 handler 内兜底，但这里在源头就拦掉，trace 干净、零无意义派发）。
+    if (claimIds.length === 0) {
+      return Promise.resolve({
+        dispatched: 0,
+        failures: 0,
+        firedByWorker: {},
+        traces: [],
+        truncated: false,
+      })
+    }
     return this.dispatcher.runToConvergence(
       { type: 'report_usage', payload: { claimIds: [...claimIds] } },
       opts,

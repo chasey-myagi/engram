@@ -164,5 +164,10 @@ export async function harvestBatch(
   claimIds: string[],
   opts: Omit<HarvesterOptions, 'claimIds'> = {},
 ): Promise<HarvesterResult> {
+  // EGR-CR-037 (根治点)：空 batch 永远是 no-op。「带了一批但批为空」≠「没传 claimIds（cron）」——
+  // 不能透传给 runHarvester（其 selector 的 `length > 0` 会把 [] 误判进 cron 全库扫描）。在此短路。
+  if (claimIds.length === 0) {
+    return { byRole: opts.byRole ?? DEFAULT_BY_ROLE, harvested: 0, skipped: 0, outcomes: [] }
+  }
   return runHarvester(deps, { ...opts, claimIds })
 }

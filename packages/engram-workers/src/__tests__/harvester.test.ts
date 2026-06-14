@@ -276,6 +276,38 @@ describe('S19 Harvester worker — usage→confidence loop (pure statistics, A.6
     expect(await storedOf(other).then((s) => s.usageCorrect)).toBe(0) // other left alone (not in batch)
   })
 
+  // EGR-CR-037 (#112): an EMPTY claimIds batch is a no-op — it must NOT degrade into the cron full-DB scan.
+  // Pre-fix: harvestBatch([]) → runHarvester({claimIds: []}) → selector's `length > 0` is false → cron branch
+  // recomputes EVERY usage_truth claim. Post-fix: harvestBatch([]) short-circuits to a zero result, touching nothing.
+  it('EGR-CR-037: harvestBatch([]) is a no-op and does NOT degrade into a full-DB cron recompute', async () => {
+    // ≥2 claims that the cron scan WOULD recompute (each has independent adopted usage → f4 would move 0→1).
+    const a = await mkClaim({ claimText: 'sku empty-batch A' })
+    const b = await mkClaim({ claimText: 'sku empty-batch B' })
+    for (const id of [a, b]) {
+      for (const u of ['x', 'y', 'z']) {
+        await reportUsage(db, id, 'adopted', { byRole: `consumer:${u}:${id}`, taskId: `t:${u}:${id}` })
+      }
+    }
+    const beforeA = await storedOf(a)
+    const beforeB = await storedOf(b)
+    expect(beforeA.usageCorrect).toBe(0) // stored neutral pre-harvest (cron would push these to 1)
+    expect(beforeB.usageCorrect).toBe(0)
+
+    const res = await harvestBatch({ db }, [])
+
+    expect(res.harvested).toBe(0) // nothing harvested
+    expect(res.skipped).toBe(0)
+    expect(res.outcomes).toEqual([]) // no per-claim work
+    expect(res.byRole).toBe('agent:harvester') // default role still reported
+    // The decisive anti-degradation assertions: the full-DB cron set was NOT recomputed.
+    const afterA = await storedOf(a)
+    const afterB = await storedOf(b)
+    expect(afterA.usageCorrect).toBe(beforeA.usageCorrect) // still 0 — untouched
+    expect(afterA.raw).toBe(beforeA.raw)
+    expect(afterB.usageCorrect).toBe(beforeB.usageCorrect)
+    expect(afterB.raw).toBe(beforeB.raw)
+  })
+
   it('claims with no usage are never touched (Harvester only visits claims with usage_truth)', async () => {
     const used = await mkClaim({ claimText: 'sku used' })
     const unused = await mkClaim({ claimText: 'sku unused' })
