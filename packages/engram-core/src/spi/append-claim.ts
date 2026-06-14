@@ -10,7 +10,7 @@
  */
 import { randomUUID } from 'node:crypto'
 
-import { and, eq, inArray, ne } from 'drizzle-orm'
+import { and, eq, ne, sql } from 'drizzle-orm'
 
 import {
   NEUTRAL_FACTORS,
@@ -20,7 +20,7 @@ import {
   type ComputedConfidence,
   type StoredConfidence,
 } from '../confidence/confidence.js'
-import { countIndependentSupports } from '../same-fact/independent.js'
+import { countIndependentSupports, type SourceIndep } from '../same-fact/independent.js'
 import { getActiveCalibrationMap } from '../calibration/calibration-store.js'
 import { computeEntailmentFactor } from '../verifier/patrol-verdict.js'
 import { computeUsageCorrectFactor } from '../harvest/usage-correct.js'
@@ -104,6 +104,61 @@ function isSupporting(relevance: ProvRelevance | null | undefined): boolean {
   return r === 'exact' || r === 'supporting'
 }
 
+/** loadSourcesWithAncestors 的返回行：印证字段面 + authority（f0/半衰期用）+ cited（是否本 claim 直接引用）。 */
+export interface SourceWithLineage extends SourceIndep {
+  authority: number
+  /** true=本 claim 直接引用的 supports 源；false=仅为补全血缘链递归拉进来的祖先（只当折叠锚点、不计印证）。 */
+  cited: boolean
+}
+
+/**
+ * 沿 derived_from 自引 FK 递归取出 seedIds 指向的源 **+ 它们的全部祖先链**（EGR-CR-024 根治：让 f3 折叠能看到
+ * 跨引用集合的共同祖先，否则 sibling 共享一个未被引用的上游 R 时会被误计成多条独立印证）。单条 WITH RECURSIVE
+ * 一次查回（不做 N 次往返）；UNION 去重 + 深度上限 64 防自引环/病态深链。返回行打 cited 标志区分「被引用源」与
+ * 「仅补血缘的祖先」——countIndependentSupports 只在 cited 源上计印证，祖先只作折叠锚点。
+ */
+export async function loadSourcesWithAncestors(
+  tx: DB | Tx,
+  seedIds: string[],
+): Promise<SourceWithLineage[]> {
+  if (seedIds.length === 0) return []
+  const seedList = sql.join(
+    seedIds.map((id) => sql`${id}`),
+    sql`, `,
+  )
+  const rows = await tx.execute<{
+    id: string
+    authority_score: number
+    kind: string
+    content_hash: string
+    derived_from_source_id: string | null
+  }>(sql`
+    WITH RECURSIVE lineage(id, depth) AS (
+      SELECT s.id, 0
+        FROM source s
+       WHERE s.id IN (${seedList})
+      UNION
+      SELECT s.derived_from_source_id, l.depth + 1
+        FROM lineage l
+        JOIN source s ON s.id = l.id
+       WHERE s.derived_from_source_id IS NOT NULL
+         AND l.depth < 64
+    )
+    SELECT s.id, s.authority_score, s.kind, s.content_hash, s.derived_from_source_id
+      FROM source s
+      JOIN lineage l ON l.id = s.id
+  `)
+  const seedSet = new Set(seedIds)
+  return rows.rows.map((r) => ({
+    id: r.id,
+    authority: r.authority_score,
+    kind: r.kind,
+    contentHash: r.content_hash,
+    derivedFromSourceId: r.derived_from_source_id,
+    cited: seedSet.has(r.id),
+  }))
+}
+
 /**
  * 命门：从一组**出处**算连续 confidence。只取 relevance∈{exact,supporting} 的 supports 源；authority 取其中最强源、
  * halfLife 看最强源 kind、indepSupport 数**独立** supports 源（A.6：hash 去重 + derived_from 折叠 + agent_synthesis
@@ -122,26 +177,20 @@ export async function computeConfidenceFromProvenances(
   const ids = [
     ...new Set(provenances.filter((p) => isSupporting(p.relevance)).map((p) => p.sourceId)),
   ]
-  const sources = ids.length
-    ? await tx
-        .select({
-          id: source.id,
-          authority: source.authorityScore,
-          kind: source.kind,
-          contentHash: source.contentHash,
-          derivedFromSourceId: source.derivedFromSourceId,
-        })
-        .from(source)
-        .where(inArray(source.id, ids))
-    : []
-  // 最强源（authority 最高）一遍扫出：它的 authority_score 作 f0、它的 kind 定半衰期。
-  const dominant = sources.reduce<(typeof sources)[number] | null>(
-    (best, s) => (best === null || s.authority > best.authority ? s : best),
-    null,
-  )
+  // EGR-CR-024：连同祖先链一起取（sources 含被引用源 + 全部 derived_from 祖先），f3 折叠才能看到跨引用集合的共同祖先。
+  const sources = await loadSourcesWithAncestors(tx, ids)
+  const citedSet = new Set(ids)
+  // 最强源（authority 最高）一遍扫出：它的 authority_score 作 f0、它的 kind 定半衰期。**只看被引用源**——
+  // 仅为补血缘拉进来的祖先不抬 authority/不定半衰期（祖先未被本 claim 引用，不该影响 f0/时效）。
+  const dominant = sources
+    .filter((s) => s.cited)
+    .reduce<
+      (typeof sources)[number] | null
+    >((best, s) => (best === null || s.authority > best.authority ? s : best), null)
   const authority = dominant?.authority ?? 0
   const halfLifeDays = dominant ? halfLifeDaysForKind(dominant.kind) : 180
-  const indepSupport = independentSupportScore(countIndependentSupports(sources)) // A.6 独立印证数
+  // A.6 独立印证数：折叠到血缘根，只在被引用源（citedSet）上计数，祖先只作折叠锚点（EGR-CR-024）。
+  const indepSupport = independentSupportScore(countIndependentSupports(sources, citedSet))
   const resolvedAsOf = asOf ?? new Date()
   const ageDays = Math.max(0, (Date.now() - resolvedAsOf.getTime()) / MS_PER_DAY)
   // ── 因子接线单一标注点（S17/S19/S22 在此抬可计算因子；不要散落别处）──
