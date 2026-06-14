@@ -11,7 +11,7 @@
  * 只让本轮成为 no-op（返回 ran=false + reason），**绝不**抛进调用方、绝不阻塞 append/recall 主干、零编排单点。
  * 这是「零 orchestration single point；失效静音退回三层主干」红线在控制器入口的兜底。
  */
-import { getActiveStandards, setStandards, type Standards } from '../config/standards.js'
+import { getActiveStandards, setStandardsTx, type Standards } from '../config/standards.js'
 import type { DB } from '../db/client.js'
 import {
   stepController,
@@ -23,7 +23,7 @@ import {
 import { gateWouldTighten, standardsInputFromPolicy } from './gate-policy.js'
 import {
   getActivePolicy,
-  writeGovernanceState,
+  writeGovernanceStateTx,
   type GovernanceStateRow,
 } from './governance-state.js'
 import { defaultMetricReaders, readMetrics, type MetricReaders } from './metric-readers.js'
@@ -77,22 +77,28 @@ export async function runGovernanceCycle(
     const reason = changed
       ? `cycle: stepped policy${degraded.length ? ` (degraded: ${degraded.join(',')})` : ''}`
       : `cycle: held policy (within deadband)${degraded.length ? ` (degraded: ${degraded.join(',')})` : ''}`
-    const stateRow = await writeGovernanceState(db, {
-      policy,
-      metrics: { ...metrics, targets },
-      reason,
-      createdBy,
-    })
 
-    // ④ 若 gate 确实抬严，落一行新 standards（只抬、遵 S7 不变量；setStandards 内 assertThresholds 二次护栏）。
-    let raisedGate = false
-    let standardsAfter: Standards | undefined
-    const active = await getActiveStandards(db)
-    if (gateWouldTighten(policy, active)) {
-      await setStandards(db, standardsInputFromPolicy(policy, active.factorWeights, createdBy))
-      raisedGate = true
-      standardsAfter = await getActiveStandards(db)
-    }
+    // ③+④ 单事务：写 policy 行 + （门确实抬严时）写新 standards 行，绑成一个原子单元。
+    // 任一步抛错 → Postgres 整体回滚 → policy 行不会留下半提交；异常冒泡到外层 catch，收成真正的 no-op。
+    const { stateRow, raisedGate, standardsAfter } = await db.transaction(async (tx) => {
+      const stateRow = await writeGovernanceStateTx(tx, {
+        policy,
+        metrics: { ...metrics, targets },
+        reason,
+        createdBy,
+      })
+
+      // ④ 若 gate 确实抬严，落一行新 standards（只抬、遵 S7 不变量；setStandardsTx 内 assertThresholds 二次护栏）。
+      let raisedGate = false
+      let standardsAfter: Standards | undefined
+      const active = await getActiveStandards(tx)
+      if (gateWouldTighten(policy, active)) {
+        await setStandardsTx(tx, standardsInputFromPolicy(policy, active.factorWeights, createdBy))
+        raisedGate = true
+        standardsAfter = await getActiveStandards(tx)
+      }
+      return { stateRow, raisedGate, standardsAfter }
+    })
 
     return {
       ran: true,
