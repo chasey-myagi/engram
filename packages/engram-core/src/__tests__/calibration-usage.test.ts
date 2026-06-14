@@ -7,7 +7,8 @@ import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { CALIBRATION_IDENTITY, DEFAULT_WEIGHTS } from '../confidence/confidence.js'
-import { computeCalibrationFromUsage } from '../calibration/calibration.js'
+import { computeCalibrationFromUsage, DEFAULT_BIN_COUNT } from '../calibration/calibration.js'
+import { collectUsageCalibrationSamples } from '../calibration/fit-from-usage.js'
 import { createDb, type DB } from '../db/client.js'
 import { addSource } from '../spi/append-claim.js'
 import { claim, claimProvenance, claimVerification } from '../db/schema.js'
@@ -85,12 +86,24 @@ async function seedActiveClaim(text: string, raw = 0.8): Promise<string> {
   return id
 }
 
-/** Report `adopted` adopted + `refuted` refuted usage events at a fixed predicted value (a synthetic bin). */
+/**
+ * Report `adopted` adopted + `refuted` refuted usage events at a fixed predicted value (a synthetic bin).
+ * Every event carries a DISTINCT identity (byRole keyed by predicted+index) so each row survives the
+ * independent-identity gating as its own sample — these are the bin-math/filtering fixtures, not anti-spam
+ * fixtures. The predicted value is folded into the identity so calls at different bins never collide.
+ */
 async function reportBin(claimId: string, predicted: number, adopted: number, refuted: number) {
+  let n = 0
   for (let i = 0; i < adopted; i++)
-    await reportUsage(db, claimId, 'adopted', { confidenceAtRecall: predicted, byRole: 'r' })
+    await reportUsage(db, claimId, 'adopted', {
+      confidenceAtRecall: predicted,
+      byRole: `r:${predicted}:${n++}`,
+    })
   for (let i = 0; i < refuted; i++)
-    await reportUsage(db, claimId, 'refuted', { confidenceAtRecall: predicted, byRole: 'r' })
+    await reportUsage(db, claimId, 'refuted', {
+      confidenceAtRecall: predicted,
+      byRole: `r:${predicted}:${n++}`,
+    })
 }
 
 describe('S5 report_usage extension — capture predicted probability at consumption', () => {
@@ -153,11 +166,13 @@ describe('S5 P0 GATE — ECE from recall snapshots joined to usage_truth (A.3/A.
 
   it('input boundary: only usage_truth adopted/refuted carrying predictedConfidence enter — corrected/partial, missing-predicted, and non-usage_truth (A3) are all excluded', async () => {
     const id = await seedActiveClaim('cal filter')
-    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 0.85, byRole: 'r' }) // counted (correct)
-    await reportUsage(db, id, 'refuted', { confidenceAtRecall: 0.85, byRole: 'r' }) // counted (incorrect)
-    await reportUsage(db, id, 'corrected', { confidenceAtRecall: 0.85, byRole: 'r' }) // excluded: not adopted/refuted
-    await reportUsage(db, id, 'partial', { confidenceAtRecall: 0.85, byRole: 'r' }) // excluded: not adopted/refuted
-    await reportUsage(db, id, 'adopted', { byRole: 'r' }) // excluded: no predictedConfidence
+    // distinct identities for the two counted rows so independent-identity gating keeps them as 2 votes
+    // (this case asserts the INPUT-filter boundary — which outcomes/kinds enter — not the anti-spam fold).
+    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 0.85, byRole: 'r:a' }) // counted (correct)
+    await reportUsage(db, id, 'refuted', { confidenceAtRecall: 0.85, byRole: 'r:b' }) // counted (incorrect)
+    await reportUsage(db, id, 'corrected', { confidenceAtRecall: 0.85, byRole: 'r:c' }) // excluded: not adopted/refuted
+    await reportUsage(db, id, 'partial', { confidenceAtRecall: 0.85, byRole: 'r:d' }) // excluded: not adopted/refuted
+    await reportUsage(db, id, 'adopted', { byRole: 'r:e' }) // excluded: no predictedConfidence
     // A3: a non-usage_truth verification carrying a win-rate-like field must NOT enter the calibration input
     await db.insert(claimVerification).values({
       id: randomUUID(),
@@ -175,8 +190,9 @@ describe('S5 P0 GATE — ECE from recall snapshots joined to usage_truth (A.3/A.
 
   it('preserves the falsy-but-valid endpoints: confidenceAtRecall 0 and 1 round-trip (not coerced to null) and bin correctly', async () => {
     const id = await seedActiveClaim('endpoints')
-    await reportUsage(db, id, 'refuted', { confidenceAtRecall: 0, byRole: 'r' })
-    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 1, byRole: 'r' })
+    // distinct identities so both endpoints survive independent-identity gating as separate samples.
+    await reportUsage(db, id, 'refuted', { confidenceAtRecall: 0, byRole: 'r:lo' })
+    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 1, byRole: 'r:hi' })
 
     const predicted = (await getUsageEvents(db, id))
       .map((e) => e.predictedConfidence)
@@ -227,5 +243,80 @@ describe('S5 P0 GATE — ECE from recall snapshots joined to usage_truth (A.3/A.
     expect(rep.binCount).toBe(2)
     expect(rep.bins[0]!.count).toBe(2)
     expect(rep.bins[1]!.count).toBe(2)
+  })
+})
+
+describe('EGR-CR-027 — ECE reader is gated by independent (byRole, taskId) identity (A.6 anti-Goodhart)', () => {
+  it('T1: 100 repeats of the SAME (byRole, taskId) collapse to ONE gated sample — raw-events mode still counts 100', async () => {
+    const id = await seedActiveClaim('spam one identity')
+    // Same consumer spams the same claim/task 100× — under the OLD raw reader this was 100 reliability samples.
+    for (let i = 0; i < 100; i++) {
+      await reportUsage(db, id, 'adopted', {
+        confidenceAtRecall: 0.85,
+        byRole: 'consumer:spam',
+        taskId: 't-1',
+      })
+    }
+    // RED before the fix (default reader counted raw rows ⇒ 100); GREEN after (default = independent-identities ⇒ 1).
+    expect((await computeCalibrationFromUsage(db)).sampleCount).toBe(1)
+    // raw-events diagnostic mode proves the 100 rows were actually written — it is the read-side gate that folds them.
+    expect(
+      (await computeCalibrationFromUsage(db, DEFAULT_BIN_COUNT, 'raw-events')).sampleCount,
+    ).toBe(100)
+
+    // a genuinely DISTINCT identity adds a real second vote (the gate blocks spam, not real signal).
+    await reportUsage(db, id, 'adopted', {
+      confidenceAtRecall: 0.85,
+      byRole: 'consumer:b',
+      taskId: 't-2',
+    })
+    expect((await computeCalibrationFromUsage(db)).sampleCount).toBe(2)
+    expect(
+      (await computeCalibrationFromUsage(db, DEFAULT_BIN_COUNT, 'raw-events')).sampleCount,
+    ).toBe(101)
+  })
+
+  it('T1b: same byRole but DIFFERENT taskId are distinct identities (the gate keys on the (byRole, taskId) pair)', async () => {
+    const id = await seedActiveClaim('same role distinct task')
+    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 0.85, byRole: 'c', taskId: 't-1' })
+    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 0.85, byRole: 'c', taskId: 't-2' })
+    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 0.85, byRole: 'c', taskId: 't-1' }) // dup of t-1
+    expect((await computeCalibrationFromUsage(db)).sampleCount).toBe(2) // {c,t-1}, {c,t-2}
+  })
+
+  it('T1c: latest vote wins per identity — a later refuted overrides an earlier adopted for the same identity', async () => {
+    const id = await seedActiveClaim('latest wins')
+    // single identity flip-flops; gated reader keeps only the latest outcome (refuted ⇒ correct=false).
+    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 0.85, byRole: 'c', taskId: 't' })
+    await reportUsage(db, id, 'refuted', { confidenceAtRecall: 0.85, byRole: 'c', taskId: 't' })
+    const rep = await computeCalibrationFromUsage(db)
+    expect(rep.sampleCount).toBe(1)
+    expect(rep.bins[8]!.count).toBe(1) // 0.85 → bin 8
+    expect(rep.bins[8]!.observed).toBe(0) // latest is refuted ⇒ observed 0 (adopted did not linger)
+  })
+
+  it('T3: the fitter reader and the ECE reader fold to the SAME independent-identity count (shared gate, no drift)', async () => {
+    const id = await seedActiveClaim('shared gate parity')
+    // mix: one spammed identity (×50) + three distinct identities, all under calibrationVersion=identity.
+    for (let i = 0; i < 50; i++) {
+      await reportUsage(db, id, 'adopted', {
+        confidenceAtRecall: 0.7,
+        byRole: 'consumer:spam',
+        taskId: 't-1',
+        calibrationVersion: CALIBRATION_IDENTITY,
+      })
+    }
+    for (const role of ['consumer:x', 'consumer:y', 'consumer:z']) {
+      await reportUsage(db, id, 'adopted', {
+        confidenceAtRecall: 0.7,
+        byRole: role,
+        taskId: 't-1',
+        calibrationVersion: CALIBRATION_IDENTITY,
+      })
+    }
+    const eceSamples = (await computeCalibrationFromUsage(db)).sampleCount
+    const fitterSamples = (await collectUsageCalibrationSamples(db)).length
+    expect(eceSamples).toBe(4) // spam folds to 1 + 3 distinct
+    expect(fitterSamples).toBe(eceSamples) // both readers share the one gate ⇒ identical independent count
   })
 })

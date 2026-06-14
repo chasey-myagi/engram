@@ -16,6 +16,7 @@ import { and, eq, sql } from 'drizzle-orm'
 
 import type { DB } from '../db/client.js'
 import { claimVerification } from '../db/schema.js'
+import { collectGatedUsageSamples } from './usage-samples.js'
 
 export const DEFAULT_BIN_COUNT = 10
 
@@ -93,15 +94,39 @@ const CORRECT_OUTCOME = 'adopted'
 const CALIBRATION_OUTCOMES = ['adopted', 'refuted'] as const
 
 /**
+ * ECE 取样口径：
+ *   - `independent-identities`（**默认**，A.6 防 Goodhart）：按 `(byRole, taskId)` 折叠成一票（最新覆盖），
+ *     与拟合器 g / S19 同口径——同一身份反复上报 usage_truth 不能改变 reliability 分布、刷低 ECE/ΔECE。
+ *   - `raw-events`：逐行 raw 计数（旧行为）。**仅供诊断**，绝不作为 L3/纵向读数的 gate 值。
+ */
+export type CalibrationSampleMode = 'independent-identities' | 'raw-events'
+
+/**
  * 评测=消费：只从 SPI 落地的 usage_truth 事件读校准样本——
  *   outcome ∈ {adopted, refuted} 且带 predictedConfidence（召回瞬间快照值）。
- * A3 红线在此输入边界：结构上只读 kind='usage_truth' 的 outcome + predictedConfidence，
+ * A3 红线在此输入边界：结构上只读 kind='usage_truth' 的 outcome + predictedConfidence（+ 身份用于门控），
  * 任何 ELO/胜负率信号都无字段、无 kind 可进。绝不查询时重算 confidence——只读快照里持久化的预测值。
+ *
+ * 默认 `independent-identities`：与拟合器 g 共用同一套独立身份门控（`collectGatedUsageSamples`），
+ * 关掉「同一 consumer 对同一 claim/task 反复刷 adopted/refuted 改变 ECE」这条 Goodhart 通道（EGR-CR-027）。
+ * `system-dimensions`（L3 八维 ece）与 `longitudinal-recompete`（纵向 ΔECE）经无参调用默认即受门控保护。
  */
 export async function computeCalibrationFromUsage(
   db: DB,
   binCount: number = DEFAULT_BIN_COUNT,
+  mode: CalibrationSampleMode = 'independent-identities',
 ): Promise<ReliabilityReport> {
+  if (mode === 'independent-identities') {
+    // 共享门控：按 (byRole, taskId) 折叠成一票（最新覆盖），不按 g 版本过滤（评测所有活动快照下的预测）。
+    const gated = await collectGatedUsageSamples(db, null)
+    const samples: CalibrationSample[] = gated.map((g) => ({
+      predicted: g.predicted,
+      correct: g.correct,
+    }))
+    return computeReliability(samples, binCount)
+  }
+
+  // raw-events：逐行 raw 计数（诊断模式）。每条 usage_truth 行 = 一个独立可靠性样本（无身份门控）。
   const rows = await db
     .select({ verdict: claimVerification.verdict })
     .from(claimVerification)
