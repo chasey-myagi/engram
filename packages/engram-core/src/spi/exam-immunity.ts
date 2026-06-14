@@ -14,8 +14,10 @@
  * 每次尝试都落 promotion_audit（谁/何时/凭何）—— append-only 可审计。
  *
  * 原子性边界：造毒株（appendClaim 自带事务）+ patrol 记录在**决定事务之前**提交；决定（golden + 候选状态 + 审计）
- * 一把原子落。故若决定事务失败/并发撞 golden 的 candidate_id UNIQUE，已提交的毒株是 draft 孤儿——永不被召回、
- * 永不进 golden，惰性无害（HITL 单操作者场景下风险极低，未加候选行级锁）。
+ * 一把原子落，且决定事务内先对候选行 SELECT ... FOR UPDATE 复核 status、抢到 'queued' 占有权才落终态
+ * （并发的第二个调用读到非 'queued' ⇒ already-decided 早退，绝不写 golden/候选/审计），故并发 pass+fail
+ * 竞态不会留下 (golden 行 ∧ rejected) 的矛盾终态。已提交的毒株（决定前造）若本次未抢到占有权即成 draft 孤儿
+ * ——永不被召回、永不进 golden，惰性无害。
  */
 import { randomUUID } from 'node:crypto'
 
@@ -217,6 +219,20 @@ export async function promoteCandidate(
 
   // 决定写一把原子落：晋升 ⇒ golden + 候选 promoted + 审计；驳回 ⇒ 候选 rejected（终态）+ 审计。
   return db.transaction(async (tx) => {
+    // 事务内对候选行加锁并复核 status，串行化并发决定（同库 transition.ts:97-109 / commit-claim.ts:258-265 范式）。
+    // 事务外的快速预读（:100-108）只作早退优化、非权威：并发 pass+fail 竞态下两调用都能越过它。
+    // 抢到 'queued' 占有权者继续落终态；第二个并发调用会阻塞到第一个提交、随后读到非 'queued' ⇒ already-decided 早退，
+    // 绝不执行 golden insert / blind UPDATE / 决定审计 —— 从根上消除 (golden 行 ∧ rejected) 矛盾终态与重复 golden。
+    const [locked] = await tx
+      .select({ status: l5Candidates.status })
+      .from(l5Candidates)
+      .where(eq(l5Candidates.id, candidateId))
+      .for('update')
+    if (!locked || locked.status !== 'queued') {
+      throw new Error(
+        `promoteCandidate: candidate ${candidateId} is already decided ('${locked?.status ?? 'gone'}')`,
+      )
+    }
     if (passed) {
       const goldenId = randomUUID()
       await tx.insert(goldenQuestions).values({
