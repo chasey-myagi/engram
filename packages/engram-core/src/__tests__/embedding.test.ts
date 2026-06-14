@@ -58,7 +58,11 @@ async function aSource() {
 }
 
 /** Seed a recallable active claim with a given embedding vector (factors recompute ≥ floor). */
-async function seedActiveWithVector(text: string, vector: number[]): Promise<string> {
+async function seedActiveWithVector(
+  text: string,
+  vector: number[],
+  opts: { embeddingVersion?: string } = {},
+): Promise<string> {
   const id = randomUUID()
   await db.insert(claim).values({
     id,
@@ -85,7 +89,7 @@ async function seedActiveWithVector(text: string, vector: number[]): Promise<str
     asOf: new Date(),
     createdBy: 'test',
     embedding: vector,
-    embeddingVersion: 'fake:trigram-v1',
+    embeddingVersion: opts.embeddingVersion ?? 'fake:trigram-v1',
   })
   const { sourceId } = await aSource()
   await db
@@ -134,8 +138,13 @@ describe('S9 embedding substrate (A.6)', () => {
       t === 'the device runs fast' ? fast : t === 'quick speedy hardware' ? near : far
     const semantic = makeFakeEmbedder({ version: 'fake:semantic', vectorOf })
 
-    const target = await seedActiveWithVector('the device runs fast', fast)
-    await seedActiveWithVector('an unrelated banana', far)
+    // seed rows under the SAME version the recall embedder declares, so the version gate (EGR-CR-005) keeps them.
+    const target = await seedActiveWithVector('the device runs fast', fast, {
+      embeddingVersion: semantic.version,
+    })
+    await seedActiveWithVector('an unrelated banana', far, {
+      embeddingVersion: semantic.version,
+    })
 
     const hits = await recallClaims(db, semantic, 'quick speedy hardware')
     expect(hits.map((r) => r.claim.id)).toEqual([target]) // only the semantically-near claim
@@ -146,6 +155,31 @@ describe('S9 embedding substrate (A.6)', () => {
     await seedActiveWithVector('version anchor claim', await embedder.embed('version anchor claim'))
     const [r] = await recallClaims(db, embedder, 'version anchor claim')
     expect(r!.embeddingVersion).toBe('fake:trigram-v1')
+  })
+
+  it('recall excludes a claim whose embeddingVersion is stale (different from the current embedder), even when its vector is the nearest', async () => {
+    // query embedder is the current default version ('fake:trigram-v1'); query maps to unit(0).
+    const qe = makeFakeEmbedder({ vectorOf: () => unit(0) })
+    // seed a cosine-1.0 (nearest) active claim, but stamped with a STALE version → different semantic space.
+    await seedActiveWithVector('stale version claim', vec(1.0), { embeddingVersion: 'fake:OLD' })
+    // red (pre-fix): stale vector is the nearest neighbor and is recalled. green: version filter excludes it.
+    expect(await recallClaims(db, qe, 'q')).toEqual([])
+  })
+
+  it('after reembed bumps the version to current, the previously-stale claim becomes recallable again', async () => {
+    const qe = makeFakeEmbedder({ vectorOf: () => unit(0) })
+    const id = await seedActiveWithVector('stale then reembedded', vec(1.0), {
+      embeddingVersion: 'fake:OLD',
+    })
+    expect(await recallClaims(db, qe, 'q')).toEqual([]) // stale ⇒ excluded before reembed
+
+    // reembed bumps it to the current embedder version (and rewrites its vector via qe → unit(0)).
+    expect(await markStaleForReembed(db, qe.version)).toBe(1)
+    expect(await reembedMarked(db, qe)).toBe(1)
+
+    const hits = await recallClaims(db, qe, 'q')
+    expect(hits.map((r) => r.claim.id)).toContain(id) // now current-version ⇒ recallable again
+    expect(hits[0]!.embeddingVersion).toBe(qe.version)
   })
 
   it('a model-version bump marks stale claims for reembed; reembed updates them and skips already-current ones', async () => {

@@ -153,7 +153,15 @@ export async function recallClaims(
       distance,
     })
     .from(claim)
-    .where(and(eq(claim.status, 'active'), isNotNull(claim.embedding)))
+    .where(
+      and(
+        eq(claim.status, 'active'),
+        isNotNull(claim.embedding),
+        // 版本等值门：只取当前 embedder 版本的向量。跨版本（含 NULL 版本）向量处于不同语义空间，
+        // cosine 无意义，必须永不进候选——别等 reembed 抢在查询前跑完（EGR-CR-005）。
+        eq(claim.embeddingVersion, embedder.version),
+      ),
+    )
     .orderBy(distance)
     .limit(topK)
   // 相似度下界：剔除 cosine 太低的近邻（小库下 top-k 会把无关项也带出；空查询/无相关 → 候选空 → 召回空）。
