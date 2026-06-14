@@ -285,7 +285,10 @@ describe('S19 Harvester worker — usage→confidence loop (pure statistics, A.6
     const b = await mkClaim({ claimText: 'sku empty-batch B' })
     for (const id of [a, b]) {
       for (const u of ['x', 'y', 'z']) {
-        await reportUsage(db, id, 'adopted', { byRole: `consumer:${u}:${id}`, taskId: `t:${u}:${id}` })
+        await reportUsage(db, id, 'adopted', {
+          byRole: `consumer:${u}:${id}`,
+          taskId: `t:${u}:${id}`,
+        })
       }
     }
     const beforeA = await storedOf(a)
