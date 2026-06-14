@@ -29,10 +29,12 @@ import {
   getEditorConflictQueue,
   getReconcileEscalations,
   getResolvedConflicts,
+  getWorkerFailures,
   makeFakeEmbedder,
   makeFakeEntailmentJudge,
   makeFakeSameFactJudge,
   recallClaims,
+  recordWorkerFailure,
   reportUsage,
   schema,
   type DB,
@@ -114,7 +116,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await pool.query(
-    'TRUNCATE source, claim, claim_provenance, relation, claim_verification, metrics_events CASCADE',
+    'TRUNCATE source, claim, claim_provenance, relation, claim_verification, metrics_events, worker_failure CASCADE',
   )
 })
 
@@ -665,6 +667,76 @@ describe('S24 choreography integration — A.7 event-driven cascade, no online m
         .from(schema.claimVerification)
         .where(eq(schema.claimVerification.kind, 'patrol'))
       expect(patrols).toHaveLength(0)
+    })
+
+    // EGR-CR-039：总线吞错只写内存，落库责任在持有 db 的上层（生产里是 EngramRunner.persistFailures）。
+    // 本测试在 wireDispatcher 外补同一层 persist（与 runner 同款：遍历 ok:false 的 trace → recordWorkerFailure），
+    // 证明**两条触发链（source.ingested + report_usage）各自的工种失败都落进 durable worker_failure 专表**，
+    // 且级联存活、claim 完好（与上面「NEVER poisons」用例同款保护）。
+    async function persistFailures(
+      result: Awaited<ReturnType<EventDispatcher['runToConvergence']>>,
+      digest: Record<string, unknown>,
+    ): Promise<void> {
+      for (const t of result.traces) {
+        if (t.ok) continue
+        await recordWorkerFailure(db, {
+          workerName: t.workerName,
+          eventType: t.eventType,
+          error: t.error ?? '',
+          payloadDigest: digest,
+        })
+      }
+    }
+
+    it('EGR-CR-039: failures on BOTH the source.ingested chain (verifier) and the report_usage chain (harvester) land in worker_failure, cascade survives', async () => {
+      // report_usage 链需要一条独立 active+usage 的 claim（让 Harvester 链真实存在、可被杀）。
+      const usageClaim = await seedActiveClaim({
+        query: `usage probe ${randomUUID()}`,
+        object: 'U',
+        asOf: new Date(),
+      })
+      await reportUsage(db, usageClaim, 'adopted', { taskId: 't1', byRole: 'agent:consumer-1' })
+
+      const sourceId = await aSource()
+      // 杀 verifier（命中 source.ingested → claim.draft 链）+ 杀 harvester（命中 report_usage 链）。
+      const dispatcher = wireDispatcher({
+        distillerScript: conflictingDistillScript(),
+        fail: new Set(['verifier', 'harvester']),
+      })
+
+      const ingest = await dispatcher.runToConvergence({
+        type: 'source.ingested',
+        payload: { sourceId },
+      })
+      const usage = await dispatcher.runToConvergence({
+        type: 'report_usage',
+        payload: { claimIds: [usageClaim] },
+      })
+      // 上层（runner 同款）落库两条链各自的失败。
+      await persistFailures(ingest, { sourceId })
+      await persistFailures(usage, { claimCount: 1 })
+
+      // 两条链都没崩、都跑到收敛。
+      expect(ingest.truncated).toBe(false)
+      expect(usage.truncated).toBe(false)
+
+      // source.ingested 链：verifier 的失败落库，eventType 是它声明触发的 claim.draft。
+      const verifierFails = await getWorkerFailures(db, { workerName: 'verifier' })
+      expect(verifierFails.length).toBeGreaterThanOrEqual(1)
+      expect(verifierFails.some((f) => f.eventType === 'claim.draft')).toBe(true)
+      expect(verifierFails.some((f) => f.error.includes('verifier disabled'))).toBe(true)
+
+      // report_usage 链：harvester 的失败落库，eventType 是 report_usage。
+      const harvesterFails = await getWorkerFailures(db, { workerName: 'harvester' })
+      expect(harvesterFails.length).toBeGreaterThanOrEqual(1)
+      expect(harvesterFails.some((f) => f.eventType === 'report_usage')).toBe(true)
+
+      // 级联存活、claim 完好（沿用「NEVER poisons」断言）：两条抽出的矛盾 claim 仍真落库。
+      const distilled = await db
+        .select()
+        .from(schema.claim)
+        .where(eq(schema.claim.subject, 'sku-7'))
+      expect(distilled).toHaveLength(2)
     })
   })
 

@@ -134,6 +134,13 @@
       "when": 1781475902705,
       "tag": "0018_aspiring_cannonball",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1781477314848,
+      "tag": "0019_large_stature",
+      "breakpoints": true
     }
   ]
 }

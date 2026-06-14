@@ -215,6 +215,14 @@ export {
   type RecordDimensionInput,
   type DimensionSeriesPoint,
 } from './spi/dimension-events.js'
+// EGR-CR-039 · dispatcher 吞掉的工种失败的 durable dead-letter / 审计 SPI：record/get 对 + 非空门 + 确定性排序。
+// 落库责任由 EngramRunner best-effort 承接（总线保持零 db 依赖）；纯审计、绝不进任何在线判据/校准 g/计分。
+export {
+  recordWorkerFailure,
+  getWorkerFailures,
+  type WorkerFailure,
+  type RecordWorkerFailureInput,
+} from './spi/worker-failure.js'
 export {
   computeSystemDimensions,
   runSystemDimensions,
