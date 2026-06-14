@@ -365,7 +365,7 @@ describe('P4b · EngramRunner 把北极星接成可跑自闭环', () => {
             subject: 'sku-x',
             predicate: 'spec',
             object: '1',
-            locator: 'L9',
+            locator: 'L1', // single-line default source → only L1 is a valid read-source anchor (EGR-CR-022)
           }),
           finishTurn(),
           stopTurn,
@@ -413,7 +413,7 @@ describe('P4b · EngramRunner 把北极星接成可跑自闭环', () => {
             subject: 'sku-y',
             predicate: 'spec',
             object: '2',
-            locator: 'L9',
+            locator: 'L1', // single-line default source → only L1 is a valid read-source anchor (EGR-CR-022)
           }),
           finishTurn(),
           stopTurn,
@@ -456,7 +456,7 @@ describe('P4b · EngramRunner 把北极星接成可跑自闭环', () => {
             subject: 'sku-y',
             predicate: 'spec',
             object: '7',
-            locator: 'L9',
+            locator: 'L1', // single-line default source → only L1 is a valid read-source anchor (EGR-CR-022)
           }),
           finishTurn(),
           stopTurn,
@@ -504,7 +504,7 @@ describe('P4b · EngramRunner 把北极星接成可跑自闭环', () => {
             subject: 'sku-z',
             predicate: 'spec',
             object: '1',
-            locator: 'L8',
+            locator: 'L1', // single-line default source → only L1 is a valid read-source anchor (EGR-CR-022)
           }),
           finishTurn(),
           stopTurn,

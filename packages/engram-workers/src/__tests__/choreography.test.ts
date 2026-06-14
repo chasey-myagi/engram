@@ -155,7 +155,9 @@ function runtimeOf(script: FakeAssistantResponse[]): AgentRuntime {
 
 async function aSource(content?: string): Promise<string> {
   const { sourceId } = await addSource(db, {
-    content: content ?? `body-${randomUUID()}`,
+    // 3 lines by default → fake reader yields anchors L1/L2/L3, so scripted commits citing those
+    // locators all hit a real read-source segment (EGR-CR-022 locator-from-readsource gate).
+    content: content ?? `body-${randomUUID()}\nbody-${randomUUID()}\nbody-${randomUUID()}`,
     contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.9,

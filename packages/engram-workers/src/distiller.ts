@@ -26,7 +26,12 @@ import {
   type SameFactJudge,
 } from '@engram/core'
 
-import { READABLE_KINDS, type ReadResult, type SourceReader } from './read/source-reader.js'
+import {
+  READABLE_KINDS,
+  type ReadResult,
+  type ReadSegment,
+  type SourceReader,
+} from './read/source-reader.js'
 import type { AgentRuntime, AgentTool } from './runtime/port.js'
 
 const DEFAULT_MAX_TURNS = 12
@@ -59,7 +64,11 @@ export interface DistillResult {
   status: 'done' | 'human_pending'
   /** 成功提交的 claim 次数（每次 commit_claim 工具调用成功 +1；同一事实合并仍计一次提交）。 */
   committed: number
-  /** done / max_turns / aborted / error / unsupported_kind / empty_read。 */
+  /**
+   * done / max_turns / aborted / error / unsupported_kind / empty_read /
+   * no_claims（loop 干净收尾但 0 claim 提交）/ unknown_locator（loop 干净收尾但出现过编造/未命中 read 分块的 locator）。
+   * 后两者也走 markSourceHumanPending 降级 —— 见 runDistiller 收尾段（EGR-CR-022）。
+   */
   reason: string
   /** S5:本次蒸馏的 agent run 相关键(盖到产出 claim 的 producing_run_id + agent_run_trace.run_id)。 */
   runId: string
@@ -152,7 +161,14 @@ export async function runDistiller(
     }
   }
 
+  // read 产出的合法 locator 集合：commit_claim 的 locator 必须命中其一，否则视为无出处（拒写 + 回灌 LLM），
+  // 不进 commitClaim。这是唯一同时掌握「read 产出的 locator」与「模型自报 locator」的层，根因修复落在此（EGR-CR-022）。
+  const segmentByLocator = new Map<string, ReadSegment>()
+  for (const s of read.segments) segmentByLocator.set(s.locator, s)
+
   let committed = 0
+  // 模型自报了一个不在 read 分块里的 locator（含空 locator）的次数。>0 即「出现过编造锚」→ 收尾降级人工 + 留 audit 信号。
+  let unknownLocatorCount = 0
 
   const commitTool: AgentTool = {
     name: 'commit_claim',
@@ -181,10 +197,33 @@ export async function runDistiller(
       if (!claimText) return { text: 'rejected: claimText is required', isError: true }
       if (!locator) {
         // D1 的工种层兜底：无出处的 claim 当场拒，不进 commit（内核 commitClaim 也会拒，这里先把信号回灌 LLM）。
+        unknownLocatorCount += 1
         return {
           text: 'rejected: a `locator` (provenance into the source) is required — ungrounded claims are not committed',
           isError: true,
         }
+      }
+      const segment = segmentByLocator.get(locator)
+      if (!segment) {
+        // 未知 locator：模型编了一个不在本次 read 分块里的锚 → 拒写 + 回灌 LLM（带上合法锚提示），不进 commitClaim。
+        unknownLocatorCount += 1
+        const known = [...segmentByLocator.keys()]
+        return {
+          text: `rejected: locator '${locator}' is not a known segment of this source — cite one of the read locators (${known.slice(0, 12).join(', ')}${known.length > 12 ? ', …' : ''})`,
+          isError: true,
+        }
+      }
+      let excerpt: string | undefined
+      if (typeof args.excerpt === 'string' && args.excerpt.trim() !== '') {
+        const provided = args.excerpt.trim()
+        if (!segment.text.includes(provided)) {
+          // excerpt 必须逐字出自命中 segment；否则拒写 + 回灌（不静默改写，让 LLM 自纠），不进 commitClaim。
+          return {
+            text: `rejected: excerpt is not a verbatim substring of segment '${locator}' — quote text that actually appears there, or omit excerpt`,
+            isError: true,
+          }
+        }
+        excerpt = provided
       }
       const draft = {
         claimText,
@@ -199,7 +238,7 @@ export async function runDistiller(
           sourceId,
           locator,
           relevance: 'exact',
-          ...(typeof args.excerpt === 'string' ? { excerpt: args.excerpt } : {}),
+          ...(excerpt !== undefined ? { excerpt } : {}),
         },
       ])
       committed += 1
@@ -269,6 +308,22 @@ export async function runDistiller(
       runId,
       traceRecorded,
     }
+  }
+
+  // loop 正常收尾，但若全程一条都没提交、或反复编造未命中 read 分块的 locator → 不算干净 done，
+  // 降级人工 + 留可观测信号（unknown_locator 即便最终有部分合法 claim 也降级 —— 出现过编造锚本身就是需人看的 audit）。EGR-CR-022。
+  if (unknownLocatorCount > 0 || committed === 0) {
+    // 「出现过编造锚」是更具体、更需人看的 audit 信号，优先于「0 claim」归因。
+    const reason = unknownLocatorCount > 0 ? 'unknown_locator' : 'no_claims'
+    await markSourceHumanPending(deps.db, {
+      sourceId,
+      reason:
+        unknownLocatorCount > 0
+          ? `distill loop attempted ${unknownLocatorCount} unknown-locator commit(s)`
+          : 'distill loop finished with zero committed claims',
+      byRole,
+    })
+    return { sourceId, status: 'human_pending', committed, reason, runId, traceRecorded }
   }
   return { sourceId, status: 'done', committed, reason: result.reason, runId, traceRecorded }
 }
