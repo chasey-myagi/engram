@@ -158,11 +158,20 @@ export const HARVESTER_TRIGGER = {
   batchOn: 'report_usage' as const,
 } as const
 
-/** 处理 report_usage-batch 事件：对刚收到回报的一批 claim 立即重算 f4。薄包装 runHarvester。 */
+/**
+ * 处理 report_usage-batch 事件：对刚收到回报的一批 claim 立即重算 f4。薄包装 runHarvester。
+ *
+ * EGR-CR-037 空 batch 守卫（根治点）：batch 入口语义是「我带了一批 id」。带了一批但批为空 = 没有任何 claim 要重算 = no-op。
+ * 这里直接短路返回零结果，绝不调 runHarvester —— 否则空数组会被 runHarvester→selector 的 `length > 0` 误判成「未传 claimIds」
+ * 而退化成 cron 全库扫描（对全库每条 usage_truth claim 重算 confidence）。runHarvester 的 `claimIds === undefined`（cron）路径不受影响。
+ */
 export async function harvestBatch(
   deps: HarvesterDeps,
   claimIds: string[],
   opts: Omit<HarvesterOptions, 'claimIds'> = {},
 ): Promise<HarvesterResult> {
+  if (claimIds.length === 0) {
+    return { byRole: opts.byRole ?? DEFAULT_BY_ROLE, harvested: 0, skipped: 0, outcomes: [] }
+  }
   return runHarvester(deps, { ...opts, claimIds })
 }

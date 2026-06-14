@@ -118,11 +118,20 @@ export class EngramRunner {
     return result
   }
 
-  /** 数据面：使用上报 → Harvester 纯统计（闭合「使用→升信」f4）。 */
+  /**
+   * 数据面：使用上报 → Harvester 纯统计（闭合「使用→升信」f4）。
+   *
+   * EGR-CR-037 空 batch 守卫（纵深防御 / SPI 源头净化）：空 `claimIds` = 没有任何 claim 要重算 = no-op。
+   * 直接返回空 RunToConvergenceResult，**不** publish 空 `report_usage` 事件 —— 既挡住「空 batch 退化成全库重算」，
+   * 又让 trace 干净（不留一次无意义派发）。Harvester 工种入口的 harvestBatch([]) 守卫是兜底；这里在源头就拦掉。
+   */
   async harvestUsage(
     claimIds: readonly string[],
     opts: { maxEvents?: number } = {},
   ): Promise<RunToConvergenceResult> {
+    if (claimIds.length === 0) {
+      return { dispatched: 0, failures: 0, firedByWorker: {}, traces: [], truncated: false }
+    }
     const result = await this.dispatcher.runToConvergence(
       { type: 'report_usage', payload: { claimIds: [...claimIds] } },
       opts,

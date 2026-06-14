@@ -41,6 +41,24 @@ export type EngramEvent =
 export type EngramEventType = EngramEvent['type']
 
 /**
+ * EGR-CR-037：「空 batch 是 no-op」的纵深防御。带 `claimIds: string[]` 的 batch 类事件
+ * （report_usage / batch_appended / claim.draft / claim.flagged）若 `claimIds` 为空 = 没有任何 claim 要处理 = 应被当作
+ * 不存在的事件 —— 既不派发给工种、也不计入 dispatched。否则空 batch 会被路由进工种 handler，再被 handler 内的工种入口
+ * 守卫（harvestBatch([]) / verifyEnqueued([])）接住：能挡住但留了一次无意义派发、污染 trace。在总线源头短路掉，trace 干净。
+ */
+function isEmptyBatchEvent(event: EngramEvent): boolean {
+  switch (event.type) {
+    case 'report_usage':
+    case 'batch_appended':
+    case 'claim.draft':
+    case 'claim.flagged':
+      return event.payload.claimIds.length === 0
+    default:
+      return false
+  }
+}
+
+/**
  * 工种处理器：吃一个本工种**声明触发**的事件，跑自己的活，可返回 0..n 个后继事件（驱动级联）。
  * 处理器内部自带 deps（db/judge/runtime/reader…），总线不关心——总线只管路由，不管工种怎么干活。
  */
@@ -162,6 +180,8 @@ export class EventDispatcher {
 
     while (queue.length > 0) {
       const event = queue.shift()!
+      // EGR-CR-037：空 batch 事件（claimIds 为空）= no-op，源头丢弃，不派发任何工种、不计入 dispatched（trace 干净）。
+      if (isEmptyBatchEvent(event)) continue
       const hits = this.workers.filter((w) => w.triggers.includes(event.type))
       for (const w of hits) {
         // 上限检查下沉到 per-worker 粒度，与计数单位（result.dispatched 每 worker 自增 1）对齐：
