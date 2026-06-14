@@ -418,6 +418,60 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     ).rejects.toThrow(/only queued candidates/)
   })
 
+  it('FOR UPDATE serializes concurrent promotions of the same candidate: never golden row + rejected status (EGR-CR-020)', async () => {
+    // 造一条无并发时本会 pass 的 queued 候选（quarantined 来源 ⇒ recall 空、可溯）
+    const q = 'a contended gap question'
+    const origin = await seedClaim({ claimText: 'origin', embedQuery: q, status: 'quarantined' })
+    const candidateId = await seedCandidate(q, origin)
+
+    // 两个 curator 并发晋升同一候选——本会 pass 的候选被两次人类晋升竞争
+    const results = await Promise.allSettled([
+      promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:a' }),
+      promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:b' }),
+    ])
+
+    // 断言 A：恰好一个调用拿到候选占有权并落终态，另一个观察到 already-decided 被拒
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1)
+    const rejected = results.filter((r) => r.status === 'rejected')
+    expect(rejected).toHaveLength(1)
+    expect((rejected[0] as PromiseRejectedResult).reason.message).toMatch(/already decided/)
+
+    // 断言 B（核心不变量）：候选终态与 golden 命名空间一致，绝不矛盾
+    const [cand] = await db.select().from(l5Candidates).where(eq(l5Candidates.id, candidateId))
+    const golden = await getGoldenQuestions(db)
+    const goldenForCand = golden.filter((g) => g.candidateId === candidateId)
+    if (cand!.status === 'promoted') {
+      expect(goldenForCand).toHaveLength(1) // 晋升 ⇒ 恰有一条 golden 行
+    } else {
+      expect(cand!.status).toBe('rejected')
+      expect(goldenForCand).toHaveLength(0) // 驳回 ⇒ 绝无 golden 行（杜绝矛盾终态）
+    }
+    // 反向硬断言：永远不存在 (golden 行 ∧ rejected) 的组合
+    expect(goldenForCand.length === 1 && cand!.status === 'rejected').toBe(false)
+
+    // 断言 C：审计流不自相矛盾——同一候选不同时存在 promoted 与 rejected 两条决定
+    const audit = await getPromotionAudit(db, candidateId)
+    const decisions = new Set(audit.map((a) => a.decision))
+    expect(decisions.has('promoted') && decisions.has('rejected')).toBe(false)
+  })
+
+  it('FOR UPDATE: two concurrent human promotions of the same queued candidate — exactly one golden row, the other already-decided (EGR-CR-020)', async () => {
+    const q = 'double-pass contended'
+    const origin = await seedClaim({ claimText: 'origin', embedQuery: q, status: 'quarantined' })
+    const candidateId = await seedCandidate(q, origin)
+
+    const results = await Promise.allSettled([
+      promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:a' }),
+      promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:b' }),
+    ])
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1)
+    // 恰一条 golden、候选终态 promoted、无重复（靠行锁早退，不依赖 candidate UNIQUE 抛约束冲突）
+    const golden = (await getGoldenQuestions(db)).filter((g) => g.candidateId === candidateId)
+    expect(golden).toHaveLength(1)
+    const [cand] = await db.select().from(l5Candidates).where(eq(l5Candidates.id, candidateId))
+    expect(cand!.status).toBe('promoted')
+  })
+
   it('getGoldenQuestions and the unfiltered getPromotionAudit return rows in created_at-ascending order across multiple candidates', async () => {
     const mk = async (n: number) => {
       const q = `gap question number ${n}`
