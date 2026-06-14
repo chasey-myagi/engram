@@ -51,10 +51,12 @@ adapter 经 **Consumer SPI** 消费内核，**绝不反向依赖内核内部**�
 | `addSource(db, SourceInput)` | 幂等入原文（content_hash 去重，meta 透传） | ✅ 已实现 | `packages/engram-core/src/spi/append-claim.ts` |
 | `appendClaim(db, DraftClaim, ProvenanceInput[])` | 乐观写入，默认 draft，**强制 ≥1 出处**，单事务 | ✅ 已实现 | 同上 |
 | `supersedeClaim(...)` | append-only 取代（同 lineageId + supersedes 边，旧标 superseded 不删） | ✅ 已实现 | 同上 |
-| `recall_claims(query, ctx) → RecallResult[]` | 检索：七因子聚合 → g → 消费门过滤 | ⏳ **契约待实现**（PRD A.2） | — |
-| `report_usage(claimId, outcome)` | 回报使用结果，喂校准 + 失败池 | ⏳ **契约待实现**（PRD A.2） | — |
+| `recallClaims(db, embedder, query, ctx?) → RecallResult[]` | 检索：候选近邻 → 七因子聚合 → g → 消费门过滤 → 拍 `ConfidenceSnapshot` | ✅ 已实现 | `packages/engram-core/src/spi/recall-claims.ts` |
+| `reportUsage(db, claimId, outcome, ctx?) → { verificationId }` | append-only 写 `usage_truth`，喂校准 + 失败池；**不动 `claim.confidence`（解耦）** | ✅ 已实现 | `packages/engram-core/src/spi/report-usage.ts` |
 
-> 现在（S1 骨架）只有写半边能跑。要做完整闭环消费的 adapter，需等 recall / report_usage 落地（P0–P2 排期）；但**写入侧 adapter 现在就能接**。
+> ✅/⏳ 状态以内核公共 export 面 `packages/engram-core/src/index.ts` 为准（上表「位置」列指向真实现文件）。
+>
+> 写入侧（addSource / appendClaim / supersedeClaim）+ 消费侧（recallClaims / reportUsage）SPI **均已落地**，现在就能接「完整闭环消费」的 adapter。`outcome` 合法取值见单一真相源 `USAGE_OUTCOMES = ['adopted','corrected','refuted','partial']`（`packages/engram-core/src/spi/report-usage.ts`），其中 `FAILURE_OUTCOMES = ['corrected','refuted']` 进失败池。
 
 **adapter 的两层能力**（PRD A.2 / 设计稿 FIG 5b）：
 
@@ -170,4 +172,4 @@ confidence 从"来源计数器"变成"可校准概率"靠 `report_usage` 喂的 
 - `docs/PRD.md` 附录 A.2（SPI 契约）· A.3（七因子 + g）· A.6（派生算法 + `source.meta` 注入示例）· A.9（评测隔离）。
 - `docs/design/agentic-knowledge-core.html` FIG 5b（adapter 单调收紧分层）· FIG 8b（SPI 边界以下全部领域无关可复用）。
 - `packages/engram-core/src/spi/append-claim.ts`（写半边 SPI 实现）· `packages/engram-core/src/db/schema.ts`（五 primitive + 枚举）。
-- `packages/bidding-adapter/`（首个 adapter，当前为依赖方向骨架）。
+- `packages/bidding-adapter/`（首个 adapter：已经 Consumer SPI 单调收紧消费内核 —— `src/index.test.ts` 真实 `recallClaims` 并断言收紧；仍缺 server / UI / real-bidding 端到端集成）。
