@@ -31,6 +31,7 @@ import {
   getClaimStatus,
 } from '../spi/conflict-arbiter.js'
 import { adjudicateConflict } from '../spi/conflict-ladder.js'
+import { readConflictQueueDepth } from '../governance/metric-readers.js'
 
 // S23 · 主编工作台（inbox 升序 + claim 谱系 + 人工裁定①）+ 末端用户访问边界。
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
@@ -543,6 +544,41 @@ describe('S23 humanAdjudicateConflict — rung ① human ruling ON TOP of the ma
     expect(res.winnerId).toBe(b)
     expect(res.rung).toBe('human')
     expect(await getResolvedConflicts(db)).toHaveLength(1)
+
+    // EGR-CR-015 回归：human resolve 同一 pair 后，editor queue 不再返回旧 escalated 事件
+    expect(await getEditorConflictQueue(db)).toHaveLength(0)
+    // 但 escalated 历史事件本身仍在 event log（append-only 不撤回，审计可查）
+    expect(await getResolvedConflicts(db)).toHaveLength(1)
+  })
+
+  it('EGR-CR-015: human-resolved pair no longer inflates conflictQueueDepth governance signal', async () => {
+    const sameAsOf = new Date('2023-06-01T00:00:00Z')
+    const { a, b } = await aConflictPair({ aAsOf: sameAsOf, bAsOf: sameAsOf, aAuth: 0.8, bAuth: 0.8 })
+    const adj = adjudicateConflict(await loadConflictSide(db, a), await loadConflictSide(db, b))
+    expect(adj.outcome).toBe('escalate')
+    await escalateConflict(db, { a, b, rung: adj.rung, reason: adj.reason, byRole: 'agent:arbiter' })
+    expect(await readConflictQueueDepth(db)).toBe(1) // 升级后压力 = 1
+
+    await humanAdjudicateConflict(db, { a, b, winnerId: a, by: EDITOR })
+    expect(await readConflictQueueDepth(db)).toBe(0) // 人裁后压力归零，治理信号不再虚高
+  })
+
+  it('EGR-CR-015: resolving one pair does not drop other still-escalated pairs from the queue', async () => {
+    const sameAsOf = new Date('2023-06-01T00:00:00Z')
+    const p1 = await aConflictPair({ aAsOf: sameAsOf, bAsOf: sameAsOf, aAuth: 0.8, bAuth: 0.8 })
+    const p2 = await aConflictPair({ aAsOf: sameAsOf, bAsOf: sameAsOf, aAuth: 0.8, bAuth: 0.8 })
+    for (const p of [p1, p2]) {
+      const adj = adjudicateConflict(await loadConflictSide(db, p.a), await loadConflictSide(db, p.b))
+      await escalateConflict(db, { a: p.a, b: p.b, rung: adj.rung, reason: adj.reason, byRole: 'agent:arbiter' })
+    }
+    expect(await getEditorConflictQueue(db)).toHaveLength(2)
+
+    await humanAdjudicateConflict(db, { a: p1.a, b: p1.b, winnerId: p1.a, by: EDITOR })
+    const queue = await getEditorConflictQueue(db)
+    expect(queue).toHaveLength(1) // 只关 p1，p2 仍在
+    const remaining = queue[0]!.payload
+    const key = (x: string, y: string) => (x < y ? `${x}|${y}` : `${y}|${x}`)
+    expect(key(remaining.claimA, remaining.claimB)).toBe(key(p2.a, p2.b))
   })
 
   it('AFTER a human ruling, recall reflects the believed marker (loser eats live conflictDecay)', async () => {
