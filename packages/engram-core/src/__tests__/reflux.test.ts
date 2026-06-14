@@ -225,6 +225,44 @@ describe('S11 production-failure reflux → live regression set (A.2/A.9)', () =
     expect(await getL5Candidates(db)).toHaveLength(0)
   })
 
+  it.each(['', '   '])(
+    'a human kbLacksAnswer with a blank query (%j) forms no question: NOT queued to L5 (still pooled as a failure)',
+    async (blank) => {
+      const c = await seedActiveAnswering('wrong answer, blank query', 'some query')
+      await reportUsage(db, c, 'refuted', {
+        byRole: 'human:judge',
+        kbLacksAnswer: true,
+        query: blank,
+      })
+
+      const { pooled, l5Queued } = await refluxFailures(db)
+      expect(pooled).toBe(1) // 失败观测仍入 regression_pool（方案 A 不丢失败）
+      expect(l5Queued).toBe(0) // 空白题面不成题，不入 L5
+      expect(await getL5Candidates(db)).toHaveLength(0)
+
+      // 入口归一化后，池中该项的 query 应为 null（与「省略 query」收敛到同一路径）
+      const [item] = await getRegressionPool(db)
+      expect(item!.query).toBeNull()
+    },
+  )
+
+  it.each(['', '   '])(
+    'a pooled failure with a blank query (%j) is unreplayable, NOT a false pass',
+    async (blank) => {
+      const c = await seedActiveAnswering('the originally-served wrong answer', 'real query')
+      await reportUsage(db, c, 'refuted', { byRole: 'agent:x', query: blank })
+
+      await refluxFailures(db)
+      const [item] = await getRegressionPool(db)
+      expect(item!.query).toBeNull() // 入口已归一化
+
+      const verdict = await replayRegressionItem(db, embedder, item!)
+      expect(verdict.replayable).toBe(false) // 无可回答问题 ⇒ 不可重放
+      expect(verdict.pass).toBe(false) // 不是「失败已修复」，只是没问题可问
+      expect(verdict.stillRecalled).toBe(false)
+    },
+  )
+
   it('the pool is re-runnable without duplicating already-captured failures (idempotent reflux)', async () => {
     const c = await seedActiveAnswering('first failure', 'first query')
     await reportUsage(db, c, 'refuted', { byRole: 'agent:x', query: 'first query' })
@@ -273,6 +311,23 @@ describe('S11 production-failure reflux → live regression set (A.2/A.9)', () =
     expect(report.failed).toBe(1) // #1 still recalled
     expect(report.passed).toBe(1) // #2 quarantined
     expect(report.unreplayable).toBe(1) // #3 has no query
+  })
+
+  it('replayRegressionPool counts a blank-query failure as unreplayable, not as a (false) pass', async () => {
+    // 仍复现的失败（fail）
+    const q1 = 'still-reproducing query'
+    const c1 = await seedActiveAnswering('still-served wrong answer', q1)
+    await reportUsage(db, c1, 'refuted', { byRole: 'agent:x', query: q1 })
+    // blank query 的失败（必须 unreplayable，绝不能算 passed）
+    const c2 = await seedActiveAnswering('blank-query wrong answer', 'real q2')
+    await reportUsage(db, c2, 'refuted', { byRole: 'agent:x', query: '   ' })
+
+    await refluxFailures(db)
+    const report = await replayRegressionPool(db, embedder)
+    expect(report.total).toBe(2)
+    expect(report.failed).toBe(1) // c1 仍召回
+    expect(report.unreplayable).toBe(1) // 空白 query 不可重放
+    expect(report.passed).toBe(0) // 关键：空白 query 不得冒充 pass
   })
 
   it('empty inputs degrade cleanly: reflux over no failures returns zeros; replay over an empty pool returns an all-zero report', async () => {

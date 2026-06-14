@@ -142,13 +142,18 @@ export async function reportUsage(
     throw new Error(`report_usage: claim ${claimId} not found`)
   }
   const id = randomUUID()
+  // query 是 S11 回放的题面：空白串无法形成可回答的问题，归一化为 null（等同省略 query）。
+  // 与 note/taskId 的「自由文本原样保留」不同——query 必须是可回答的问题，空白即无问题。
+  // 只用 trim 判空白；非空白 query 原样落库，不改写用户的问题文本。
+  const normalizedQuery =
+    typeof ctx.query === 'string' && ctx.query.trim().length > 0 ? ctx.query : null
   const verdict: UsageVerdict = {
     outcome,
     taskId: ctx.taskId ?? null,
     note: ctx.note ?? null,
     predictedConfidence: ctx.confidenceAtRecall ?? null,
     calibrationVersion: ctx.calibrationVersion ?? null,
-    query: ctx.query ?? null,
+    query: normalizedQuery,
     kbLacksAnswer: ctx.kbLacksAnswer ?? false,
   }
   await db.insert(claimVerification).values({
