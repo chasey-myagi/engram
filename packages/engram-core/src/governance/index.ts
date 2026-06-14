@@ -38,6 +38,7 @@ export {
   readConflictQueueDepth,
   readImmuneLag,
   readFalseQuarantineRate,
+  type MetricRead,
   type MetricReader,
   type MetricReaders,
   type MetricsReadResult,

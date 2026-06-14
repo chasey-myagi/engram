@@ -36,9 +36,11 @@ import {
   readDistillBacklog,
   readEntailRejectRate,
   readConflictQueueDepth,
+  readImmuneLag,
   readFalseQuarantineRate,
   BASELINE_POLICY,
   type MetricReaders,
+  type MetricRead,
 } from '../governance/index.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
@@ -126,7 +128,7 @@ describe('S26 governance — metric readers fed by real SPIs', () => {
     await seedClaim({ status: 'draft' })
     await seedClaim({ status: 'draft' })
     await seedClaim({ status: 'active' })
-    expect(await readDistillBacklog(db)).toBe(2)
+    expect((await readDistillBacklog(db)).value).toBe(2)
   })
 
   it('readEntailRejectRate = fraction of latest patrol verdicts that are fail/not_co_true', async () => {
@@ -154,14 +156,14 @@ describe('S26 governance — metric readers fed by real SPIs', () => {
       byRole: 'agent:verifier',
       verdict: { entailment: 'pass' },
     })
-    expect(await readEntailRejectRate(db)).toBeCloseTo(0.5, 9) // 2 of 4 reject
+    expect((await readEntailRejectRate(db)).value).toBeCloseTo(0.5, 9) // 2 of 4 reject
   })
 
   it('readConflictQueueDepth counts escalated conflicts in the editor queue', async () => {
     const a = await seedClaim({})
     const b = await seedClaim({})
     await escalateConflict(db, { a, b, rung: 'human', reason: 'tie', byRole: 'agent:arbiter' })
-    expect(await readConflictQueueDepth(db)).toBe(1)
+    expect((await readConflictQueueDepth(db)).value).toBe(1)
   })
 
   it('readFalseQuarantineRate is fed by REAL S22 human_overturn(un_quarantine) events', async () => {
@@ -176,16 +178,37 @@ describe('S26 governance — metric readers fed by real SPIs', () => {
       byRole: 'human:editor',
     })
     // 1 un_quarantine / (1 + 2 still-quarantined) = 0.333…
-    expect(await readFalseQuarantineRate(db)).toBeCloseTo(1 / 3, 6)
+    expect((await readFalseQuarantineRate(db)).value).toBeCloseTo(1 / 3, 6)
   })
 
-  it('readMetrics reports zero degraded when all readers succeed', async () => {
+  it('readMetrics: real-source readers are not degraded, but the source-less immuneLag is', async () => {
     await seedClaim({ status: 'draft' })
     const { metrics, degraded } = await readMetrics(db)
-    expect(degraded).toHaveLength(0)
     expect(metrics.distillBacklog).toBe(1)
-    // immuneLag has no data source → honestly 0 (NOT degraded; it's a legitimate read returning neutral)
+    // immuneLag has no data source → honestly neutral 0 (never fabricate a lag)…
     expect(metrics.immuneLag).toBe(0)
+    // …but a neutral 0 from "no source" is degraded, not a silent healthy read.
+    expect(degraded).toContain('immuneLag')
+    // readers with a real source must NOT be misflagged as degraded.
+    expect(degraded).not.toContain('distillBacklog')
+  })
+
+  it('default readMetrics marks immuneLag degraded (no data source), not a silent healthy 0', async () => {
+    await seedClaim({ status: 'draft' }) // 让其余 reader 有真数据，证明只有 immuneLag 降级
+    const { metrics, degraded } = await readMetrics(db) // 默认 defaultMetricReaders
+    // 诚实中性：不杜撰延迟
+    expect(metrics.immuneLag).toBe(0)
+    // 关键回归断言：无数据源 = degraded（台账 #1457）
+    expect(degraded).toContain('immuneLag')
+    // 有真源的指标不应被误标降级
+    expect(degraded).not.toContain('distillBacklog')
+  })
+
+  it('readImmuneLag self-reports degraded with a reason (no fabricated lag)', async () => {
+    const r: MetricRead = await readImmuneLag(db)
+    expect(r.value).toBe(0)
+    expect(r.degraded).toBe(true)
+    expect(r.reason).toMatch(/no .*source/i)
   })
 })
 
@@ -213,6 +236,15 @@ describe('S26 governance — versioned persistence (Standards-style append-only)
     expect(row!.metrics.distillBacklog).toBe(60)
     expect(row!.metrics.targets).toBeDefined() // derived balance point snapshot persisted
     expect(row!.createdBy).toBe('controller:governance')
+  })
+
+  it('governance cycle records immuneLag in the audit reason when its source is missing', async () => {
+    await seedClaim({ status: 'draft' })
+    const r = await runGovernanceCycle(db)
+    expect(r.ran).toBe(true)
+    expect(r.degraded).toContain('immuneLag')
+    const [row] = await getGovernanceHistory(db)
+    expect(row!.reason).toMatch(/degraded.*immuneLag/)
   })
 
   it('rollbackTo is reversible and append-only: it re-appends the old policy as a new logged version', async () => {
@@ -372,7 +404,7 @@ describe('S26 governance — silent degrade (zero orchestration single point)', 
         throw new Error('entail reader exploded')
       },
       conflictQueueDepth: readConflictQueueDepth,
-      immuneLag: async () => 0,
+      immuneLag: async () => ({ value: 0 }),
       falseQuarantineRate: readFalseQuarantineRate,
     }
     const r = await runGovernanceCycle(db, { readers: flaky })
