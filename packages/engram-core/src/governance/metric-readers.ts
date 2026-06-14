@@ -19,8 +19,15 @@ import { getEditorConflictQueue } from '../spi/conflict-arbiter.js'
 import { getHumanOverturns } from '../editor/human-overturn.js'
 import type { GovernanceMetrics } from './control-law.js'
 
-/** 单个指标读取器：纯读、返回一个标量；抛错由 readMetrics 兜（独立降级）。 */
-export type MetricReader = (db: DB) => Promise<number>
+/** 单个指标读取结果：度量值 + 是否有意降级（无数据源/部分降级）+ 原因。 */
+export interface MetricRead {
+  value: number
+  degraded?: boolean
+  reason?: string
+}
+
+/** 单个指标读取器：纯读、返回结构化结果；抛错仍由 readMetrics 兜（视为降级）。 */
+export type MetricReader = (db: DB) => Promise<MetricRead>
 
 /** 五个指标读取器的 bundle（可逐个替换/注入，便于测试与降级演示）。 */
 export interface MetricReaders {
@@ -41,19 +48,19 @@ export const NEUTRAL_METRICS: GovernanceMetrics = {
 }
 
 /** distillBacklog：当前处于 draft 的 claim 数（待晋升/待蒸馏消化的积压）。 */
-export async function readDistillBacklog(db: DB): Promise<number> {
+export async function readDistillBacklog(db: DB): Promise<MetricRead> {
   const [row] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(claim)
     .where(eq(claim.status, 'draft'))
-  return row?.n ?? 0
+  return { value: row?.n ?? 0 }
 }
 
 /**
  * entailRejectRate：patrol 巡查里 entailment ∈ {fail, not_co_true} 的占比（每 claim 取最新一条 entailment 裁决）。
  * 无任何 entailment 巡查 → 0（无拒绝压力）。与 patrol-verdict 同口径：倒序逐行、每 claim 取首条带 entailment 的。
  */
-export async function readEntailRejectRate(db: DB): Promise<number> {
+export async function readEntailRejectRate(db: DB): Promise<MetricRead> {
   const rows = await db
     .select({
       claimId: claimVerification.claimId,
@@ -71,24 +78,24 @@ export async function readEntailRejectRate(db: DB): Promise<number> {
     const e = v?.entailment
     if (e === 'pass' || e === 'fail' || e === 'not_co_true') latestByClaim.set(r.claimId, e)
   }
-  if (latestByClaim.size === 0) return 0
+  if (latestByClaim.size === 0) return { value: 0 }
   let reject = 0
   for (const e of latestByClaim.values()) if (e === 'fail' || e === 'not_co_true') reject += 1
-  return reject / latestByClaim.size
+  return { value: reject / latestByClaim.size }
 }
 
 /** conflictQueueDepth：待人裁的升级冲突条数（getEditorConflictQueue）。 */
-export async function readConflictQueueDepth(db: DB): Promise<number> {
+export async function readConflictQueueDepth(db: DB): Promise<MetricRead> {
   const queue = await getEditorConflictQueue(db)
-  return queue.length
+  return { value: queue.length }
 }
 
 /**
- * immuneLag：flag→quarantine 中位延迟（秒）。当前无状态迁移时戳数据源 → 诚实降级返回 0（标 degraded）。
- * 不杜撰延迟（红线取向：不知道就报「无压力」，绝不假造一个触发收紧的数字）。
+ * immuneLag：flag→quarantine 中位延迟（秒）。当前 schema 无状态迁移时戳 → 无可靠数据源。
+ * 诚实降级为中性 0 并自报 degraded（绝不杜撰延迟）。真延迟统计待状态迁移事件落库后接入。
  */
-export async function readImmuneLag(_db: DB): Promise<number> {
-  return 0
+export async function readImmuneLag(_db: DB): Promise<MetricRead> {
+  return { value: 0, degraded: true, reason: 'no state-transition timestamp source' }
 }
 
 /**
@@ -96,7 +103,7 @@ export async function readImmuneLag(_db: DB): Promise<number> {
  *   rate = un_quarantine 翻案数 / (un_quarantine 翻案数 + 当前仍处 quarantined 的 claim 数)
  * 即「被隔离后又被人翻案」占「全部被隔离过」的近似比率。分母为 0（从无隔离）→ 0。
  */
-export async function readFalseQuarantineRate(db: DB): Promise<number> {
+export async function readFalseQuarantineRate(db: DB): Promise<MetricRead> {
   const overturns = await getHumanOverturns(db)
   const unQuarantine = overturns.filter((o) => o.payload.overturn === 'un_quarantine').length
   const [row] = await db
@@ -105,8 +112,8 @@ export async function readFalseQuarantineRate(db: DB): Promise<number> {
     .where(inArray(claim.status, ['quarantined']))
   const stillQuarantined = row?.n ?? 0
   const denom = unQuarantine + stillQuarantined
-  if (denom === 0) return 0
-  return unQuarantine / denom
+  if (denom === 0) return { value: 0 }
+  return { value: unQuarantine / denom }
 }
 
 /** 生产默认 readers：全部接真 SPI/表。 */
@@ -136,12 +143,14 @@ export async function readMetrics(
   const degraded: (keyof GovernanceMetrics)[] = []
   const read = async (key: keyof GovernanceMetrics, reader: MetricReader): Promise<number> => {
     try {
-      const v = await reader(db)
-      if (!Number.isFinite(v)) {
+      const r = await reader(db)
+      // 三种降级：reader 自报 degraded（无数据源）、返回非有限数、或抛错。
+      if (r.degraded || !Number.isFinite(r.value)) {
         degraded.push(key)
-        return NEUTRAL_METRICS[key]
+        // 自报降级时保留其有限的中性值（如 immuneLag 的 0），仅非有限数才退 NEUTRAL。
+        return Number.isFinite(r.value) ? r.value : NEUTRAL_METRICS[key]
       }
-      return v
+      return r.value
     } catch {
       degraded.push(key)
       return NEUTRAL_METRICS[key]

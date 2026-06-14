@@ -568,10 +568,10 @@ describe('S23 humanAdjudicateConflict — rung ① human ruling ON TOP of the ma
       reason: adj.reason,
       byRole: 'agent:arbiter',
     })
-    expect(await readConflictQueueDepth(db)).toBe(1) // 升级后压力 = 1
+    expect((await readConflictQueueDepth(db)).value).toBe(1) // 升级后压力 = 1
 
     await humanAdjudicateConflict(db, { a, b, winnerId: a, by: EDITOR })
-    expect(await readConflictQueueDepth(db)).toBe(0) // 人裁后压力归零，治理信号不再虚高
+    expect((await readConflictQueueDepth(db)).value).toBe(0) // 人裁后压力归零，治理信号不再虚高
   })
 
   it('EGR-CR-015: resolving one pair does not drop other still-escalated pairs from the queue', async () => {
