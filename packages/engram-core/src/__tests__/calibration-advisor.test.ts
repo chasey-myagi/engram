@@ -1,7 +1,7 @@
 /**
  * S27 DB 集成测试 —— 校准映射版本化 store / 验收门原子换 / **老快照冻结**（recall 按 claim 钉的版本算 g）/
  * **g=identity 即时回退**（confidence 退回 raw）/ **能力≠权力**（Advisor 只读、绝不改活动 g）。
- * 纯函数（g′/applyG/Advisor/5 项门各咬）在 calibration/calibration-map.test.ts。
+ * 纯函数（g′/applyG/Advisor/验收门逐项咬合）在 calibration/calibration-map.test.ts。
  */
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -129,7 +129,7 @@ describe('S27 校准映射版本化 store（append-only / 活动=最新一行）
   })
 })
 
-describe('S27 验收门原子换（5/5 才换；能力≠权力）', () => {
+describe('S27 验收门原子换（全项通过才换；能力≠权力）', () => {
   it('Advisor advise 只产建议、绝不改活动 g（能力半边无写权）', async () => {
     const samples = wellSampled()
     const candidate = identityLikeCandidate('id-like')
@@ -141,7 +141,7 @@ describe('S27 验收门原子换（5/5 才换；能力≠权力）', () => {
     expect(await getActiveCalibrationVersion(db)).toBe(CALIBRATION_IDENTITY)
   })
 
-  it('5/5 approve → 原子激活候选（committed 落库 + 活动版本翻到候选）', async () => {
+  it('全项通过 approve → 原子激活候选（committed 落库 + 活动版本翻到候选）', async () => {
     const samples = wellSampled()
     const candidate = identityLikeCandidate('accepted-v1')
     const res = await evaluateAndMaybeSwap(db, samples, candidate)
@@ -214,7 +214,7 @@ describe('S27 老快照冻结：recall 按 claim 钉的版本算 g', () => {
     expect(before[0]!.confidence.calibrationVersion).toBe(CALIBRATION_IDENTITY)
     expect(before[0]!.confidence.value).toBeCloseTo(seeded.raw, 6)
 
-    // 把活动 g 换成一个会压低值的非 identity 版本（5/5 approve 用 identityLike 不改值；这里直接 commit 一个压值 g）。
+    // 把活动 g 换成一个会压低值的非 identity 版本（全项通过 approve 用 identityLike 不改值；这里直接 commit 一个压值 g）。
     const squash: CalibrationMap = {
       version: 'squash-v1',
       knots: [

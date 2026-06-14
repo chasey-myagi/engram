@@ -31,7 +31,7 @@ export const MIN_SAMPLES_PER_BIN = 5
  */
 export const MIN_OUTPUT_SPREAD = 0.01
 
-/** 6 项检查的稳定标识（reject 时报是哪项咬住；审计/测试按它断言对应拒绝路径）。 */
+/** 各检查项的稳定标识（reject 时报是哪项咬住；审计/测试按它断言对应拒绝路径）。 */
 export type GateCheckId =
   | 'monotonic'
   | 'range'
@@ -39,6 +39,19 @@ export type GateCheckId =
   | 'thermostat_conflict'
   | 'bin_samples'
   | 'output_spread'
+
+/**
+ * 验收门全部检查项 id（运行时唯一真值源；新增/删除 check 必须同步此清单 + runAcceptanceGate 的 checks 数组）。
+ * 顺序 = runAcceptanceGate 的 checks 顺序（故 failedCheck 与「对应拒绝路径」一一咬合）。注释/文档只引用「全项」即可，永不漂移。
+ */
+export const GATE_CHECK_IDS = [
+  'monotonic',
+  'range',
+  'consumption_flip',
+  'thermostat_conflict',
+  'bin_samples',
+  'output_spread',
+] as const satisfies readonly GateCheckId[]
 
 /** 单项检查结果。 */
 export interface GateCheck {

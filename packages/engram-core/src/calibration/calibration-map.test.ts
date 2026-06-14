@@ -1,5 +1,5 @@
 /**
- * S27 纯函数单测 —— g′ 表示 / applyG-by-version / Advisor 诊断 / 5 项验收门各自咬合。零 DB、零随机。
+ * S27 纯函数单测 —— g′ 表示 / applyG-by-version / Advisor 诊断 / 验收门逐项咬合。零 DB、零随机。
  * DB 集成（版本化 store / 原子换 / 老快照冻结 / 即时回退 / 能力≠权力）在 __tests__/calibration-advisor.test.ts。
  */
 import { describe, expect, it } from 'vitest'
@@ -15,12 +15,15 @@ import {
 import { computeReliability } from './calibration.js'
 import { advise, identityLikeCandidate, type GoldenSample } from './advisor.js'
 import {
+  GATE_CHECK_IDS,
   MAX_GATE_FLIP_FRACTION,
   MIN_OUTPUT_SPREAD,
   MIN_SAMPLES_PER_BIN,
   runAcceptanceGate,
   type GateInputs,
 } from './acceptance-gate.js'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
 // 一个良性单调候选：把中段 raw 压低、高段抬高（S 形校准的离散近似），升序非递减、值域 [0,1]。
 const MONO_MAP: CalibrationMap = {
@@ -156,7 +159,7 @@ describe('S27 Advisor（只读诊断 + 绑 ΔECE；候选只是返回值、不�
   })
 })
 
-// ---- 验收门：5 项各自咬合（approve 路径 + 5 条 reject 路径）----
+// ---- 验收门：逐项各自咬合（approve 路径 + 各项 reject 路径）----
 
 /** 一组足量、均匀分布、桶都 ≥ MIN_SAMPLES 的样本（让 ⑤ 默认过，便于单测其它检查）。 */
 function wellSampled(): GoldenSample[] {
@@ -186,8 +189,8 @@ function baseInputs(candidate: CalibrationMap, samples: GoldenSample[]): GateInp
   }
 }
 
-describe('S27 验收门（确定性，5/5 才 approve；逐项可咬）', () => {
-  it('5/5 全过 → approve（identityLike 候选，不改门人群、桶足）', () => {
+describe('S27 验收门（确定性，全项通过才 approve；逐项可咬）', () => {
+  it('全项通过 → approve（identityLike 候选，不改门人群、桶足）', () => {
     const samples = wellSampled()
     const verdict = runAcceptanceGate(baseInputs(identityLikeCandidate('ok'), samples))
     expect(verdict.approved).toBe(true)
@@ -343,5 +346,39 @@ describe('S28 验收门 ⑥ output_spread（FIX 3：拒退化无分辨力 g）',
   it('identity g（空 knots）天然有分辨力：⑥ 过（直通 raw、保序）', () => {
     const v = runAcceptanceGate(baseInputs(IDENTITY_MAP, wellSampled()))
     expect(v.checks.find((c) => c.id === 'output_spread')!.passed).toBe(true)
+  })
+})
+
+// ---- EGR-CR-008：验收门项数 = 唯一真值源（注释计数不得漂移）----
+describe('EGR-CR-008 验收门项数是唯一真值源（注释计数不得漂移）', () => {
+  it('runAcceptanceGate 返回的 checks 与 GATE_CHECK_IDS 一一对应（同序、同集合）', () => {
+    const v = runAcceptanceGate(baseInputs(identityLikeCandidate('ok'), wellSampled()))
+    expect(v.checks.map((c) => c.id)).toEqual([...GATE_CHECK_IDS])
+  })
+
+  it('GATE_CHECK_IDS 恰含 6 项且无重复（output_spread 为 S28 FIX 3 第 6 项）', () => {
+    expect(new Set(GATE_CHECK_IDS).size).toBe(GATE_CHECK_IDS.length)
+    expect(GATE_CHECK_IDS).toContain('output_spread')
+    expect(GATE_CHECK_IDS.length).toBe(6)
+  })
+
+  it('calibration 源码/测试名中不再残留历史门计数（旧的 N 分之 M 串）', () => {
+    // 历史串从片段拼出，避免本测试文件自身命中下面对它的扫描（它把本文件也纳入扫描清单）。
+    const stale = [`5${'/'}6`, `5${'/'}5`]
+    const staleRe = new RegExp(stale.join('|'))
+    const files = [
+      './fit-from-usage.ts',
+      './advisor.ts',
+      './recalibrate.ts',
+      './acceptance-gate.ts',
+      './calibration-map.test.ts',
+      '../index.ts',
+      '../__tests__/calibration-advisor.test.ts',
+      '../__tests__/calibration-isotonic.test.ts',
+    ].map((f) => fileURLToPath(new URL(f, import.meta.url)))
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8')
+      expect(src, `${f} 含历史门计数`).not.toMatch(staleRe)
+    }
   })
 })

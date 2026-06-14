@@ -13,7 +13,7 @@
  *   - **结构上无 ELO/胜负率入口**：样本只有 (predictedConfidence, outcome) 两字段，与 S5/S19 同源同口径。
  *
  * 流程：取样 → 若 distinct 独立样本 < MIN_FIT_SAMPLES（200）：**不拟合、g 维持 identity**（返回 reason='below_threshold'）；
- * 否则 fit isotonic → 交 evaluateAndMaybeSwap（advise 绑 ΔECE → 5/6 验收门 → 5/5 才原子换；否则 fail-silent HOLD）。
+ * 否则 fit isotonic → 交 evaluateAndMaybeSwap（advise 绑 ΔECE → 跑验收门 → 全项通过才原子换；否则 fail-silent HOLD）。
  * 纯读取样 + 确定性拟合 + 受控副作用（仅 approve 才写活动 g）。Harvester 失败降级 = 无 g 更新、维持现状（A.7）。
  */
 import { and, asc, eq, inArray, sql } from 'drizzle-orm'
@@ -139,7 +139,7 @@ export async function collectUsageCalibrationSamples(
  * 「首次校准」一次跑：取独立门控样本 → ≥200 门 → fit isotonic g' → 经 S27 验收门原子换（或 HOLD）。
  *
  * <200：不拟合、返回 reason='below_threshold'（g 维持 identity，连 advise 都不跑——A.3「积累≥200 后才拟合」）。
- * ≥200：fitIsotonic（确定性、单调）→ evaluateAndMaybeSwap（advise 绑 ΔECE → 6 项验收门 → 5/5? 原子换 : HOLD）。
+ * ≥200：fitIsotonic（确定性、单调）→ evaluateAndMaybeSwap（advise 绑 ΔECE → 验收门全项通过 ? 原子换 : HOLD）。
  * 永不抛进 Harvester 主干（取样/拟合是纯读 + 纯计算；写只在验收门 approve 时由 store 原子完成）。
  */
 export async function fitAndMaybeRecalibrate(
