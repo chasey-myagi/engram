@@ -135,14 +135,112 @@ describe('applyAdapter — monotone-tightening operator (A.2/A.6)', () => {
     expect(() => applyAdapter(kernel(), overflag)).not.toThrow()
   })
 
-  it('treats claimText / raw as intentional pass-through (outside the conf/count/provenance/mustVerify contract)', () => {
+  it("throws 'adapter relaxed: rewrote claim body' when the adapter rewrites claimText (core exploit: forge a fact under unchanged provenance)", () => {
+    // 改 claimText、其余字段（id / provenance / conf.value）全合规 → 旧契约放行（拿真出处引假事实），新守卫拦截。
     const tamper: RecallAdapter = (rs) =>
-      rs.map((r) => ({
-        ...r,
-        claim: { ...r.claim, claimText: 'rewritten' },
-        confidence: { ...r.confidence, raw: 0.123 },
-      }))
-    expect(() => applyAdapter(kernel(), tamper)).not.toThrow() // documented non-protected fields
+      rs.map((r) =>
+        r.claim.id === 'b' ? { ...r, claim: { ...r.claim, claimText: 'rewritten' } } : { ...r },
+      )
+    expect(() => applyAdapter(kernel(), tamper)).toThrow(/adapter relaxed.*claim body/i)
+  })
+
+  it("throws 'adapter relaxed: rewrote claim body' when the adapter rewrites status / subject / predicate / object / lineageId", () => {
+    const cases: Array<[string, RecallResult['claim']]> = [
+      ['status', { status: 'flagged' } as Partial<RecallResult['claim']> as RecallResult['claim']],
+      ['subject', { subject: 'forged' } as Partial<RecallResult['claim']> as RecallResult['claim']],
+      [
+        'predicate',
+        { predicate: 'forged' } as Partial<RecallResult['claim']> as RecallResult['claim'],
+      ],
+      ['object', { object: 'forged' } as Partial<RecallResult['claim']> as RecallResult['claim']],
+      [
+        'lineageId',
+        { lineageId: 'forged' } as Partial<RecallResult['claim']> as RecallResult['claim'],
+      ],
+    ]
+    for (const [, patch] of cases) {
+      const tamper: RecallAdapter = (rs) =>
+        rs.map((r) => (r.claim.id === 'a' ? { ...r, claim: { ...r.claim, ...patch } } : { ...r }))
+      expect(() => applyAdapter(kernel(), tamper)).toThrow(/adapter relaxed.*claim body/i)
+    }
+  })
+
+  it("throws 'adapter relaxed: rewrote claim body' when the adapter changes claim.asOf to a different instant", () => {
+    const shift: RecallAdapter = (rs) =>
+      rs.map((r) =>
+        r.claim.id === 'a'
+          ? { ...r, claim: { ...r.claim, asOf: new Date('2099-01-01T00:00:00Z') } }
+          : { ...r },
+      )
+    expect(() => applyAdapter(kernel(), shift)).toThrow(/adapter relaxed.*claim body/i)
+  })
+
+  it('allows rebuilding claim.asOf as a fresh Date at the same instant (compared by getTime, not reference)', () => {
+    const rebuild: RecallAdapter = (rs) =>
+      rs.map((r) => ({ ...r, claim: { ...r.claim, asOf: new Date(r.claim.asOf.getTime()) } }))
+    expect(() => applyAdapter(kernel(), rebuild)).not.toThrow()
+  })
+
+  it("throws 'adapter relaxed: rewrote confidence snapshot' when the adapter rewrites raw / a factor / calibrationVersion (value not raised)", () => {
+    const tamperRaw: RecallAdapter = (rs) =>
+      rs.map((r) =>
+        r.claim.id === 'a' ? { ...r, confidence: { ...r.confidence, raw: 0.123 } } : { ...r },
+      )
+    expect(() => applyAdapter(kernel(), tamperRaw)).toThrow(/adapter relaxed.*confidence snapshot/i)
+
+    const tamperFactor: RecallAdapter = (rs) =>
+      rs.map((r) =>
+        r.claim.id === 'a'
+          ? {
+              ...r,
+              confidence: {
+                ...r.confidence,
+                factors: { ...r.confidence.factors, entailment: 0.999 },
+              },
+            }
+          : { ...r },
+      )
+    expect(() => applyAdapter(kernel(), tamperFactor)).toThrow(
+      /adapter relaxed.*confidence snapshot/i,
+    )
+
+    const tamperCalib: RecallAdapter = (rs) =>
+      rs.map((r) =>
+        r.claim.id === 'a'
+          ? { ...r, confidence: { ...r.confidence, calibrationVersion: 'forged-v2' } }
+          : { ...r },
+      )
+    expect(() => applyAdapter(kernel(), tamperCalib)).toThrow(
+      /adapter relaxed.*confidence snapshot/i,
+    )
+  })
+
+  it("throws 'adapter relaxed: rewrote confidence snapshot' when the adapter rewrites weights or takenAt", () => {
+    const tamperWeights: RecallAdapter = (rs) =>
+      rs.map((r) =>
+        r.claim.id === 'a'
+          ? {
+              ...r,
+              confidence: {
+                ...r.confidence,
+                weights: { ...r.confidence.weights, authority: 0.99 },
+              },
+            }
+          : { ...r },
+      )
+    expect(() => applyAdapter(kernel(), tamperWeights)).toThrow(
+      /adapter relaxed.*confidence snapshot/i,
+    )
+
+    const tamperTakenAt: RecallAdapter = (rs) =>
+      rs.map((r) =>
+        r.claim.id === 'a'
+          ? { ...r, confidence: { ...r.confidence, takenAt: new Date('2099-01-01T00:00:00Z') } }
+          : { ...r },
+      )
+    expect(() => applyAdapter(kernel(), tamperTakenAt)).toThrow(
+      /adapter relaxed.*confidence snapshot/i,
+    )
   })
 
   it('tolerates a conf within ε of kernel g, but rejects one clearly above', () => {

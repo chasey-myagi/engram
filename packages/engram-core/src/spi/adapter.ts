@@ -30,6 +30,43 @@ function provenanceEqual(a: RecallResult['provenances'], b: RecallResult['proven
   return true
 }
 
+// claim 本体按值不可变：内核记录是权威，适配器只能收紧 conf / 丢结果 / 加 contradicts，绝不能改写事实载荷。
+// 逐字段比 claim 的全部 7 个字段；asOf 是 Date，按 getTime() 比时间值（适配器可能重建同时刻的新 Date，引用比会误判）。
+function claimBodyEqual(a: RecallResult['claim'], o: RecallResult['claim']): boolean {
+  return (
+    a.id === o.id &&
+    a.claimText === o.claimText &&
+    a.subject === o.subject &&
+    a.predicate === o.predicate &&
+    a.object === o.object &&
+    a.status === o.status &&
+    a.lineageId === o.lineageId &&
+    a.asOf.getTime() === o.asOf.getTime()
+  )
+}
+
+// confidence 的解释字段（"为什么信"的快照）同样按值不可变：raw / factors / weights / calibrationVersion / takenAt。
+// value 不纳入——它已由单调守卫（:73-77）兜底，允许合法下降。factors/weights 用内核侧键集迭代（键集权威，防漏比）。
+function confidenceSnapshotEqual(
+  a: RecallResult['confidence'],
+  o: RecallResult['confidence'],
+): boolean {
+  if (
+    a.raw !== o.raw ||
+    a.calibrationVersion !== o.calibrationVersion ||
+    a.takenAt.getTime() !== o.takenAt.getTime()
+  ) {
+    return false
+  }
+  for (const k of Object.keys(o.factors) as Array<keyof RecallResult['confidence']['factors']>) {
+    if (a.factors[k] !== o.factors[k]) return false
+  }
+  for (const k of Object.keys(o.weights) as Array<keyof RecallResult['confidence']['weights']>) {
+    if (a.weights[k] !== o.weights[k]) return false
+  }
+  return true
+}
+
 /**
  * 跑适配器并强制单调收紧不变量。任一违反抛 Error('adapter relaxed: ...')：
  *   - 结果数 > 内核召回数（增召回）
@@ -38,8 +75,11 @@ function provenanceEqual(a: RecallResult['provenances'], b: RecallResult['proven
  *   - sub-0.6 结果被标 mustVerify=false（放松消费门：把"须先核验"谎报成"可直接用"）
  *   - 出处被改写（条数或任一 sourceId/locator/relevance 变化）
  *   - 丢弃 contradicts 标注（隐藏矛盾，放松"矛盾显式"红线；多标更谨慎放行）
+ *   - claim 本体被改写（claimText/status/subject/predicate/object/lineageId/asOf 任一变化）
+ *   - confidence 解释字段被改写（raw/factors/weights/calibrationVersion/takenAt 任一变化）
  * 合法收紧（降 conf / 丢结果 / 原样返回）放行，返回收紧后的结果（内核召回的子集）。
- * 刻意只管 conf / count / provenance / mustVerify / contradicts；claimText / status / raw 等属直通。
+ * claim 本体与 confidence 解释字段（raw/factors/weights/calibrationVersion/takenAt）按值不可变——内核记录是权威，
+ * 改写即 'adapter relaxed'（堵「留出处、换事实」的镜像缺口）；唯 confidence.value 可合法下降（单调守卫兜底）。
  * 内核消费下界 0.4 在 recall 时强制、**不**在本算子兜底：sub-floor 结果（更收紧）会被放行——
  * 领域适配器若不想把"不可消费"档泄露给下游须自行丢弃（bidding-adapter 即如此）。
  */
@@ -84,6 +124,16 @@ export function applyAdapter(
     }
     if (!provenanceEqual(a.provenances, o.provenances)) {
       throw new Error(`adapter relaxed: rewrote provenance (claim ${a.claim.id})`)
+    }
+    // 「留出处、换事实」是 provenance 守卫的镜像缺口：出处没动，claim 本体被掉包。内核记录不可变，逐字段拦截。
+    if (!claimBodyEqual(a.claim, o.claim)) {
+      throw new Error(`adapter relaxed: rewrote claim body (claim ${a.claim.id})`)
+    }
+    // confidence 解释字段（raw/factors/weights/calibrationVersion/takenAt）是归因/校准审计的依据，同样不可被改写。
+    if (!confidenceSnapshotEqual(a.confidence, o.confidence)) {
+      throw new Error(
+        `adapter relaxed: rewrote confidence snapshot explainers (claim ${a.claim.id})`,
+      )
     }
     // 矛盾显式（红线）：adapter 不得**隐藏**内核标出的矛盾——adapted.contradicts 必须 ⊇ 内核的。
     // 多标（更谨慎）放行；少标（藏冲突）= 放松，拦住。
