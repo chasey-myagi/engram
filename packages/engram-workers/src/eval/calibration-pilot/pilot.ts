@@ -288,8 +288,39 @@ export async function runCalibrationPilot(
   const facts = buildCorpus()
   const seed = await seedCorpus(db, embedder, facts)
   const usage = await generateUsage(db, embedder, facts, seed.claimIdByFact)
+
+  // fail-loud 硬门:真回路必须覆盖全部 promoted facts,否则是在幸存子集上证明闭环。
+  // recall miss ⇒ 该 fact 不进 usage_truth、不进测量集,g 只在剩下的命中子集上拟合并"证明" ECE 下降 ⇒ 结论失真。
+  if (usage.recallMisses !== 0) {
+    throw new Error(
+      `[calibration-pilot] recall 未覆盖全部 promoted facts:` +
+        `命中 ${usage.recallHits} / 漏 ${usage.recallMisses}(promoted ${seed.promoted})。` +
+        `recall miss ⇒ 只能在幸存样本上拟合 g,pilot 闭环结论失真。`,
+    )
+  }
+  if (usage.usageRows !== usage.recallHits) {
+    throw new Error(
+      `[calibration-pilot] usage 行数 ${usage.usageRows} ≠ recall 命中 ${usage.recallHits}:reportUsage 写入有缺口。`,
+    )
+  }
+
   const measurement = await fitAndMeasure(db, opts)
   // round-trip sanity:核准 collectUsageCalibrationSamples(生产校准取样口径)与本地读回样本数一致。
   const persisted = await collectUsageCalibrationSamples(db, [CALIBRATION_IDENTITY])
+
+  // 覆盖一致性 tie 回「丢弃之前」的口径:promoted facts ⇒ usage ⇒ 测量 ⇒ SPI 读回,全链等宽。
+  // 现有 persisted === measurement.totalSamples 这条互校无效(两条读回口径都在丢弃之后,miss 让两者同步缩水);
+  // 必须把存活样本数钉回 seed.promoted(丢弃之前),本语料一 fact 一 usage ⇒ 四者是精确等式、不需阈值。
+  if (
+    usage.usageRows !== seed.promoted ||
+    measurement.totalSamples !== usage.usageRows ||
+    persisted.length !== usage.usageRows
+  ) {
+    throw new Error(
+      `[calibration-pilot] 样本覆盖不一致:promoted ${seed.promoted} / usageRows ${usage.usageRows} / ` +
+        `totalSamples ${measurement.totalSamples} / persisted ${persisted.length}(四者必须相等)。`,
+    )
+  }
+
   return { seed, usage, measurement, persistedSamples: persisted.length }
 }
