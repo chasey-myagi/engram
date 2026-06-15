@@ -13,7 +13,11 @@
 import { getActiveStandards } from '../config/standards.js'
 import type { DB } from '../db/client.js'
 import { getActivePolicy } from '../governance/governance-state.js'
-import { CALIBRATION_CODE_VERSION, type CalibrationMap } from '../confidence/confidence.js'
+import {
+  CALIBRATION_CODE_VERSION,
+  IDENTITY_MAP,
+  type CalibrationMap,
+} from '../confidence/confidence.js'
 import { runAcceptanceGate, type GateInputs, type GateVerdict } from './acceptance-gate.js'
 import {
   advise,
@@ -22,8 +26,9 @@ import {
   type GoldenSample,
 } from './advisor.js'
 import {
+  StaleActiveCalibrationError,
   commitCalibrationMap,
-  getActiveCalibrationMap,
+  getActiveCalibrationRow,
   type CalibrationMapRow,
 } from './calibration-store.js'
 
@@ -54,12 +59,17 @@ export async function evaluateAndMaybeSwap(
   candidate: CalibrationMap,
   opts: EvaluateOptions = {},
 ): Promise<SwapResult> {
-  // 读当前态（只读）：活动 g、活动消费门、恒温器收紧档。
-  const [current, std, policy] = await Promise.all([
-    getActiveCalibrationMap(db),
+  // 读当前态（只读）：活动 g（带锚点行）、活动消费门、恒温器收紧档。
+  // activeRow 同时给出「相对哪一行过的门」的 id，作为提交时 CAS 的 expected 锚（EGR-CR-044）。
+  const [activeRow, std, policy] = await Promise.all([
+    getActiveCalibrationRow(db),
     getActiveStandards(db),
     getActivePolicy(db),
   ])
+  const current: CalibrationMap = activeRow
+    ? { version: activeRow.version, knots: activeRow.knots }
+    : IDENTITY_MAP
+  const expectedActiveId = activeRow ? activeRow.id : null
 
   // ① Advisor 诊断（只读、绑定 ΔECE）。
   const proposal = advise(samples, current, candidate, opts)
@@ -79,19 +89,30 @@ export async function evaluateAndMaybeSwap(
   if (!verdict.approved) {
     return { swapped: false, verdict, proposal }
   }
-  const committed = await commitCalibrationMap(db, {
-    map: candidate,
-    evidence: {
-      currentEce: proposal.currentEce,
-      candidateEce: proposal.candidateEce,
-      deltaEce: proposal.deltaEce,
-      sampleCount: proposal.sampleCount,
-      // code_version 锚（A.3 #3）：这版 g 是在哪一版 confidence 公式代码下拟合/激活的。公式代码变更后，
-      // 跨此断点的历史 raw/conf 不可比——纵向趋势/ECE 比对须按 code_version 分段（不可混算）。
-      codeVersion: CALIBRATION_CODE_VERSION,
-    },
-    reason: `advisor-accept: ΔECE ${proposal.deltaEce.toFixed(4)} (${verdict.checks.length}/${verdict.checks.length} checks)`,
-    createdBy: opts.createdBy ?? 'gate:advisor-accept',
-  })
+  // 提交带 expectedActiveId：commit 在同一 tx 内对活动行 CAS。若并发的另一拍已把活动 g 从评估时的锚换掉，
+  // 本拍的验收已相对一份过期 g 失效——StaleActiveCalibrationError 转 HOLD（绝不静默覆盖），下一拍基于新活动 g 重评（天然 retry）。
+  let committed: CalibrationMapRow
+  try {
+    committed = await commitCalibrationMap(db, {
+      map: candidate,
+      expectedActiveId,
+      evidence: {
+        currentEce: proposal.currentEce,
+        candidateEce: proposal.candidateEce,
+        deltaEce: proposal.deltaEce,
+        sampleCount: proposal.sampleCount,
+        // code_version 锚（A.3 #3）：这版 g 是在哪一版 confidence 公式代码下拟合/激活的。公式代码变更后，
+        // 跨此断点的历史 raw/conf 不可比——纵向趋势/ECE 比对须按 code_version 分段（不可混算）。
+        codeVersion: CALIBRATION_CODE_VERSION,
+      },
+      reason: `advisor-accept: ΔECE ${proposal.deltaEce.toFixed(4)} (${verdict.checks.length}/${verdict.checks.length} checks)`,
+      createdBy: opts.createdBy ?? 'gate:advisor-accept',
+    })
+  } catch (err) {
+    if (err instanceof StaleActiveCalibrationError) {
+      return { swapped: false, verdict, proposal }
+    }
+    throw err
+  }
   return { swapped: true, verdict, proposal, committed }
 }

@@ -19,10 +19,12 @@ import {
   type CalibrationMap,
 } from '../confidence/confidence.js'
 import {
+  StaleActiveCalibrationError,
   advise,
   commitCalibrationMap,
   evaluateAndMaybeSwap,
   getActiveCalibrationMap,
+  getActiveCalibrationRow,
   getActiveCalibrationVersion,
   getCalibrationHistory,
   identityLikeCandidate,
@@ -198,6 +200,100 @@ describe('S27 验收门原子换（全项通过才换；能力≠权力）', () 
     expect(res.swapped).toBe(false)
     expect(res.verdict.failedCheck).toBe('thermostat_conflict')
     expect(await getActiveCalibrationVersion(db)).toBe(CALIBRATION_IDENTITY)
+  })
+})
+
+describe('S27 校准换图 CAS：过期验收不覆盖当前 active g（EGR-CR-044）', () => {
+  // 测试 1 —— 并发双 swap（issue 交错示例 T1/T2 都读 g0 的可执行细化）：
+  // 两个提交各自相对**同一份旧活动 g0（表空、null 锚）**过门，并发提交时 store 在同一 tx 内对活动行做 CAS。
+  // 必须恰一个落库激活、另一个抛 stale（HOLD 不覆盖），history 只增一行——证明过期验收无法覆盖已激活的新 g。
+  //
+  // 用 store 层共享锚的双提交（而非裸 Promise.all([evaluate,evaluate])）来**确定性**复刻交错：
+  // 裸两个 evaluate 在 pool 调度下可能退化成串行（后者读到前者已写的活动行→合法基于它过门），
+  // 那是 CAS 的正常非并发行为、不构成对「过期覆盖」的回归保护。这里钉死「两者共享 g0 锚」即 issue 描述的真并发。
+  it('并发双 swap（共享旧 g0 锚）→ 恰一个落库激活，过期者抛 stale 不覆盖', async () => {
+    // 起始活动 = identity（表空），共享旧锚 g0 = null。两候选各自相对 g0 都能过门（identityLike，ΔECE=0）。
+    const anchorG0 = await getActiveCalibrationRow(db)
+    expect(anchorG0).toBeNull()
+    const expectedActiveId = anchorG0 ? anchorG0.id : null
+
+    const A = identityLikeCandidate('cas-A')
+    const B = identityLikeCandidate('cas-B')
+
+    // 两个提交都钉同一旧锚 g0 并发跑——CAS 串行化后，第二个重读到的活动行已是赢家，与 g0 锚不符 → 抛 stale。
+    const settled = await Promise.allSettled([
+      commitCalibrationMap(db, { map: A, expectedActiveId, reason: 'cas-A based on g0' }),
+      commitCalibrationMap(db, { map: B, expectedActiveId, reason: 'cas-B based on g0' }),
+    ])
+
+    // 恰一个 fulfilled（CAS 赢家），另一个 rejected 且是具名 stale 错（落败者不写）。
+    const fulfilled = settled.filter((s) => s.status === 'fulfilled')
+    const rejected = settled.filter((s) => s.status === 'rejected')
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+      StaleActiveCalibrationError,
+    )
+
+    // 最终活动版本 = 赢家版本。
+    const winner = (fulfilled[0] as PromiseFulfilledResult<{ version: string }>).value.version
+    expect(['cas-A', 'cas-B']).toContain(winner)
+    expect(await getActiveCalibrationVersion(db)).toBe(winner)
+
+    // history 里只有一行新增的非 identity cas-* 行（落败方未写库）。
+    const hist = await getCalibrationHistory(db)
+    expect(hist.filter((h) => h.version.startsWith('cas-'))).toHaveLength(1)
+    expect(hist[0]!.version).toBe(winner)
+  })
+
+  // 测试 1b —— 全链路不回归：evaluateAndMaybeSwap 携带 CAS 锚后，**顺序**两拍换图仍正常
+  // （第一拍激活 A；第二拍读到的活动行已是 A，相对 A 过门并 CAS 通过 → 换上 B）。证明 CAS 锚不破坏正常顺序换图。
+  it('evaluateAndMaybeSwap 顺序两拍：携带 CAS 锚仍正常换图（不回归）', async () => {
+    const samples = wellSampled()
+    const r1 = await evaluateAndMaybeSwap(db, samples, identityLikeCandidate('seq-A'))
+    expect(r1.swapped).toBe(true)
+    expect(await getActiveCalibrationVersion(db)).toBe('seq-A')
+
+    const r2 = await evaluateAndMaybeSwap(db, samples, identityLikeCandidate('seq-B'))
+    expect(r2.swapped).toBe(true)
+    expect(await getActiveCalibrationVersion(db)).toBe('seq-B')
+
+    const hist = await getCalibrationHistory(db)
+    expect(hist.filter((h) => h.version.startsWith('seq-'))).toHaveLength(2)
+  })
+
+  // 测试 2 —— 显式过期：基于旧 g0 启动的第二个提交，expectedActiveId 不匹配当前活动行 → 抛具名 stale 错、不写库。
+  it('commitCalibrationMap 带过期 expectedActiveId → 抛 StaleActiveCalibrationError，活动 g 不变、候选未落库', async () => {
+    // 起始活动 = identity（表空），旧锚点 g0 = null。
+    const A = identityLikeCandidate('cas-explicit-A')
+    const r1 = await evaluateAndMaybeSwap(db, wellSampled(), A)
+    expect(r1.swapped).toBe(true)
+    const activeRowA = r1.committed!.id
+    expect(await getActiveCalibrationVersion(db)).toBe('cas-explicit-A')
+
+    // 模拟「基于旧 g0（表空、null 锚）启动的第二个验收」：活动早已变成 A，
+    // 但第二个提交以为活动还是 g0（expectedActiveId = null）→ CAS 落败、抛 stale。
+    const B = identityLikeCandidate('cas-explicit-B')
+    await expect(
+      commitCalibrationMap(db, {
+        map: B,
+        expectedActiveId: null,
+        reason: 'stale-second-commit',
+      }),
+    ).rejects.toBeInstanceOf(StaleActiveCalibrationError)
+
+    // 活动仍是 A、B 未落库。
+    expect(await getActiveCalibrationVersion(db)).toBe('cas-explicit-A')
+    const hist = await getCalibrationHistory(db)
+    expect(hist.find((h) => h.version === 'cas-explicit-B')).toBeUndefined()
+    // 也验证一下：用正确 expectedActiveId（当前活动行 A）提交 B → 成功（CAS 通过路径不被搞坏）。
+    const ok = await commitCalibrationMap(db, {
+      map: B,
+      expectedActiveId: activeRowA,
+      reason: 'fresh-second-commit',
+    })
+    expect(ok.version).toBe('cas-explicit-B')
+    expect(await getActiveCalibrationVersion(db)).toBe('cas-explicit-B')
   })
 })
 
