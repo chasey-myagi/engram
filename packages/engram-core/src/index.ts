@@ -66,8 +66,10 @@ export {
   rollbackToIdentity,
   getActiveCalibrationVersion,
   getActiveCalibrationMap,
+  getActiveCalibrationRow,
   loadCalibrationMaps,
   getCalibrationHistory,
+  StaleActiveCalibrationError,
   type CommitCalibrationInput,
   type CalibrationMapRow,
 } from './calibration/calibration-store.js'

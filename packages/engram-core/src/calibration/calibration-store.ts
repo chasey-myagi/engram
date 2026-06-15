@@ -14,7 +14,7 @@
  */
 import { randomUUID } from 'node:crypto'
 
-import { desc, inArray } from 'drizzle-orm'
+import { desc, inArray, sql } from 'drizzle-orm'
 
 import {
   CALIBRATION_IDENTITY,
@@ -26,6 +26,24 @@ import {
 import type { DB, Tx } from '../db/client.js'
 import { calibrationMap } from '../db/schema.js'
 
+/**
+ * 校准换图 CAS 落败（EGR-CR-044）：提交方相对一份**过期活动 g** 过了验收门，
+ * 但落库时同一 tx 内重读到的当前活动行 id 与提交方记下的 expected 锚不符——
+ * 后提交者的验收已失效，拒写并抛此具名错（携带 expected / actual，供上层转 HOLD/retry）。
+ */
+export class StaleActiveCalibrationError extends Error {
+  constructor(
+    readonly expectedActiveId: string | null,
+    readonly actualActiveId: string | null,
+  ) {
+    super(
+      `stale active calibration: expected active row ${expectedActiveId ?? '<empty>'}, ` +
+        `but current active row is ${actualActiveId ?? '<empty>'} (concurrent swap won the CAS)`,
+    )
+    this.name = 'StaleActiveCalibrationError'
+  }
+}
+
 /** 落库一行校准映射的入参（验收门 / 回退 / 定义都走它）。 */
 export interface CommitCalibrationInput {
   /** 要激活的校准映射（version + 升序非递减 knots）。写时强制 assertCalibrationMap。 */
@@ -36,6 +54,12 @@ export interface CommitCalibrationInput {
   reason: string
   /** 写入者（'gate:advisor-accept' / 'human:rollback' …）。 */
   createdBy?: string
+  /**
+   * 乐观并发控制锚（EGR-CR-044）：提交方相对哪一行活动 g 过的验收。
+   * 传入时在同一 tx 内 `FOR UPDATE` 重读当前活动行 id 与之比对，不符则抛 StaleActiveCalibrationError、不写；
+   * 表空/identity 态用 `null` 哨兵。省略（undefined）= 不做 CAS，保持旧行为（回退等无需并发控制的写者）。
+   */
+  expectedActiveId?: string | null
 }
 
 /** calibration_map 一行的读出形状。 */
@@ -67,15 +91,47 @@ function rowToMap(r: CalibrationMapRow): CalibrationMap {
 }
 
 /**
+ * 校准换图 CAS 的事务级 advisory lock key（EGR-CR-044）。任意稳定常量即可——
+ * 所有带 expectedActiveId 的提交都在同一 tx 内先取此锁，把「重读活动行 + 比对 + append」整段串行化，
+ * 故连「起始表空（无行可 FOR UPDATE）」的并发也能正确分出唯一赢家，而非 FOR UPDATE 锁不到行各自写一行。
+ */
+const CALIBRATION_ACTIVE_LOCK_KEY = 0x6361_6c69 // 'cali'
+
+/** 当前活动行 id（最新一行，平手按 id 倒序）；表空 → null。用作 CAS 的 expected 锚点。 */
+async function activeCalibrationRowId(exec: DB | Tx): Promise<string | null> {
+  const rows = await exec
+    .select({ id: calibrationMap.id })
+    .from(calibrationMap)
+    .orderBy(desc(calibrationMap.createdAt), desc(calibrationMap.id))
+    .limit(1)
+  return rows.length ? rows[0]!.id : null
+}
+
+/**
  * 在给定执行器（DB 或 Tx）上 append 一行校准映射，并把它设成**活动版本**（最新一行即活动，故 append 即激活）。
  * 写前 assertCalibrationMap（升序、非递减、[0,1]）——违反即抛、不写。返回落库行。
  * 抽出供 commitCalibrationMap（独立 tx）与验收门（在它自己的 tx 内调）复用同一原子写入口径。
+ *
+ * **乐观并发控制（EGR-CR-044）：** 当 input.expectedActiveId !== undefined（即 caller 显式带了 expected 锚），
+ * 在 append **之前**、于**同一 tx** 内先取事务级 advisory lock 串行化并重读当前活动行 id，与 expected 比对：
+ *   - 相等（含「都为表空 / null」）→ 继续 append；
+ *   - 不等 → 抛 StaleActiveCalibrationError、不写（提交方相对的活动 g 已被并发换掉，验收失效）。
+ * expectedActiveId 省略（undefined）→ 不做 CAS，保持旧行为（rollbackToIdentity 等无需并发控制的写者）。
  */
 export async function appendCalibrationMapTx(
   exec: DB | Tx,
   input: CommitCalibrationInput,
 ): Promise<CalibrationMapRow> {
   assertCalibrationMap(input.map)
+  if (input.expectedActiveId !== undefined) {
+    // 取事务级 advisory lock：把「重读活动行 + 比对 + append」整段对所有带锚提交串行化。
+    // 这一步串行化即便在「起始表空（无行可锁）」时也成立——故并发起拍仍能分出唯一 CAS 赢家。
+    await exec.execute(sql`SELECT pg_advisory_xact_lock(${CALIBRATION_ACTIVE_LOCK_KEY})`)
+    const actualActiveId = await activeCalibrationRowId(exec)
+    if (actualActiveId !== input.expectedActiveId) {
+      throw new StaleActiveCalibrationError(input.expectedActiveId, actualActiveId)
+    }
+  }
   const id = randomUUID()
   const rows = await exec
     .insert(calibrationMap)
@@ -140,6 +196,20 @@ export async function getActiveCalibrationMap(exec: DB | Tx): Promise<Calibratio
     .limit(1)
   if (rows.length === 0) return IDENTITY_MAP
   return rowToMap(toRow(rows[0]!))
+}
+
+/**
+ * 活动校准的**带锚点**读法（EGR-CR-044）：返回当前活动行（含 id / createdAt），表空 → null。
+ * recalibrate 用它在评估开始时钉下「我相对哪一行过的门」（expected active 锚），提交时连同 expectedActiveId
+ * 下传给 commitCalibrationMap 做 CAS——过期验收便无从覆盖一份已被并发换上的、更新的活动 g。
+ */
+export async function getActiveCalibrationRow(exec: DB | Tx): Promise<CalibrationMapRow | null> {
+  const rows = await exec
+    .select()
+    .from(calibrationMap)
+    .orderBy(desc(calibrationMap.createdAt), desc(calibrationMap.id))
+    .limit(1)
+  return rows.length ? toRow(rows[0]!) : null
 }
 
 /**
