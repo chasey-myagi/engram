@@ -151,11 +151,16 @@ export async function recordRecompete(
   return { eventId: id }
 }
 
-/** 取某 (golden 版本, 维度) 的**上一 release 快照**的 value（按 created_at 降序取第一行）。无前序 ⇒ null。 */
+/**
+ * 取某 (golden 版本, 维度, **环**) 的**上一 release 快照**的 value（按 created_at 降序取第一行）。无前序 ⇒ null。
+ * **按 ring 隔离**（EGR-CR-028）：纵向曲线语义是「本 release 相对上一个**同环** release」，前值必须同环，
+ * 否则三环交错落库时 outer 的 Δ 会误引中环/内环读数、永久污染纵向证据链（delta 写入即固化、表 append-only）。
+ */
 async function latestPriorValue(
   db: DB,
   frozenGoldenVersion: string,
   dimension: RecompeteDimension,
+  ring: Ring,
 ): Promise<number | null> {
   const [row] = await db
     .select({ value: recompeteEvents.value })
@@ -164,6 +169,7 @@ async function latestPriorValue(
       and(
         eq(recompeteEvents.frozenGoldenVersion, frozenGoldenVersion),
         eq(recompeteEvents.dimension, dimension),
+        eq(recompeteEvents.ring, ring),
       ),
     )
     .orderBy(desc(recompeteEvents.createdAt), desc(recompeteEvents.id))
@@ -238,7 +244,7 @@ export async function runRecompeteSnapshot(
   const results: RecompeteReport['results'] = []
   for (const dimension of RECOMPETE_DIMENSIONS) {
     const value = dimValue[dimension]
-    const prev = await latestPriorValue(db, frozenGoldenVersion, dimension)
+    const prev = await latestPriorValue(db, frozenGoldenVersion, dimension, ring)
     const delta = computeDelta(dimension, prev, value)
     const { eventId } = await recordRecompete(db, {
       frozenGoldenVersion,
