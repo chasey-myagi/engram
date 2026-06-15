@@ -326,14 +326,21 @@ export async function runVerifier(
 
     try {
       const { evidence, halfLifeDays } = await loadEvidence(deps.db, c.id)
-      // 点状一次 LLM：每条 claim 调判官恰一次。
-      const entailment: EntailmentVerdict = await deps.judge.judge({
-        claimText: c.claimText,
-        subject: c.subject,
-        predicate: c.predicate,
-        object: c.object,
-        evidence,
-      })
+      // EGR-CR-034 fail-closed 护栏：无 exact/supporting 证据（全部出处 tangential/irrelevant 被 loadEvidence
+      // 过滤光）→ 不调 LLM，确定性判 'fail'（缺支撑）。不让非确定性判官（或 fake 默认 pass）把无证据 claim
+      // 洗成 active。顺现有 applyTransition 语义即自洽：draft 保持 draft（A.4 不许 draft→flagged）；
+      // active→flagged / flagged→quarantined 缺支撑收紧；'fail' 不过 NC-exact 闸门（非反向命题判负）。
+      // 点状一次 LLM：每条有证据的 claim 调判官恰一次。
+      const entailment: EntailmentVerdict =
+        evidence.length === 0
+          ? 'fail'
+          : await deps.judge.judge({
+              claimText: c.claimText,
+              subject: c.subject,
+              predicate: c.predicate,
+              object: c.object,
+              evidence,
+            })
       // 时效巡查：年龄超过 kind 半衰期 → stale。
       const ageDays = Math.max(0, (Date.now() - c.asOf.getTime()) / MS_PER_DAY)
       const stale = ageDays > halfLifeDays
