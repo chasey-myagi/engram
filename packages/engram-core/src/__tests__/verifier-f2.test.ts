@@ -284,4 +284,87 @@ describe('S17 f2 entailment factor — patrol → f2 (命门 A.3)', () => {
       /entailment did not pass/,
     )
   })
+
+  // EGR-CR-001 (#82): a not_co_true patrol row refused by the NC-exact red line (red line #3) must NEVER score into f2.
+  // The read primitives must skip refusedByNcExact rows and keep scanning older rows (fall back to the last VALID
+  // patrol, or neutral 0.5 if none) — never let a refused negation silently push f2 to 0.
+  describe('EGR-CR-001: NC-exact refused not_co_true patrol rows are non-scoring (read-side filter)', () => {
+    it('(2a) a refused not_co_true on top of an older valid pass → latest=pass, factor=1 (single + batch)', async () => {
+      const id = await seedClaim({ status: 'active', factors: { authority: 0.9 } })
+      // older: a legitimate pass
+      await writePatrolVerdict(db, {
+        claimId: id,
+        byRole: VERIFIER_ROLE,
+        verdict: { entailment: 'pass' },
+      })
+      // newest: a not_co_true that was REFUSED by the NC-exact red line → must be skipped, not scored
+      await writePatrolVerdict(db, {
+        claimId: id,
+        byRole: VERIFIER_ROLE,
+        verdict: { entailment: 'not_co_true', refusedByNcExact: true },
+      })
+      expect(await latestPatrolVerdict(db, id)).toBe('pass') // refused row skipped → falls back to the prior valid pass
+      expect(await computeEntailmentFactor(db, id)).toBe(1)
+      const m = await latestEntailmentFactors(db, [id])
+      expect(m.get(id)).toBe(1) // batch primitive same caliber
+    })
+
+    it('(2b) a refused not_co_true as the ONLY row → latest=null, factor=neutral 0.5; batch map omits the claim', async () => {
+      const id = await seedClaim({ status: 'active', factors: { authority: 0.9 } })
+      await writePatrolVerdict(db, {
+        claimId: id,
+        byRole: VERIFIER_ROLE,
+        verdict: { entailment: 'not_co_true', refusedByNcExact: true },
+      })
+      expect(await latestPatrolVerdict(db, id)).toBeNull() // no valid patrol remains → null (not not_co_true)
+      expect(await computeEntailmentFactor(db, id)).toBe(NEUTRAL_FACTORS.entailment) // 0.5, not 0
+      const m = await latestEntailmentFactors(db, [id])
+      expect(m.has(id)).toBe(false) // caller falls back to stored / neutral
+    })
+
+    it('(2c) backward compat: a legacy not_co_true WITHOUT refusedByNcExact still scores 0 (the new filter does not misfire on history)', async () => {
+      const id = await seedClaim({ status: 'active', factors: { authority: 0.9 } })
+      await writePatrolVerdict(db, {
+        claimId: id,
+        byRole: VERIFIER_ROLE,
+        verdict: { entailment: 'not_co_true' }, // historical-shape row: no marker
+      })
+      expect(await latestPatrolVerdict(db, id)).toBe('not_co_true')
+      expect(await computeEntailmentFactor(db, id)).toBe(0)
+      const m = await latestEntailmentFactors(db, [id])
+      expect(m.get(id)).toBe(0)
+    })
+  })
+
+  // EGR-CR-001 (#82) test 3: commit / append archival snapshot must NOT be burned to f2=0 by a refused not_co_true.
+  it('EGR-CR-001: a refused not_co_true does NOT burn f2=0 into the stored snapshot on commit-merge recompute (stays neutral)', async () => {
+    const triple = { subject: 'sku-r', predicate: 'len', object: '1m' }
+    const s1 = await aSource()
+    const first = await commitClaim(db, embedder, judge, { claimText: 'sku-r len 1m', ...triple }, [
+      { sourceId: s1.sourceId, locator: 'a' },
+    ])
+    // a not_co_true patrol row that was refused by the NC-exact red line → must not score
+    await writePatrolVerdict(db, {
+      claimId: first.claimId,
+      byRole: VERIFIER_ROLE,
+      verdict: { entailment: 'not_co_true', refusedByNcExact: true },
+    })
+    // merge a second independent source → commitClaim recomputes stored conf with claimId → reads the patrol
+    const s2 = await aSource()
+    const merged = await commitClaim(
+      db,
+      embedder,
+      judge,
+      { claimText: 'sku-r len 1m', ...triple },
+      [{ sourceId: s2.sourceId, locator: 'b' }],
+    )
+    expect(merged.merged).toBe(true)
+    expect(merged.claimId).toBe(first.claimId)
+    const [row] = await db
+      .select({ f: claim.confidenceFactors })
+      .from(claim)
+      .where(eq(claim.id, first.claimId))
+    // neutral 0.5, NOT 0 — the refused negation never enters the stored snapshot
+    expect((row!.f as StoredConfidence).factors.entailment).toBe(NEUTRAL_FACTORS.entailment)
+  })
 })

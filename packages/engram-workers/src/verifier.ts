@@ -25,6 +25,7 @@ import {
   halfLifeDaysForKind,
   transitionClaim,
   writePatrolVerdict,
+  markPatrolVerdictRefused,
   schema,
   type DB,
   type EntailmentEvidence,
@@ -348,7 +349,11 @@ export async function runVerifier(
         judgeVersion: deps.judge.version,
         ...(conflictsWith != null ? { conflictsWith } : {}),
       }
-      await writePatrolVerdict(deps.db, { claimId: c.id, byRole, verdict })
+      const { verificationId } = await writePatrolVerdict(deps.db, {
+        claimId: c.id,
+        byRole,
+        verdict,
+      })
       result.patrolled += 1
 
       // not_co_true 的反向证据落在矛盾对端 peer（conflictsWith）的 exact 出处上 —— 同一个 peer 既进 patrol 信号、
@@ -362,7 +367,12 @@ export async function runVerifier(
         conflictsWith,
       )
       if (transition) result.transitions += 1
-      if (refused) result.ncExactRefusals += 1
+      if (refused) {
+        result.ncExactRefusals += 1
+        // EGR-CR-001：not_co_true 判负被 NC-exact 红线拒判（红线#3）。行 351 已落的那条 not_co_true patrol 行留作审计，
+        // 但标成非计分——否则读侧重算 f2 会把它当最新有效巡查、映射成 0，从置信度侧悄悄判负（绕过红线#3）。
+        await markPatrolVerdictRefused(deps.db, verificationId)
+      }
       result.outcomes.push({
         claimId: c.id,
         entailment,
