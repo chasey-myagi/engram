@@ -245,12 +245,21 @@ export class EngramRunner {
     })
 
     // Reconciler（函数 + 灰区一次 LLM）— 触发 batch_appended。
+    // EGR-CR-026：把 near-dup poison 的升级信号（带对端 id 的 PairOutcome）转成 conflict.detected，喂 Arbiter。
+    // reconcileBatch 已返回带 peerClaimId 的 poison 对——直接接出去即可（不二次读库、不写 relation、不动 schema）。
+    // 复用既有 conflict.detected→Arbiter 通道（selectPairs 走 opts.pairs 分支、对 active 过滤 + 已裁对幂等），
+    // 即便这对 pair 没有任何 contradicts 边也能交 Arbiter——补上此前 reconciler handler 返回 void 丢掉结果的断桥。
     dispatcher.register({
       name: 'reconciler',
       triggers: routeKeys(RECONCILER_TRIGGER),
-      handle: async (event: EngramEvent): Promise<void> => {
-        if (event.type !== 'batch_appended') return
-        await reconcileBatch(this.deps.reconciler, event.payload.claimIds, {})
+      handle: async (event: EngramEvent): Promise<EngramEvent[]> => {
+        if (event.type !== 'batch_appended') return []
+        const res = await reconcileBatch(this.deps.reconciler, event.payload.claimIds, {})
+        const pairs: Array<[string, string]> = res.pairs
+          .filter((p) => p.verdict === 'poison')
+          .map((p) => [p.claimId, p.peerClaimId])
+        if (pairs.length === 0) return []
+        return [{ type: 'conflict.detected', payload: { pairs } }]
       },
     })
 
