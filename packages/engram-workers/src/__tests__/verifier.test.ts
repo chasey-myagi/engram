@@ -502,4 +502,66 @@ describe('S17 Verifier worker (D3 patrol: 函数/统计 + 点状一次 LLM) — 
     expect(await statusOf(claimId)).toBe('flagged')
     expect(await getRefusedRulings(db)).toHaveLength(0)
   })
+
+  // EGR-CR-034 · fail-closed empty-evidence guard (红线#2 真实语义 / A.6):
+  //   一条全部出处都是 tangential/irrelevant 的 claim，loadEvidence 把它们全过滤掉 → evidence=[]。
+  //   Verifier 必须在调 LLM 前确定性短路：空 exact/supporting 证据 → 不调判官、判 'fail'。
+  //   否则空证据被原样喂判官，fake 默认 pass（或 DashScope 错判）会把无证据 draft 洗成 active，污染知识库。
+  //   根治点在 Verifier（非 prompt、非 judge 默认）：`evidence.length === 0` 短路。
+  it('EGR-CR-034: a draft with ONLY tangential provenance (empty exact/supporting evidence) is NOT sent to the judge and is NOT promoted — fail-closed, stays draft with a {entailment:fail} patrol', async () => {
+    // 高 conf 因子（同 draft→active 用例）：排除「conf 不足」这个假阴性 —— 若没被护栏拦住，conf 足以过晋升门。
+    const { claimId } = await mkClaim({
+      status: 'draft',
+      relevance: 'tangential',
+      recallable: true,
+      claimText: 'tang-only draft',
+      factors: { authority: 1, indepSupport: 0.75, entailment: 0.5 },
+    })
+    // 默认 pass path（正是危险路径）：若空证据被喂进去就会判 pass 并晋升。
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'pass' })
+    const res = await runVerifier({ db, judge })
+
+    expect(judge.callCount()).toBe(0) // 空证据不调 LLM（确定性短路，非 judge≠athlete 跳过）
+    expect(await statusOf(claimId)).toBe('draft') // 未晋升，保持 draft
+    expect(res.transitions).toBe(0)
+
+    const rows = await patrolRows(claimId)
+    expect(rows).toHaveLength(1) // 仍写一行 patrol 裁决（审计留痕）
+    expect((rows[0]!.verdict as { entailment: string }).entailment).toBe('fail') // 确定性判负
+
+    const hits = await recallClaims(db, embedder, 'tang-only draft')
+    expect(hits.map((h) => h.claim.id)).not.toContain(claimId) // 未进召回（draft 本不可召回，回归保险）
+  })
+
+  it('EGR-CR-034: an ACTIVE claim with ONLY tangential provenance is tightened active→flagged with a {entailment:fail} patrol (NOT a NC-exact counter-assertion, NOT recallable) — judge never called', async () => {
+    const { claimId } = await mkClaim({
+      status: 'active',
+      relevance: 'tangential',
+      recallable: true,
+      claimText: 'tang-only active',
+    })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'pass' })
+    const res = await runVerifier({ db, judge })
+
+    expect(judge.callCount()).toBe(0) // 空证据不调 LLM
+    expect(res.transitions).toBe(1)
+    expect(await statusOf(claimId)).toBe('flagged') // 缺支撑收紧 active→flagged
+    expect(res.ncExactRefusals).toBe(0) // fail 是缺支撑 flag、不过 NC-exact 闸门
+    expect(await getRefusedRulings(db)).toHaveLength(0)
+
+    const rows = await patrolRows(claimId)
+    expect((rows[0]!.verdict as { entailment: string }).entailment).toBe('fail')
+    expect(await recallClaims(db, embedder, 'tang-only active')).toHaveLength(0) // flagged 不可召回
+  })
+
+  it('EGR-CR-034: irrelevant-only is likewise ruled fail — even a judge that THROWS on call is never reached (distinguishes the empty-evidence short-circuit from the swallowed-error path)', async () => {
+    const { claimId } = await mkClaim({ status: 'draft', relevance: 'irrelevant' })
+    const judge = judgeOf('throw') // 一旦被调用就抛 → 反证它没被调用（区别于异常被吞的 skipped 路径）
+    const res = await runVerifier({ db, judge })
+
+    expect(res.skipped).toBe(0) // 不是异常跳过，是确定性判负的 patrolled
+    expect(res.patrolled).toBe(1)
+    expect(judge.callCount()).toBe(0)
+    expect(await statusOf(claimId)).toBe('draft')
+  })
 })
