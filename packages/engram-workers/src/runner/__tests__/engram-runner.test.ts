@@ -17,6 +17,7 @@ import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { eq } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -25,6 +26,7 @@ import {
   addSource,
   createDb,
   getImmunityScores,
+  getReconcileEscalations,
   getResolvedConflicts,
   getWorkerFailures,
   makeFakeEmbedder,
@@ -108,12 +110,15 @@ function defaultArbiterRuntimeFor(pairs: Array<[string, string]>) {
 /**
  * 造一个全 fake 端口的 EngramRunner（distiller 脚本注入有界 loop 的产出）。
  * arbiterRuntimeFor 可覆盖（spy 记录收到的对 / 注入抛错验 runner 级单点失效）。
+ * judges 可覆盖 reconciler/verifier 的 entailment 判官（注 bound oracle 走 EGR-CR-026 升级信号路径 /
+ * 让 draft poison 不被晋升）。
  */
 function buildRunner(
   distillerScript: FakeAssistantResponse[],
   arbiterRuntimeFor: (
     pairs: Array<[string, string]>,
   ) => ReturnType<typeof makeHarnessPiRuntime> = defaultArbiterRuntimeFor,
+  judges: { reconciler?: EntailmentJudge; verifier?: EntailmentJudge } = {},
 ): EngramRunner {
   const distiller: DistillerDeps = {
     db,
@@ -122,8 +127,8 @@ function buildRunner(
     runtime: makeHarnessPiRuntime(createFakeModel(distillerScript)),
     reader,
   }
-  const verifier: VerifierDeps = { db, judge: entailment }
-  const reconciler: ReconcilerDeps = { db, judge: entailment }
+  const verifier: VerifierDeps = { db, judge: judges.verifier ?? entailment }
+  const reconciler: ReconcilerDeps = { db, judge: judges.reconciler ?? entailment }
   const harvester: HarvesterDeps = { db }
   return new EngramRunner({
     db,
@@ -134,6 +139,82 @@ function buildRunner(
     harvester,
     arbiterRuntimeFor,
   })
+}
+
+/**
+ * EGR-CR-026 bound oracle：把命题/出处都解成数值下界，A(出处) ⊬ B(命题) ⇒ 'fail' ⇒ Reconciler 判 poison。
+ * 与 choreography.test 的 boundOracle 同口径（A=evidence、B=claimText；eb≥cb 才 pass）。
+ */
+const boundOracle: EntailmentJudge = {
+  version: 'fake:bound-oracle',
+  judge(q) {
+    const lower = (s: string) => {
+      const m = s.match(/(\d+(?:\.\d+)?)/)
+      return m ? parseFloat(m[1]!) : NaN
+    }
+    const cb = lower(q.claimText)
+    const eb = lower(q.evidence[0]?.sourceContent ?? '')
+    if (Number.isNaN(cb) || Number.isNaN(eb)) return Promise.resolve('fail')
+    return Promise.resolve(eb >= cb ? 'pass' : 'fail')
+  },
+}
+
+/**
+ * 直接 seed 一条指定 subject/object/status 的可召回 claim（造 near-dup poison 锚 / 被审 A）。
+ * 给 sourceId ⇒ 这条 claim 挂在该源的 provenance 上（让 ingest(sourceId) 经 claimsForSource 把它当 batch）；
+ * 不给则自造一个独立源。
+ */
+async function seedPoisonClaim(opts: {
+  query: string
+  subject: string
+  object: string
+  status: schema.ClaimStatus
+  sourceId?: string
+}): Promise<string> {
+  const sourceId =
+    opts.sourceId ??
+    (
+      await addSource(db, {
+        content: `src-${randomUUID()}`,
+        contentHash: randomUUID(),
+        kind: 'structured_spec',
+        authorityScore: 0.5,
+      })
+    ).sourceId
+  const id = randomUUID()
+  await db.insert(schema.claim).values({
+    id,
+    claimText: opts.query,
+    subject: opts.subject,
+    predicate: 'capacity',
+    object: opts.object,
+    status: opts.status,
+    confidence: 0.8,
+    confidenceRaw: 0.8,
+    confidenceFactors: {
+      factors: { ...HIGH, ageDays: 0, activeContradicts: 0, staleDecay: 1, conflictDecay: 1 },
+      weights: WEIGHTS,
+      calibrationVersion: 'identity',
+    },
+    lineageId: randomUUID(),
+    asOf: new Date('2025-06-01T00:00:00.000Z'),
+    createdBy: DISTILLER_ROLE,
+    embedding: await embedder.embed(opts.query),
+    embeddingVersion: embedder.version,
+  })
+  await db
+    .insert(schema.claimProvenance)
+    .values({ id: randomUUID(), claimId: id, sourceId, locator: 'L1', relevance: 'exact' })
+  return id
+}
+
+/** A↔B 之间 contradicts 边的条数（断言纯 escalation 路径：必须为 0）。 */
+async function contradictsEdgeCount(): Promise<number> {
+  const edges = await db
+    .select({ from: schema.relation.fromClaim, to: schema.relation.toClaim })
+    .from(schema.relation)
+    .where(eq(schema.relation.type, 'contradicts'))
+  return edges.length
 }
 
 async function aSource(content?: string): Promise<string> {
@@ -397,6 +478,116 @@ describe('P4b · EngramRunner 把北极星接成可跑自闭环', () => {
         .from(schema.claim)
       expect(statuses.find((r) => r.id === a)!.s).toBe('active')
       expect(statuses.find((r) => r.id === b)!.s).toBe('active')
+    })
+
+    it('④p EGR-CR-026 active poison：Reconciler 升级信号(无 contradicts 边)经 runner 转成 conflict.detected 触发 Arbiter', async () => {
+      // 既有 KB：一条 active 锚 B（capacity ≥4000）。
+      const b = await seedPoisonClaim({
+        query: 'skuP capacity is at least 4000 mah',
+        subject: 'skuP',
+        object: 'at least 4000',
+        status: 'active',
+      })
+      // 本批被审 A：active 的 near-dup poison（同 subject、object 被悄悄改小到 ≥800，A⊬B → poison）。
+      // 挂在待 ingest 的源上，让 claimsForSource 把它当 batch_appended 喂给 Reconciler。
+      const sourceId = await aSource()
+      const a = await seedPoisonClaim({
+        query: 'skuP capacity is at least 0800 mah',
+        subject: 'skuP',
+        object: 'at least 800',
+        status: 'active',
+        sourceId,
+      })
+
+      // spy 记录 arbiterRuntimeFor 收到的对（证明 escalation 真转成 conflict.detected 喂给了 Arbiter）。
+      const seenPairs: Array<Array<[string, string]>> = []
+      const runner = buildRunner(
+        // distiller 本轮不产新 claim（finish→stop），只让 claimsForSource 回报已 seed 的 A。
+        [finishTurn(), stopTurn],
+        (pairs) => {
+          seenPairs.push(pairs)
+          return defaultArbiterRuntimeFor(pairs)
+        },
+        { reconciler: boundOracle }, // Reconciler 用 bound oracle ⇒ A(≥800) ⊬ B(≥4000) → poison。
+      )
+
+      // 前置铁律：A↔B 之间**没有任何 contradicts 边**，逼出纯 escalation 路径（非 distiller 的 allContradictsPairs）。
+      expect(await contradictsEdgeCount()).toBe(0)
+
+      const report = await runner.runClosedLoop({ sources: [sourceId] })
+      const cascade = report.ingests[0]!.result
+
+      // 修前 red baseline：Reconciler 返回 void、escalation 被丢，arbiter 这一拍计数为 undefined（0）。
+      // 修后 green：Reconciler 把 poison 升级信号转成 conflict.detected，Arbiter 臂被触发一次。
+      expect(cascade.failures).toBe(0)
+      expect(cascade.firedByWorker.reconciler).toBe(1)
+      expect(cascade.firedByWorker.arbiter).toBe(1)
+      // 升级信号确已落库（带对端 B 的 id）——证明走的是 patrol/escalation 载体，不是 contradicts 边。
+      const esc = await getReconcileEscalations(db, a)
+      expect(esc.length).toBeGreaterThanOrEqual(1)
+      expect(esc[0]!.conflictsWith).toBe(b)
+      // 工厂确实收到了 [A,B]（escalation → conflict.detected → arbiterRuntimeFor）。
+      expect(seenPairs.flat()).toContainEqual([a, b])
+      // 仍**没有** contradicts 边被写出（推荐方案不碰 relation 表，纯应用层接线）。
+      expect(await contradictsEdgeCount()).toBe(0)
+      // 红线#2：Reconciler 已把 active 的 A 收紧到 flagged（升级信号 + 蓝边收紧两半都接上了）。
+      // A 已非 active ⇒ Arbiter 的 selectPairs 忠实跳过、不机判（语义零回归、不误裁），故无 resolved 行——
+      //   active poison 这半的可审计交付是「升级信号被路由到 Arbiter」，机判自裁属 contradicts 边路径（见 ④）。
+      const [aStatus] = await db
+        .select({ s: schema.claim.status })
+        .from(schema.claim)
+        .where(eq(schema.claim.id, a))
+      expect(aStatus!.s).toBe('flagged')
+      // A 已 flagged ⇒ selectPairs 跳过、零误裁：无 resolved 行。
+      expect(await getResolvedConflicts(db)).toHaveLength(0)
+    })
+
+    it('④pd EGR-CR-026 draft poison 变体：Reconciler 仍发 conflict.detected，Arbiter 因 A 非 active 忠实跳过（draft 语义零回归）', async () => {
+      // 既有 KB：一条 active 锚 B。
+      const b = await seedPoisonClaim({
+        query: 'skuQ capacity is at least 4000 mah',
+        subject: 'skuQ',
+        object: 'at least 4000',
+        status: 'active',
+      })
+      // 本批被审 A：**draft** 的 near-dup poison（A.4 禁止 draft→flagged，升级信号是它唯一下游钩子）。
+      const sourceId = await aSource()
+      const a = await seedPoisonClaim({
+        query: 'skuQ capacity is at least 0800 mah',
+        subject: 'skuQ',
+        object: 'at least 800',
+        status: 'draft',
+        sourceId,
+      })
+
+      const seenPairs: Array<Array<[string, string]>> = []
+      const runner = buildRunner(
+        [finishTurn(), stopTurn],
+        (pairs) => {
+          seenPairs.push(pairs)
+          return defaultArbiterRuntimeFor(pairs)
+        },
+        // Reconciler 判 poison（A⊬B）；Verifier 也用 bound oracle ⇒ A 自身出处无数值 → 不 pass → draft 不晋升。
+        { reconciler: boundOracle, verifier: boundOracle },
+      )
+
+      expect(await contradictsEdgeCount()).toBe(0)
+      const report = await runner.runClosedLoop({ sources: [sourceId] })
+      const cascade = report.ingests[0]!.result
+
+      // Reconciler 仍发出 conflict.detected（spy 收到 [A,B]）——draft poison 至少进入了「曾被路由」的可审计轨迹。
+      expect(cascade.failures).toBe(0)
+      expect(cascade.firedByWorker.reconciler).toBe(1)
+      expect(cascade.firedByWorker.arbiter).toBe(1)
+      expect(seenPairs.flat()).toContainEqual([a, b])
+      // 但 Arbiter 的 selectPairs 因 A 非 active 把它忠实跳过：不新增 resolved、不抛错（draft 语义零回归）。
+      expect(await getResolvedConflicts(db)).toHaveLength(0)
+      // A 仍是 draft（A.4：draft 不能被 flag；升级信号已记，留影子区交 Arbiter/人）。
+      const [aStatus] = await db
+        .select({ s: schema.claim.status })
+        .from(schema.claim)
+        .where(eq(schema.claim.id, a))
+      expect(aStatus!.s).toBe('draft')
     })
 
     it('⑤ runner 级单点失效：一个工种处理器抛错被吞、计 failures、级联不掀翻、其余工种照常 + claim 仍落库', async () => {
