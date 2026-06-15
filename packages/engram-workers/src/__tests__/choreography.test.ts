@@ -255,6 +255,49 @@ async function seedActiveClaim(opts: {
   return id
 }
 
+/**
+ * EGR-CR-026：直接 seed 一条指定 subject/object/status 的可召回 claim（造 near-dup poison 锚 / 被审 A）。
+ * 不写 contradicts 边（区别于 seedActivePair）——用于逼出「纯 escalation、零 contradicts 边」路径。
+ */
+async function seedPoisonPair(opts: {
+  query: string
+  subject: string
+  object: string
+  status: schema.ClaimStatus
+}): Promise<string> {
+  const { sourceId } = await addSource(db, {
+    content: `src-${randomUUID()}`,
+    contentHash: randomUUID(),
+    kind: 'structured_spec',
+    authorityScore: 0.5,
+  })
+  const id = randomUUID()
+  await db.insert(schema.claim).values({
+    id,
+    claimText: opts.query,
+    subject: opts.subject,
+    predicate: 'capacity',
+    object: opts.object,
+    status: opts.status,
+    confidence: 0.8,
+    confidenceRaw: 0.8,
+    confidenceFactors: {
+      factors: { ...HIGH, ageDays: 0, activeContradicts: 0, staleDecay: 1, conflictDecay: 1 },
+      weights: WEIGHTS,
+      calibrationVersion: 'identity',
+    },
+    lineageId: randomUUID(),
+    asOf: new Date('2025-06-01T00:00:00.000Z'),
+    createdBy: DISTILLER_ROLE,
+    embedding: await embedder.embed(opts.query),
+    embeddingVersion: embedder.version,
+  })
+  await db
+    .insert(schema.claimProvenance)
+    .values({ id: randomUUID(), claimId: id, sourceId, locator: 'L1', relevance: 'exact' })
+  return id
+}
+
 /** seed 一对 active 矛盾 claim（同 query → recall 双返）+ 一条 contradicts 边。 */
 async function seedActivePair(opts: {
   query: string
@@ -333,15 +376,22 @@ function wireDispatcher(opts: WireOpts): EventDispatcher {
   })
 
   // Reconciler — 触发 batch_appended（其导出的 RECONCILER_TRIGGER.on）。
+  // EGR-CR-026：与生产 runner 同步——把 near-dup poison 升级信号转成 conflict.detected 喂 Arbiter，
+  // 即便这对 pair 没有任何 contradicts 边也能交 Arbiter（否则测试脚手架与生产分叉）。
   dispatcher.register({
     name: 'reconciler',
     triggers: routeKeys(RECONCILER_TRIGGER),
-    async handle(event: EngramEvent): Promise<void> {
+    async handle(event: EngramEvent): Promise<EngramEvent[]> {
       if (fail.has('reconciler')) throw new Error('reconciler disabled')
-      if (event.type !== 'batch_appended') return
+      if (event.type !== 'batch_appended') return []
       const optsR: ReconcilerOptions = {}
       const res = await reconcileBatch(reconcilerDeps, event.payload.claimIds, optsR)
       opts.onFire?.('reconciler', res)
+      const pairs: Array<[string, string]> = res.pairs
+        .filter((p) => p.verdict === 'poison')
+        .map((p) => [p.claimId, p.peerClaimId])
+      if (pairs.length === 0) return []
+      return [{ type: 'conflict.detected', payload: { pairs } }]
     },
   })
 
@@ -881,6 +931,73 @@ describe('S24 choreography integration — A.7 event-driven cascade, no online m
       const esc = await getReconcileEscalations(db, poison!.id)
       expect(esc.length).toBeGreaterThanOrEqual(1)
       for (const e of esc) expect(e.byRole).toBe(RECONCILER_ROLE) // Reconciler 的独立角色
+    })
+
+    it('EGR-CR-026: a near-dup poison escalation (NO contradicts edge) drives the cascade all the way to the Arbiter', async () => {
+      // T2（台账 :1437 结构对照）：把现有「只断言 escalation.byRole」的用例升级为「Arbiter 被触发」。
+      // 关键：**直接 seed** A/B（不走 distiller commit）—— commitClaim 的确定性判同会对 subject≡∧predicate≡∧object≠
+      // 直接写一条 contradicts 边（same-fact.ts:94），那会让 distiller 的 allContradictsPairs 抢先把对喂给 Arbiter，
+      // 掩盖本 issue 要测的「纯 escalation、零 contradicts 边」路径。seed 法绕开 commit、逼出纯升级信号路径。
+      const anchor = await seedPoisonPair({
+        query: 'skuT capacity is at least 4000 mah',
+        subject: 'skuT',
+        object: 'at least 4000',
+        status: 'active',
+      })
+      const poison = await seedPoisonPair({
+        query: 'skuT capacity is at least 0800 mah',
+        subject: 'skuT',
+        object: 'at least 800',
+        status: 'draft', // draft poison：A.4 禁 draft→flagged，升级信号是它唯一下游钩子。
+      })
+
+      // bound oracle：A(≥800) ⊬ B(≥4000) → poison。
+      const boundOracle: EntailmentJudge = {
+        version: 'fake:bound-oracle',
+        async judge(q) {
+          const lower = (s: string) => {
+            const m = s.match(/(\d+(?:\.\d+)?)/)
+            return m ? parseFloat(m[1]!) : NaN
+          }
+          const cb = lower(q.claimText)
+          const eb = lower(q.evidence[0]?.sourceContent ?? '')
+          if (Number.isNaN(cb) || Number.isNaN(eb)) return 'fail'
+          return eb >= cb ? 'pass' : 'fail'
+        },
+      }
+      // onFire spy + arbiterScriptFor spy：证明 arbiter 臂真被 escalation 驱动触发，且收到 [poison, anchor]。
+      const arbiterPairs: Array<Array<[string, string]>> = []
+      const fired: string[] = []
+      const dispatcher = wireDispatcher({
+        distillerScript: [], // distiller 不参与本对照（直接驱动 batch_appended）。
+        entailment: boundOracle,
+        arbiterScriptFor: (pairs) => {
+          arbiterPairs.push(pairs)
+          return [...pairs.map(([a, b]) => adjudicateTurn(a, b)), finishTurn(), stopTurn]
+        },
+        onFire: (worker) => fired.push(worker),
+      })
+      // 直接驱动 batch_appended([A])（绕开 distiller commit）→ reconciler 判 poison → escalation → conflict.detected → arbiter。
+      await dispatcher.runToConvergence({
+        type: 'batch_appended',
+        payload: { claimIds: [poison] },
+      })
+
+      // 升级信号已记（带对端 anchor id）——走的是 patrol/escalation 载体，不是 contradicts 边。
+      const esc = await getReconcileEscalations(db, poison)
+      expect(esc.length).toBeGreaterThanOrEqual(1)
+      expect(esc[0]!.conflictsWith).toBe(anchor)
+      // 该对**没有任何 contradicts 边**——逼出纯 escalation 路径（非 distiller 的 allContradictsPairs）。
+      const contradicts = await db
+        .select({ id: schema.relation.id })
+        .from(schema.relation)
+        .where(eq(schema.relation.type, 'contradicts'))
+      expect(contradicts).toHaveLength(0)
+      // 级联端到端触达 Arbiter（修前 reconciler 返回 void、arbiter 永不被触发；修后 escalation→conflict.detected→arbiter）。
+      expect(fired).toContain('arbiter')
+      expect(arbiterPairs.flat()).toContainEqual([poison, anchor])
+      // A 是 draft ⇒ Arbiter 的 selectPairs 忠实跳过：不新增 resolved（draft 语义零回归、不误裁）。
+      expect(await getResolvedConflicts(db)).toHaveLength(0)
     })
   })
 
