@@ -217,6 +217,93 @@ describe('S28 ≥200 门 + usage_truth 取样（独立门控）', () => {
   })
 })
 
+describe('S28 latest-by-identity 取样：最新 corrected/partial 覆盖旧 adopted（与 f4 同口径，EGR-CR-030）', () => {
+  it('同一身份先 adopted 后 corrected → corrected 覆盖旧 adopted，该身份不进校准样本（与 f4 同口径）', async () => {
+    const cid = await seedClaim('correct-overrides claim')
+    // 同一 (by_role, taskId)：先 adopted（旧票），后 corrected（最新表态）。
+    await reportUsage(db, cid, 'adopted', {
+      byRole: 'consumer:c1',
+      taskId: 'task-c1',
+      confidenceAtRecall: 0.9,
+      calibrationVersion: CALIBRATION_IDENTITY,
+    })
+    await reportUsage(db, cid, 'corrected', {
+      byRole: 'consumer:c1',
+      taskId: 'task-c1',
+      confidenceAtRecall: 0.9,
+      calibrationVersion: CALIBRATION_IDENTITY,
+    })
+    const samples = await collectUsageCalibrationSamples(db)
+    expect(samples).toHaveLength(0) // 最新结局是 corrected ⇒ 该身份不成样本（红：修前会是 1）
+  })
+
+  it('同一身份先 adopted 后 partial → partial 同样覆盖旧 adopted，该身份不进校准样本', async () => {
+    const cid = await seedClaim('partial-overrides claim')
+    await reportUsage(db, cid, 'adopted', {
+      byRole: 'consumer:p1',
+      taskId: 'task-p1',
+      confidenceAtRecall: 0.9,
+      calibrationVersion: CALIBRATION_IDENTITY,
+    })
+    await reportUsage(db, cid, 'partial', {
+      byRole: 'consumer:p1',
+      taskId: 'task-p1',
+      confidenceAtRecall: 0.9,
+      calibrationVersion: CALIBRATION_IDENTITY,
+    })
+    const samples = await collectUsageCalibrationSamples(db)
+    expect(samples).toHaveLength(0)
+  })
+
+  it('199 个有效独立样本 + 1 个最新为 corrected 的身份 → 仅 199 distinct，不触发拟合（门不被旧票误触发）', async () => {
+    const cid = await seedClaim('threshold-with-corrected claim')
+    await seedMiscalibratedUsage(cid, MIN_FIT_SAMPLES - 1) // 199 个各自独立身份的 adopted/refuted
+    // 第 200 个身份：先 adopted（看似凑满 200），后 corrected（最新表态 ⇒ 应作废）。
+    await reportUsage(db, cid, 'adopted', {
+      byRole: 'consumer:edge',
+      taskId: 'task-edge',
+      confidenceAtRecall: 0.9,
+      calibrationVersion: CALIBRATION_IDENTITY,
+    })
+    await reportUsage(db, cid, 'corrected', {
+      byRole: 'consumer:edge',
+      taskId: 'task-edge',
+      confidenceAtRecall: 0.9,
+      calibrationVersion: CALIBRATION_IDENTITY,
+    })
+    const samples = await collectUsageCalibrationSamples(db)
+    expect(samples).toHaveLength(MIN_FIT_SAMPLES - 1) // 199，不是 200（红：修前会是 200）
+    const res = await fitAndMaybeRecalibrate(db)
+    expect(res.fitted).toBe(false)
+    if (res.fitted === false) {
+      expect(res.reason).toBe('below_threshold')
+      expect(res.sampleCount).toBe(MIN_FIT_SAMPLES - 1)
+    }
+    // g 维持 identity、无任何拟合行落库。
+    expect(await getActiveCalibrationVersion(db)).toBe(CALIBRATION_IDENTITY)
+    expect(await getCalibrationHistory(db)).toHaveLength(0)
+  })
+
+  it('同一身份先 corrected 后 adopted → 最新 adopted 重新计为有效样本（覆盖是双向的，不是单调屏蔽）', async () => {
+    const cid = await seedClaim('reinstate claim')
+    await reportUsage(db, cid, 'corrected', {
+      byRole: 'consumer:c2',
+      taskId: 'task-c2',
+      confidenceAtRecall: 0.7,
+      calibrationVersion: CALIBRATION_IDENTITY,
+    })
+    await reportUsage(db, cid, 'adopted', {
+      byRole: 'consumer:c2',
+      taskId: 'task-c2',
+      confidenceAtRecall: 0.7,
+      calibrationVersion: CALIBRATION_IDENTITY,
+    })
+    const samples = await collectUsageCalibrationSamples(db)
+    expect(samples).toHaveLength(1)
+    expect(samples[0]).toEqual({ rawPredicted: 0.7, correct: true })
+  })
+})
+
 describe('S28 经验收门原子换 + ECE 下降证明', () => {
   it('全项通过 approve → 原子换、calibration_version 翻版、evidence 落 ΔECE + codeVersion', async () => {
     const cid = await seedClaim('ece claim')
