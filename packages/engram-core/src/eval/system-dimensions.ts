@@ -22,7 +22,7 @@
 import { computeCalibrationFromUsage, type ReliabilityReport } from '../calibration/calibration.js'
 import type { DB } from '../db/client.js'
 import type { Embedder } from '../embedding/embedder.js'
-import { getImmunityScores } from '../spi/redteam-generation.js'
+import { getImmunityScores, isRedTeamClass } from '../spi/redteam-generation.js'
 import { recallClaims, type RecallContext, type RecallResult } from '../spi/recall-claims.js'
 import {
   DIMENSION,
@@ -276,6 +276,13 @@ export async function computeSystemDimensions(
   let injected = 0
   let detected = 0
   for (const s of scores) {
+    // 纵深防御（兜底任何已落库的历史脏行）：四类是免疫维度的语义不变量，未知 class
+    // 绝不静默累加进分子分母——fail-loud 暴露之，而非让看板「免疫力」口径被悄悄污染。
+    if (!isRedTeamClass(s.redteamClass)) {
+      throw new Error(
+        `computeSystemDimensions: immunity row has unknown redteamClass ${JSON.stringify(s.redteamClass)}`,
+      )
+    }
     injected += s.injected
     detected += s.detected
   }

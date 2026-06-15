@@ -26,6 +26,13 @@ export const REDTEAM_CLASSES: readonly RedTeamClass[] = [
   'near_dup_poison',
 ]
 
+const REDTEAM_CLASS_SET: ReadonlySet<string> = new Set(REDTEAM_CLASSES)
+
+/** 运行时校验：x 是否四类红队之一（复用 REDTEAM_CLASSES 单一真相源，增减类别只改白名单一处）。 */
+export function isRedTeamClass(x: unknown): x is RedTeamClass {
+  return typeof x === 'string' && REDTEAM_CLASS_SET.has(x)
+}
+
 /**
  * 一条冻结的红队对抗样本（领域无关）。内核只存/取，不解释其语义——具体注入与免疫断言在 @engram/workers 的 eval 层。
  * claimText/subject/predicate/object/asOf 喂 append_claim 真路径注入；evidence 是该样本所附原文（供 entailment 验真）。
@@ -156,6 +163,14 @@ export async function recordImmunityScore(
     createdBy?: string
   },
 ): Promise<ImmunityScore> {
+  // 四类是免疫维度的语义不变量（写入侧 runtime guard，挡 `as any` / JS 调用方绕过 TS）。
+  // 置于计数校验**之前**：未知 class 在 insert 前先 fail-loud，绝不留脏行。
+  if (!isRedTeamClass(input.redteamClass)) {
+    throw new Error(
+      `recordImmunityScore: unknown redteamClass ${JSON.stringify(input.redteamClass)} ` +
+        `(expected one of ${REDTEAM_CLASSES.join(', ')})`,
+    )
+  }
   if (input.injected < 0 || input.detected < 0 || input.detected > input.injected) {
     throw new Error(
       `recordImmunityScore: invalid counts (injected=${input.injected}, detected=${input.detected})`,
