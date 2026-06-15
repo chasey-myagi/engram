@@ -131,7 +131,8 @@ export interface SystemDimensions {
     recalledClaimCount: number
     groundedClaimCount: number
     staleClaimCount: number
-    ece: { sampleCount: number; binCount: number }
+    /** ECE 诊断：样本数 + bin 数 + **本次读数所用的 g 版本集合**（EGR-CR-029：让 sampleCount 重获解释力，混版不再静默）。 */
+    ece: { sampleCount: number; binCount: number; fromVersions: string[] }
     immunity: { scoreRows: number; injected: number; detected: number } | null
   }
 }
@@ -181,6 +182,11 @@ export interface ComputeOptions {
   /** 免疫维度取自哪个冻结世代（S29）；不传则取全部世代的免疫分聚合。 */
   immunityGeneration?: string
   ctx?: RecallContext
+  /**
+   * ECE 取样的 g 版本集合（EGR-CR-029），透传给 computeCalibrationFromUsage。
+   * 省略（默认）→ 底层取当前活动版本（表空 → identity），报表只反映「当前 g 下的校准质量」。
+   */
+  calibrationFromVersions?: string[]
 }
 
 /**
@@ -249,7 +255,13 @@ export async function computeSystemDimensions(
   const staleness = recalledClaimCount === 0 ? 0 : staleClaimCount / recalledClaimCount
 
   // ★③ECE：S5/S28 substrate（over usage 真值），不另起 ad-hoc 逻辑。
-  const reliability: ReliabilityReport = await computeCalibrationFromUsage(db)
+  // EGR-CR-029：默认（省略 calibrationFromVersions）取当前活动 g 版本，换 g 后不再混版；调用方可显式放宽。
+  const reliability: ReliabilityReport = await computeCalibrationFromUsage(
+    db,
+    opts.calibrationFromVersions !== undefined
+      ? { fromVersions: opts.calibrationFromVersions }
+      : {},
+  )
   const ece = reliability.ece
 
   // ★⑥immunity：S29 substrate（检出率，不重算）。无免疫分行 → null（未度量，区别于检出率 0）。
@@ -277,7 +289,11 @@ export async function computeSystemDimensions(
       recalledClaimCount,
       groundedClaimCount,
       staleClaimCount,
-      ece: { sampleCount: reliability.sampleCount, binCount: reliability.binCount },
+      ece: {
+        sampleCount: reliability.sampleCount,
+        binCount: reliability.binCount,
+        fromVersions: reliability.fromVersions,
+      },
       immunity: scores.length === 0 ? null : { scoreRows: scores.length, injected, detected },
     },
   }

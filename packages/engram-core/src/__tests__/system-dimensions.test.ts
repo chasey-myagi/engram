@@ -251,6 +251,9 @@ describe('S30 L3 system dimensions (substrate-ready 7) — append-only events th
     })
     const dims = await computeSystemDimensions(db, embedder)
     expect(dims.diagnostics.ece.sampleCount).toBe(1) // the usage truth flowed into ECE
+    // EGR-CR-029: diagnostics record the g version(s) the reading was taken over (active = identity here)
+    // so sampleCount is interpretable and any cross-version pooling is never silent.
+    expect(dims.diagnostics.ece.fromVersions).toEqual(['identity'])
     expect(dims.ece).toBeGreaterThan(0) // high-confidence-but-wrong ⇒ calibration error
     expect(dims.ece).toBeLessThanOrEqual(1)
   })

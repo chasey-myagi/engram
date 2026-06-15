@@ -247,7 +247,12 @@ export async function runRecompeteSnapshot(
       value,
       delta,
       ring,
-      payload: { prev, goldenCount: golden.length },
+      // EGR-CR-029：记录本次 ECE 读数所用的 g 版本集合，使纵向曲线每个点都能回溯其口径（混版不静默）。
+      payload: {
+        prev,
+        goldenCount: golden.length,
+        calibrationFromVersions: dims.diagnostics.ece.fromVersions,
+      },
       ...(opts.createdBy !== undefined ? { createdBy: opts.createdBy } : {}),
     })
     results.push({ dimension, value, delta, eventId })
