@@ -39,7 +39,7 @@ import {
   type ProvenanceInput,
 } from '@engram/core'
 
-import { runRedTeamGeneration, type ClassScore } from '../redteam-injector.js'
+import { runNearDupPoison, runRedTeamGeneration, type ClassScore } from '../redteam-injector.js'
 import { REDTEAM_GENERATION_ITEMS } from '../redteam.gen.js'
 import { truncateEvalWorkTablesSql } from '../work-tables.js'
 
@@ -225,6 +225,53 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
         .from(schema.claim)
         .where(eq(schema.claim.id, claimId))
       expect(row!.s).toBe('active') // 仍 active、绝非 flagged —— 免疫=工种驱动，缺工种就没免疫
+    })
+  })
+
+  // EGR-CR-050（#125）：near_dup_poison 的 detected 口径不能把「停在 draft、从未被 flag 的 poison」计为检出。
+  // 单条 outcome 口径（直接驱动 runNearDupPoison），与 class 聚合率分开——要的是「这条被审 claim 是否真被收紧」。
+  describe('EGR-CR-050 · near_dup_poison detected 必须要求真收紧（flagged），draft 不计检出', () => {
+    const poisonItem = REDTEAM_GENERATION_ITEMS.find((i) => i.redteamClass === 'near_dup_poison')!
+
+    async function statusOf(claimId: string): Promise<string> {
+      const [row] = await db
+        .select({ s: schema.claim.status })
+        .from(schema.claim)
+        .where(eq(schema.claim.id, claimId))
+      return row!.s
+    }
+
+    it('负例：被审 poison 晋升不到 active（独立印证薄→conf 过不了门，留 draft）→ escalation 记了但未收紧 → detected=false、promotionFailed=true', async () => {
+      await resetWorkTables()
+      // itemSourceCount=3：base=0.487<0.5 → runNearDupPoison 内部 transitionClaim(...,'active') 抛错 → 留 draft
+      // （复现「晋升路径回归让 poison 停影子区」这一真实失败；锚仍挂满源、正常晋升 active）。
+      const outcome = await runNearDupPoison({ db, embedder, itemSourceCount: 3 }, poisonItem)
+
+      // 前置有效：晋升确实没成（否则负例空过——参照正例 line 219 的 toBe('active') 反向写法）。
+      expect(await statusOf(outcome.claimId)).toBe('draft')
+      // 这条 draft 路径真被触发：Reconciler 在 draft 上无条件记了带对端锚 id 的 escalation 信号。
+      expect(outcome.reaction.escalatedToAnchor).toBe(true)
+      // draft→flagged 非法（A.4）→ 没被收紧。
+      expect(outcome.reaction.flagged).toBe(false)
+      // 核心断言（修前 red）：当前 detected = escalatedToAnchor && poisonPair（不要求 flagged）→ 会误判 true。
+      // 修后 detected 加 `&& finalStatus==='flagged'` → draft 路径必为 false。
+      expect(outcome.detected).toBe(false)
+      // 晋升失败显式暴露（修前 red：reaction 无此字段 → undefined ≠ true）。
+      expect(outcome.reaction.promotionFailed).toBe(true)
+    })
+
+    it('正例护栏：被审 poison 成功晋升 active → 真 Reconciler 判 poison → active→flagged → detected=true、promotionFailed=false', async () => {
+      await resetWorkTables()
+      // 默认源数（4）→ 晋升 active；真 reconcileBatch 判 poison → 蓝边收紧 active→flagged。
+      const outcome = await runNearDupPoison({ db, embedder }, poisonItem)
+
+      expect(await statusOf(outcome.claimId)).toBe('flagged') // 真收紧
+      expect(outcome.reaction.verdict).toBe('poison')
+      expect(outcome.reaction.escalatedToAnchor).toBe(true)
+      expect(outcome.reaction.flagged).toBe(true)
+      expect(outcome.reaction.promotionFailed).toBe(false) // 晋升成功，未走 draft 兜底
+      // 收紧 detected 口径后，真正收紧的 poison 仍被正确计为 detected（防方案 A 把所有样本误判 not-detected）。
+      expect(outcome.detected).toBe(true)
     })
   })
 
