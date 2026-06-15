@@ -250,6 +250,65 @@ export function measureFromSamples(
   }
 }
 
+/**
+ * pilot 通过门的最低阈值(起步基线;与生产 acceptance-gate 解耦,仅约束本受控实验的"闭环成立"判据)。
+ * 受控语料 ~100 事实、5 档、heldoutEvery=3 ⇒ heldout 约占 1/3,正常应远超下限。
+ */
+export const PILOT_MIN_SAMPLES = 30
+export const PILOT_MIN_HELDOUT = 5
+export const PILOT_MIN_ECE_DROP = 0
+
+export interface PilotGateResult {
+  passed: boolean
+  /** 人类可读的未过项(每项一句,便于 CLI 打印 + 测试断言)。 */
+  failures: string[]
+}
+
+/**
+ * pilot 通过判据(单一真相源,A.6 防 Goodhart)——纯函数、零 DB/IO,逐项检查并收集 failures。
+ * 守 #117 真正要防的退化:recall 全漏 / 样本不足 / heldout 空 / 无可校误差 / g 未改善 / 事实跨边泄漏。
+ *
+ * **刻意不**断言「promoted==usageRows==totalSamples==persisted 四者恒等」——
+ * collectFactSamples(产 totalSamples)按原始行读回、不按身份去重,而 collectUsageCalibrationSamples(产 persisted)
+ * 按 (byRole,taskId) 去重(EGR-CR-030 后还会被 corrected/partial 折叠覆盖)。两条口径不同 ⇒ 在健康数据上本就可能不相等,
+ * 钉死等式会在正常闭环上误伤。覆盖完整性由「recall 全命中 + usageRows 无缺口」(见 runCalibrationPilot 内的硬门)单独守。
+ */
+export function checkCalibrationPilotPass(
+  usage: UsageStats,
+  m: CalibrationMeasurement,
+): PilotGateResult {
+  const failures: string[] = []
+  if (usage.recallHits <= 0) {
+    failures.push(`recall 全漏(recallHits=${usage.recallHits}):无 usage 燃料,闭环不成立。`)
+  }
+  if (m.totalSamples < PILOT_MIN_SAMPLES) {
+    failures.push(`样本不足:totalSamples=${m.totalSamples} < ${PILOT_MIN_SAMPLES}。`)
+  }
+  if (m.heldoutCount < PILOT_MIN_HELDOUT) {
+    failures.push(`heldout 空/过小:heldoutCount=${m.heldoutCount} < ${PILOT_MIN_HELDOUT}。`)
+  }
+  if (m.factsInBothSides !== 0) {
+    failures.push(`事实跨 fit/heldout 泄漏:factsInBothSides=${m.factsInBothSides}(须 0)。`)
+  }
+  if (!(m.identity.ece > 0)) {
+    failures.push(`语料无可校误差:identity.ece=${m.identity.ece}(须 > 0),无东西可校、闭环无意义。`)
+  }
+  if (!(m.eceDrop > PILOT_MIN_ECE_DROP)) {
+    failures.push(
+      `g 未改善 ECE:eceDrop=${m.eceDrop}(须 > ${PILOT_MIN_ECE_DROP});identity ${m.identity.ece} → g ${m.calibrated.ece}。`,
+    )
+  }
+  return { passed: failures.length === 0, failures }
+}
+
+/** fail-loud 包装:不过即 throw(CLI 入口用,确保非零退出)。 */
+export function assertCalibrationPilotPass(usage: UsageStats, m: CalibrationMeasurement): void {
+  const r = checkCalibrationPilotPass(usage, m)
+  if (!r.passed) {
+    throw new Error(`[m2] 校准 pilot 未通过:\n  - ${r.failures.join('\n  - ')}`)
+  }
+}
+
 /** 读回真 usage 燃料 → measureFromSamples(按 fact 切分,真·样本外事实)。 */
 export async function fitAndMeasure(
   db: DB,
@@ -305,22 +364,22 @@ export async function runCalibrationPilot(
   }
 
   const measurement = await fitAndMeasure(db, opts)
-  // round-trip sanity:核准 collectUsageCalibrationSamples(生产校准取样口径)与本地读回样本数一致。
+  // round-trip sanity:核准 collectUsageCalibrationSamples(生产校准取样口径,按身份去重)读回。
   const persisted = await collectUsageCalibrationSamples(db, [CALIBRATION_IDENTITY])
 
-  // 覆盖一致性 tie 回「丢弃之前」的口径:promoted facts ⇒ usage ⇒ 测量 ⇒ SPI 读回,全链等宽。
-  // 现有 persisted === measurement.totalSamples 这条互校无效(两条读回口径都在丢弃之后,miss 让两者同步缩水);
-  // 必须把存活样本数钉回 seed.promoted(丢弃之前),本语料一 fact 一 usage ⇒ 四者是精确等式、不需阈值。
-  if (
-    usage.usageRows !== seed.promoted ||
-    measurement.totalSamples !== usage.usageRows ||
-    persisted.length !== usage.usageRows
-  ) {
+  // 覆盖一致性:本 pilot 每 fact 一条 usage、每条 (byRole,taskId) 唯一 ⇒ 生产取样器去重后应仍等于 usageRows。
+  // 这条 tie 的是「丢弃之前」的覆盖完整性(无 miss、无写入缺口),与上面 recall 硬门互补。
+  // **不**再断言 totalSamples(collectFactSamples 原始行读回、不去重)等于 persisted——两者口径不同,
+  // EGR-CR-030 后最新 corrected/partial 会让 persisted 折叠缩水,钉死等式在健康数据上会误伤(见 checkCalibrationPilotPass 注释)。
+  if (persisted.length !== usage.usageRows) {
     throw new Error(
-      `[calibration-pilot] 样本覆盖不一致:promoted ${seed.promoted} / usageRows ${usage.usageRows} / ` +
-        `totalSamples ${measurement.totalSamples} / persisted ${persisted.length}(四者必须相等)。`,
+      `[calibration-pilot] 生产取样器读回 ${persisted.length} ≠ usage 行 ${usage.usageRows}:` +
+        `身份门控样本数与写入不一致(promoted ${seed.promoted})。`,
     )
   }
+
+  // 诊断门(fail-loud):样本不足 / heldout 空 / 无可校误差 / g 未改善 / 事实跨边 ⇒ 整条 throw,绝不伪装"跑通"。
+  assertCalibrationPilotPass(usage, measurement)
 
   return { seed, usage, measurement, persistedSamples: persisted.length }
 }

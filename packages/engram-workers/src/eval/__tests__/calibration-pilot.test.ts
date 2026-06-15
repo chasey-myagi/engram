@@ -20,9 +20,15 @@ import { createDb, makeFakeEmbedder, type DB, type Embedder } from '@engram/core
 
 import { buildCorpus, NUM_LEVELS } from '../calibration-pilot/corpus.js'
 import {
+  assertCalibrationPilotPass,
+  checkCalibrationPilotPass,
   measureFromSamples,
+  PILOT_MIN_HELDOUT,
+  PILOT_MIN_SAMPLES,
   runCalibrationPilot,
+  type CalibrationMeasurement,
   type FactSample,
+  type UsageStats,
 } from '../calibration-pilot/pilot.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
@@ -41,6 +47,10 @@ let pool: pg.Pool
 let db: DB
 let testDbName: string
 const embedder: Embedder = makeFakeEmbedder()
+
+// 由 ① 端到端跑出、供 R4(健康闭环不误伤)复用的真实健康输出。
+let healthyUsage: UsageStats | undefined
+let healthyMeasurement: CalibrationMeasurement | undefined
 
 beforeAll(async () => {
   testDbName = `engram_test_${randomUUID().replace(/-/g, '')}`
@@ -67,19 +77,23 @@ describe('M2 · 校准 pilot(g 拟合闭环:接地语料 → 真 recall+usage �
       heldoutEvery: 3,
     })
 
+    // R4 复用:把端到端健康输出存给纯判据测试(见 describe「pilot 通过门」)。
+    healthyUsage = usage
+    healthyMeasurement = measurement
+
     expect(seed.promoted).toBeGreaterThan(0)
     expect(usage.recallHits).toBeGreaterThan(0)
     expect(measurement.heldoutCount).toBeGreaterThan(0)
-    // 读回口径一致:本地读回样本数 = 生产校准取样器(collectUsageCalibrationSamples)所见。
-    expect(persistedSamples).toBe(measurement.totalSamples)
 
-    // 覆盖一致性:把存活样本数 tie 回「丢弃之前」的口径(promoted facts),而非两条丢弃后读回的互校。
-    // 本语料一 fact 一 usage(每 subject 唯一)⇒ promoted === usageRows === totalSamples === persisted 是可钉死的精确等式。
+    // 覆盖完整性 tie 回「丢弃之前」:零 miss、usage 写入无缺口、每 fact 一条 usage ⇒ usageRows === promoted。
     expect(usage.recallMisses).toBe(0) // 全命中:零 miss
     expect(usage.usageRows).toBe(usage.recallHits) // usage 写入无缺口
-    expect(usage.usageRows).toBe(seed.promoted) // 关键:tie 回「丢弃之前」的 promoted facts
-    expect(measurement.totalSamples).toBe(seed.promoted) // 测量集等宽于 promoted
-    expect(persistedSamples).toBe(seed.promoted) // SPI 读回等宽于 promoted
+    expect(usage.usageRows).toBe(seed.promoted) // tie 回「丢弃之前」的 promoted facts
+    // 生产取样器(按 (byRole,taskId) 去重)读回 = usageRows:本语料每条 usage 身份唯一 ⇒ 去重不缩水。
+    expect(persistedSamples).toBe(usage.usageRows)
+    // totalSamples(collectFactSamples 原始行读回、不去重)≥ persisted(去重后);**不**断言两者恒等——
+    // 口径不同(EGR-CR-030 后 corrected/partial 会让 persisted 折叠缩水),钉死等式会在语义变动时误伤。
+    expect(measurement.totalSamples).toBeGreaterThanOrEqual(persistedSamples)
 
     // 结构性 sanity(本语料一 fact 一 usage ⇒ 恒 0,非硬泛化证据);真泛化的实证是下面 ECE 在**同档不同事实**上下降。
     expect(measurement.factsInBothSides).toBe(0)
@@ -155,4 +169,79 @@ describe('M2 · 校准 pilot(g 拟合闭环:接地语料 → 真 recall+usage �
       runCalibrationPilot(db, embedderWithForcedMiss, { heldoutEvery: 3 }),
     ).rejects.toThrow(/recall 未覆盖|recallMisses|覆盖不一致|recall 命中/)
   }, 120_000)
+})
+
+/**
+ * #117(EGR-CR-042)的核心回归:pilot 的 pass-gate(checkCalibrationPilotPass / assertCalibrationPilotPass)。
+ * 纯判据、零 DB ⇒ 不依赖上面的 beforeAll 建库,直接喂构造数据。守三种退化必拒(样本不足 / heldout 空 / ECE 未改善)
+ * + 健康闭环不误伤 + fail-loud 包装在失败时 throw。这是把 run.ts「无条件打印跑通 ✓ + 退出 0」堵成可拦截的诊断门。
+ */
+describe('#117 · pilot 通过门(纯判据:样本不足 / heldout 空 / ECE 未改善 ⇒ 拒;健康闭环 ⇒ 过)', () => {
+  // recall 全命中、无东西可校时的占位 usage(R1/R2/R3 不经真 recall,只测纯判据)。
+  const usageOk: UsageStats = { recallHits: 100, recallMisses: 0, usageRows: 100 }
+
+  it('R1 · 空样本 ⇒ 判据不通过(样本不足 + heldout 空)', () => {
+    const m = measureFromSamples([], { heldoutEvery: 3 })
+    expect(m.totalSamples).toBe(0)
+    expect(m.heldoutCount).toBe(0)
+    // recall 全漏:无 usage 燃料。
+    const noUsage: UsageStats = { recallHits: 0, recallMisses: 0, usageRows: 0 }
+    const r = checkCalibrationPilotPass(noUsage, m)
+    expect(r.passed).toBe(false)
+    // 含样本不足与 heldout 空两项。
+    expect(r.failures.some((f) => f.includes('样本不足'))).toBe(true)
+    expect(r.failures.some((f) => f.includes('heldout'))).toBe(true)
+  })
+
+  it('R2 · heldout 过小(低于下限)⇒ 判据不通过', () => {
+    // splitByFact 的 index-0 恒落 heldout ⇒ 单 fact 时 heldout 非空、严格"=0"不可达;
+    // 用「多 fact + 大 heldoutEvery」让只有 1 个 fact 落 heldout(heldoutCount=1 < PILOT_MIN_HELDOUT)——
+    // 这正是判据 m.heldoutCount >= PILOT_MIN_HELDOUT 实际守的「heldout 空/过小」语义。
+    const samples: FactSample[] = []
+    for (let i = 0; i < 6; i++)
+      samples.push({ factId: `r2-${i}`, rawPredicted: 0.7, correct: i % 2 === 0 })
+    const m = measureFromSamples(samples, { heldoutEvery: 100 })
+    expect(m.heldoutCount).toBeLessThan(PILOT_MIN_HELDOUT)
+    const r = checkCalibrationPilotPass(usageOk, m)
+    expect(r.passed).toBe(false)
+    expect(r.failures.some((f) => f.includes('heldout'))).toBe(true)
+  })
+
+  it('R3 · ECE 未改善(良校准输入,g 不压 ECE)⇒ 判据不通过', () => {
+    // 复用测试 ③ 的「良校准输入」构造:5 档 × 20,每档 k=round(raw·20) 正确 ⇒ eceDrop≈0。
+    const samples: FactSample[] = []
+    let fid = 0
+    for (const raw of [0.5, 0.6, 0.7, 0.8, 0.9]) {
+      const n = 20
+      const k = Math.round(raw * n)
+      for (let i = 0; i < n; i++)
+        samples.push({ factId: `r3-${fid++}`, rawPredicted: raw, correct: i < k })
+    }
+    const m = measureFromSamples(samples, { heldoutEvery: 3 })
+    // 样本/heldout 都够(只让 ECE 项触发,证明判据精确指向「g 未改善」而非被别的项盖过)。
+    expect(m.totalSamples).toBeGreaterThanOrEqual(PILOT_MIN_SAMPLES)
+    expect(m.heldoutCount).toBeGreaterThanOrEqual(PILOT_MIN_HELDOUT)
+    expect(m.eceDrop).toBeLessThanOrEqual(0) // g 没把 ECE 压下(良校准输入)
+    const r = checkCalibrationPilotPass(usageOk, m)
+    expect(r.passed).toBe(false)
+    expect(r.failures.some((f) => f.includes('未改善'))).toBe(true)
+  })
+
+  it('R4 · 健康闭环 ⇒ 判据通过(不误伤)', () => {
+    // 复用 ① 端到端跑出的真实健康输出(真 recall + 真泛化 + eceDrop>0)。
+    expect(healthyUsage, 'R4 依赖测试 ① 先跑出健康输出').toBeDefined()
+    expect(healthyMeasurement).toBeDefined()
+    const r = checkCalibrationPilotPass(healthyUsage!, healthyMeasurement!)
+    expect(r.failures).toEqual([])
+    expect(r.passed).toBe(true)
+  })
+
+  it('R5 · assertCalibrationPilotPass:失败即 throw、健康不 throw', () => {
+    const empty = measureFromSamples([], { heldoutEvery: 3 })
+    const noUsage: UsageStats = { recallHits: 0, recallMisses: 0, usageRows: 0 }
+    expect(() => assertCalibrationPilotPass(noUsage, empty)).toThrow(/未通过|未改善|样本/)
+    // 健康数据不该 throw(对应 run.ts:assert 后才打印「跑通 ✓」的链路)。
+    expect(healthyMeasurement, 'R5 依赖测试 ① 先跑出健康输出').toBeDefined()
+    expect(() => assertCalibrationPilotPass(healthyUsage!, healthyMeasurement!)).not.toThrow()
+  })
 })
