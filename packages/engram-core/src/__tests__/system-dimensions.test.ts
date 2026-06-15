@@ -517,4 +517,36 @@ describe('S30 L3 system dimensions (substrate-ready 7) — append-only events th
     ).rows
     expect(claimRows[0]!.count).toBe('0')
   })
+
+  // ── EGR-CR-054 (#129): computeSystemDimensions 入口须 fail-loud 拒非正/非整数 k ──
+  // 根因两层区分：本组测的是**入口 k 守卫**（`k must be a positive integer`），与上面 453-462
+  // 的**下游 [0,1] 守卫**（`must be in [0,1]`）是两层，不可互相替代。非法 k 必须在任何 recall /
+  // 计算 / 落库发生前抛出，从根上消除「recall 静默回退 50 ↔ P@k 分母用原始 k」的脑裂与半批写入。
+  it('rejects non-positive / non-integer k at the entry (k=0/-1/0.5/NaN all fail-loud)', async () => {
+    // 任意合法 golden（最小夹具即可触发入口校验，无需真 DB 命中）。
+    const golden = [{ id: 'kguard', query: 'anything', expectedClaimTexts: ['x'] }] as const
+    for (const badK of [0, -1, 0.5, Number.NaN]) {
+      await expect(computeSystemDimensions(db, embedder, { golden, k: badK })).rejects.toThrow(
+        /k must be a positive integer/,
+      )
+    }
+  })
+
+  it('does NOT misfire on the smallest legal k=1 nor the default path (guard is k<=0, not k<1; no off-by-one)', async () => {
+    const golden = [{ id: 'kguard', query: 'anything', expectedClaimTexts: ['x'] }] as const
+    // k=1 是最小合法正整数 → 必须正常返回（证明守卫是 `k <= 0` 而非误写成 `k < 1`）。
+    await expect(computeSystemDimensions(db, embedder, { golden, k: 1 })).resolves.toBeDefined()
+    // 默认路径（不传 k → DEFAULT_K=5）不受影响。
+    await expect(computeSystemDimensions(db, embedder, { golden })).resolves.toBeDefined()
+  })
+
+  it('illegal k writes ZERO dimension_events rows (fail-loud before any record, not half-batch)', async () => {
+    // k=0 是最危险支：下游 [0,1] 守卫拦不住（precision 被算成合法的 0），未修前会把 6 个维度静默落库。
+    const runId = 'egr-cr-054-no-half-batch'
+    await expect(runSystemDimensions(db, embedder, runId, { k: 0 })).rejects.toThrow(
+      /k must be a positive integer/,
+    )
+    const rows = await getDimensionEvents(db, { runId })
+    expect(rows).toHaveLength(0) // 半批也不允许：入口抛出在任何 recordDimension 之前
+  })
 })
