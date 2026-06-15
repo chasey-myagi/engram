@@ -18,7 +18,7 @@ import pg from 'pg'
 
 import { createDb, makeDashScopeEmbedder } from '@engram/core'
 
-import { renderReliability, runCalibrationPilot } from './pilot.js'
+import { assertCalibrationPilotPass, renderReliability, runCalibrationPilot } from './pilot.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
 const migrationsFolder = join(
@@ -85,6 +85,9 @@ async function main(): Promise<void> {
     console.log(
       `\n  ★ ECE: identity ${measurement.identity.ece.toFixed(4)} → g ${measurement.calibrated.ece.toFixed(4)}  (降 ${measurement.eceDrop.toFixed(4)}, ${measurement.eceDrop > 0 ? '✓ g 把校准误差压下了' : '✗ 未改善'})`,
     )
+    // 结果门:样本不足/heldout 空/g 未压 ECE 等诊断失败 ⇒ throw → main().catch → process.exitCode=1。
+    // 不过即抛,绝不把诊断失败伪装成"跑通 ✓ + 退出 0"。
+    assertCalibrationPilotPass(usage, measurement)
     console.log('\n[m2] 校准 pilot 跑通 ✓')
   } finally {
     if (pool) await pool.end()
