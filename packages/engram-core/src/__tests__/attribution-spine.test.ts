@@ -159,25 +159,28 @@ describe('S31 attribution spine — SINGLE-LOOP deterministic failure attributio
     expect(a.responsibleLoop).toBe(RESPONSIBLE_LOOP.verifierMiss)
   })
 
-  it('class 3 — Arbiter mis-adjudicate: a grounded failure that was the LOSER of a resolved conflict → arbiter_mis_adjudicate', async () => {
-    const loser = await seedClaim('gamma answer three', 'gamma question three', {
+  it('class 3 — Arbiter mis-adjudicate: a grounded failure that was the WINNER of a resolved conflict → arbiter_mis_adjudicate', async () => {
+    // EGR-CR-057 polarity: for a reflux failure, the failed claim is the one usage truth proved wrong.
+    // "Arbiter mis-adjudicate" means the Arbiter crowned the WRONG claim as winner — so the failed
+    // (refuted) claim having been the conflict WINNER is the mis-adjudication, NOT it having lost.
+    const wrongWinner = await seedClaim('gamma answer three', 'gamma question three', {
       relevance: 'exact',
     })
-    const winner = await seedClaim('gamma rival three', 'gamma rival three', { relevance: 'exact' })
-    // Arbiter resolved the conflict picking `winner`; `loser` lost — yet `loser` is the failed (refuted) claim ⇒ wrong winner.
+    const rival = await seedClaim('gamma rival three', 'gamma rival three', { relevance: 'exact' })
+    // Arbiter resolved the conflict crowning `wrongWinner`; usage truth later refutes it ⇒ wrong winner.
     await resolveConflict(db, {
-      a: loser,
-      b: winner,
+      a: wrongWinner,
+      b: rival,
       adjudication: {
         outcome: 'winner',
-        winnerId: winner,
-        loserId: loser,
+        winnerId: wrongWinner,
+        loserId: rival,
         rung: 'authority',
         reason: 'test',
       },
       byRole: 'agent:arbiter',
     })
-    const refId = await refluxOne(loser, 'gamma question three')
+    const refId = await refluxOne(wrongWinner, 'gamma question three')
     const a = await attributeFailure(db, { kind: 'reflux_regression', regressionId: refId })
     expect(a.responsibleLoop).toBe(RESPONSIBLE_LOOP.arbiterMisAdjudicate)
   })
@@ -195,6 +198,61 @@ describe('S31 attribution spine — SINGLE-LOOP deterministic failure attributio
     expect(a.responsibleLoop).toBe(RESPONSIBLE_LOOP.calibrationDrift)
   })
 
+  // ── EGR-CR-057: reflux winner/loser polarity (a refluxed failure claim is the one usage truth proved WRONG) ──
+
+  it('EGR-CR-057 — reflux failure claim that was the conflict LOSER does NOT attribute to Arbiter (the Arbiter ruled it down correctly)', async () => {
+    // The Arbiter correctly ruled the wrong claim down; that is NOT a mis-adjudication. The failure must
+    // fall through to the downstream catch-all (here verifier_miss), NOT arbiter_mis_adjudicate.
+    const loser = await seedClaim('cr057 loser answer', 'cr057 loser question', {
+      relevance: 'exact', // grounded ⇒ excludes distiller_mis_extract
+    })
+    const winner = await seedClaim('cr057 winner answer', 'cr057 winner rival', {
+      relevance: 'exact',
+    })
+    await resolveConflict(db, {
+      a: loser,
+      b: winner,
+      adjudication: {
+        outcome: 'winner',
+        winnerId: winner,
+        loserId: loser, // Arbiter correctly ruled the (to-be-refuted) claim the loser
+        rung: 'authority',
+        reason: 'test',
+      },
+      byRole: 'agent:arbiter',
+    })
+    // deliberately NOT patrolled ⇒ the catch-all lands on verifier_miss (sharper assertion)
+    const refId = await refluxOne(loser, 'cr057 loser question')
+    const a = await attributeFailure(db, { kind: 'reflux_regression', regressionId: refId })
+    expect(a.responsibleLoop).not.toBe(RESPONSIBLE_LOOP.arbiterMisAdjudicate)
+    expect(a.candidates).not.toContain(RESPONSIBLE_LOOP.arbiterMisAdjudicate)
+    expect(a.responsibleLoop).toBe(RESPONSIBLE_LOOP.verifierMiss)
+  })
+
+  it('EGR-CR-057 — reflux failure claim that was the conflict WINNER attributes to Arbiter (it crowned the wrong winner)', async () => {
+    const wrongWinner = await seedClaim('cr057 ww answer', 'cr057 ww question', {
+      relevance: 'exact',
+    })
+    const rival = await seedClaim('cr057 ww rival', 'cr057 ww rival', { relevance: 'exact' })
+    await resolveConflict(db, {
+      a: wrongWinner,
+      b: rival,
+      adjudication: {
+        outcome: 'winner',
+        winnerId: wrongWinner, // Arbiter crowned the (to-be-refuted) claim as winner ⇒ mis-adjudicate
+        loserId: rival,
+        rung: 'authority',
+        reason: 'test',
+      },
+      byRole: 'agent:arbiter',
+    })
+    const refId = await refluxOne(wrongWinner, 'cr057 ww question')
+    const a = await attributeFailure(db, { kind: 'reflux_regression', regressionId: refId })
+    expect(a.responsibleLoop).toBe(RESPONSIBLE_LOOP.arbiterMisAdjudicate)
+    expect(a.candidates).toContain(RESPONSIBLE_LOOP.arbiterMisAdjudicate)
+    expect(a.claimId).toBe(wrongWinner)
+  })
+
   // ── EXACTLY-ONE is the gate: never zero, never multiple ──
 
   it('EXACTLY-ONE: every reflux failure resolves to a single responsible loop (never zero, never multiple)', async () => {
@@ -203,13 +261,15 @@ describe('S31 attribution spine — SINGLE-LOOP deterministic failure attributio
     const c2 = await seedClaim('e2', 'q2', { relevance: 'exact' })
     const c3 = await seedClaim('e3', 'q3', { relevance: 'exact' })
     const c3b = await seedClaim('e3b', 'q3b', { relevance: 'exact' })
+    // EGR-CR-057 polarity: the refluxed failure claim (c3) must be the conflict WINNER to exercise the
+    // arbiter_mis_adjudicate candidate (a refuted claim the Arbiter crowned = the wrong winner).
     await resolveConflict(db, {
       a: c3,
       b: c3b,
       adjudication: {
         outcome: 'winner',
-        winnerId: c3b,
-        loserId: c3,
+        winnerId: c3,
+        loserId: c3b,
         rung: 'authority',
         reason: 'r',
       },
@@ -240,8 +300,9 @@ describe('S31 attribution spine — SINGLE-LOOP deterministic failure attributio
   })
 
   it('TIE-BREAK precedence: a claim hitting MULTIPLE root-causes still resolves to exactly ONE via the deterministic table', async () => {
-    // a claim that is BOTH mis-aligned (tangential only) AND an adjudicated loser AND never patrolled:
-    // three candidates fire, but precedence ⇒ distiller_mis_extract (the most specific upstream root) wins, alone.
+    // a claim that is BOTH mis-aligned (tangential only) AND an adjudicated WINNER (EGR-CR-057 polarity:
+    // the refuted claim the Arbiter crowned) AND never patrolled: three candidates fire, but precedence
+    // ⇒ distiller_mis_extract (the most specific upstream root) wins, alone.
     const multi = await seedClaim('multi answer', 'multi question', { relevance: 'tangential' })
     const rival = await seedClaim('multi rival', 'multi rival', { relevance: 'exact' })
     await resolveConflict(db, {
@@ -249,8 +310,8 @@ describe('S31 attribution spine — SINGLE-LOOP deterministic failure attributio
       b: rival,
       adjudication: {
         outcome: 'winner',
-        winnerId: rival,
-        loserId: multi,
+        winnerId: multi,
+        loserId: rival,
         rung: 'authority',
         reason: 'r',
       },
@@ -274,13 +335,14 @@ describe('S31 attribution spine — SINGLE-LOOP deterministic failure attributio
   it('DETERMINISTIC: the same logged failure → the same single responsible loop, every time (reproducible)', async () => {
     const multi = await seedClaim('det answer', 'det question', { relevance: 'tangential' })
     const rival = await seedClaim('det rival', 'det rival', { relevance: 'exact' })
+    // EGR-CR-057 polarity: refluxed failure claim (multi) is the conflict WINNER (the wrong winner).
     await resolveConflict(db, {
       a: multi,
       b: rival,
       adjudication: {
         outcome: 'winner',
-        winnerId: rival,
-        loserId: multi,
+        winnerId: multi,
+        loserId: rival,
         rung: 'authority',
         reason: 'r',
       },
@@ -384,6 +446,75 @@ describe('S31 attribution spine — SINGLE-LOOP deterministic failure attributio
     // mis-aligned claim ⇒ distiller_mis_extract, single loop
     expect(a.responsibleLoop).toBe(RESPONSIBLE_LOOP.distillerMisExtract)
     expect(a.claimId).toBe(c)
+  })
+
+  it('EGR-CR-057 — human-overturn polarity is OPPOSITE to reflux: an un_quarantined claim that was a conflict LOSER attributes to Arbiter', async () => {
+    // A mis-quarantined claim is a GOOD claim the agent wrongly suppressed. For it, "Arbiter mis-adjudicate"
+    // means the Arbiter wrongly ruled this good claim DOWN (loser) — so the human_overturn polarity is 'lost',
+    // the exact opposite of reflux's 'won'. This is why one wasAdjudicatedLoser() cannot cover all sources.
+    const good = await seedClaim('hq-loser answer', 'hq-loser question', { relevance: 'exact' })
+    const winner = await seedClaim('hq-loser rival', 'hq-loser rival', { relevance: 'exact' })
+    await resolveConflict(db, {
+      a: good,
+      b: winner,
+      adjudication: {
+        outcome: 'winner',
+        winnerId: winner,
+        loserId: good, // Arbiter ruled the GOOD claim down ⇒ mis-adjudicate (human had to un-quarantine it)
+        rung: 'authority',
+        reason: 'test',
+      },
+      byRole: 'agent:arbiter',
+    })
+    const { eventId } = await recordHumanOverturn(db, {
+      overturn: 'un_quarantine',
+      claimId: good,
+      fromStatus: 'quarantined',
+      toStatus: 'active',
+      byRole: 'human:editor',
+    })
+    const a = await attributeFailure(db, {
+      kind: 'human_overturn_mis_quarantine',
+      overturnEventId: eventId,
+    })
+    // grounded + adjudicated LOSER ⇒ arbiter_mis_adjudicate (polarity 'lost', opposite of reflux)
+    expect(a.responsibleLoop).toBe(RESPONSIBLE_LOOP.arbiterMisAdjudicate)
+    expect(a.candidates).toContain(RESPONSIBLE_LOOP.arbiterMisAdjudicate)
+    expect(a.claimId).toBe(good)
+  })
+
+  it('EGR-CR-057 — human-overturn does NOT attribute to Arbiter when the un_quarantined claim was a conflict WINNER (opposite polarity to reflux)', async () => {
+    // Mirror image: a good claim that happened to have WON a conflict is NOT an Arbiter mis-adjudication
+    // for the human_overturn source (under 'lost' polarity it must have lost). Grounded + never patrolled
+    // ⇒ falls through to verifier_miss, NOT arbiter.
+    const good = await seedClaim('hq-winner answer', 'hq-winner question', { relevance: 'exact' })
+    const rival = await seedClaim('hq-winner rival', 'hq-winner rival', { relevance: 'exact' })
+    await resolveConflict(db, {
+      a: good,
+      b: rival,
+      adjudication: {
+        outcome: 'winner',
+        winnerId: good,
+        loserId: rival,
+        rung: 'authority',
+        reason: 'test',
+      },
+      byRole: 'agent:arbiter',
+    })
+    const { eventId } = await recordHumanOverturn(db, {
+      overturn: 'un_quarantine',
+      claimId: good,
+      fromStatus: 'quarantined',
+      toStatus: 'active',
+      byRole: 'human:editor',
+    })
+    const a = await attributeFailure(db, {
+      kind: 'human_overturn_mis_quarantine',
+      overturnEventId: eventId,
+    })
+    expect(a.responsibleLoop).not.toBe(RESPONSIBLE_LOOP.arbiterMisAdjudicate)
+    expect(a.candidates).not.toContain(RESPONSIBLE_LOOP.arbiterMisAdjudicate)
+    expect(a.responsibleLoop).toBe(RESPONSIBLE_LOOP.verifierMiss)
   })
 
   it('human-overturn: a non-un_quarantine overturn (e.g. pardon) is rejected (only mis-quarantine is this failure)', async () => {
