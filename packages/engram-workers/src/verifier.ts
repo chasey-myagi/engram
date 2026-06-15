@@ -21,9 +21,10 @@
  */
 import {
   assertNcExactEvidence,
+  getActiveStandards,
   getSource,
   halfLifeDaysForKind,
-  transitionClaim,
+  transitionClaimInTx,
   writePatrolVerdict,
   markPatrolVerdictRefused,
   schema,
@@ -32,6 +33,8 @@ import {
   type EntailmentJudge,
   type EntailmentVerdict,
   type PatrolVerdict,
+  type Standards,
+  type Tx,
 } from '@engram/core'
 import { and, desc, eq, inArray, ne, or } from 'drizzle-orm'
 
@@ -226,7 +229,8 @@ const NO_OP: TransitionResult = { transition: null, refused: null }
  *   - **仅时效**驱动的收紧（entailment pass 但 stale）也不过闸门：时效衰减不是「判 claim 为负」。
  */
 async function applyTransition(
-  db: DB,
+  tx: Tx,
+  std: Standards,
   c: CandidateClaim,
   entailment: EntailmentVerdict,
   stale: boolean,
@@ -241,15 +245,28 @@ async function applyTransition(
   const tighten = entailment === 'fail' || counterAssertion || stale
 
   if (c.status === 'draft') {
-    // draft：只有 entailment pass 才尝试晋升（真 entailmentPass 生产者，闭合 S13 合成桩）。conf<0.5 由 transitionClaim 拒（仍 draft）。
+    // draft：只有 entailment pass 才尝试晋升（真 entailmentPass 生产者，闭合 S13 合成桩）。conf<0.5 由晋升门拒（仍 draft）。
     // entailment fail 的 draft 不能 draft→flagged（A.4 非法）；留 draft 影子区，下轮再巡或交人。
     if (!supported) return NO_OP
+    // EGR-CR-045：晋升失败分两类，需分开处置以维持「业务不晋升」与「DB 故障」语义：
+    //   ① 晋升门拦下（conf<0.5 / entailment 未过）= 业务上的**正常不晋升**。transitionClaimInTx 在 tx.update **之前**
+    //      抛 'blocked' 文案错误、未写入任何东西 → 吞成 NO_OP，让本事务里已写的 patrol 正常提交（与修前同语义：
+    //      巡查判 pass 但 conf 不够，留 draft、下轮再来；patrol 有效落地、计入 patrolled）。
+    //   ② 真 DB 故障（并发 FOR UPDATE 冲突、calibration map 缺失、tx.update 抖动）= 让它**冒泡**到循环体的
+    //      db.transaction，整事务回滚（patrol 一并回滚、不留孤儿）→ 外层记 skipped、下轮重试。
     try {
-      const t = await transitionClaim(db, c.id, 'active', { by: byRole, entailmentPass: true })
+      const t = await transitionClaimInTx(
+        tx,
+        c.id,
+        'active',
+        { by: byRole, entailmentPass: true },
+        std,
+      )
       return { transition: t, refused: null }
-    } catch {
-      // conf 未达门 / 并发已被改动 → 维持 draft，下轮再来（不崩）。
-      return NO_OP
+    } catch (err) {
+      // 仅吞晋升门拦下（'blocked'）：它在写库前抛、是正常不晋升。其余（DB 故障）重抛 → 触发整事务回滚（无孤儿 patrol）。
+      if (err instanceof Error && err.message.includes('blocked')) return NO_OP
+      throw err
     }
   }
 
@@ -261,7 +278,7 @@ async function applyTransition(
   // 反向证据在**矛盾对端 peer**上：peer 无 exact / 无 peer（null）则拒判 + 升级主编，收紧不落。
   // fail（缺支撑 flag）与仅时效（衰减）不过闸门：它们不是「反向命题判负」。
   if (counterAssertion) {
-    const gate = await assertNcExactEvidence(db, {
+    const gate = await assertNcExactEvidence(tx, {
       ruledAgainstClaimId: c.id,
       reverseEvidenceClaimId: contradictingPeerId, // 反向命题在矛盾对端；无对端 → null → 闸门拒判升级人
       rulingKind: 'refuted',
@@ -269,14 +286,14 @@ async function applyTransition(
       byRole,
     })
     if (!gate.ok) {
-      // 拒判：收紧不落，升级主编（事件已由闸门写）。红线#3：拿不到对端 exact 反向证据，无权把 claim 判 refuted。
+      // 拒判：收紧不落，升级主编（事件已由闸门同事务写）。红线#3：拿不到对端 exact 反向证据，无权把 claim 判 refuted。
       return { transition: null, refused: { eventId: gate.eventId, exactCount: gate.exactCount } }
     }
   }
 
   // 闸门放行（not_co_true 有对端 exact）/ fail / 仅时效 → 落收紧：active→flagged / flagged→quarantined。
   const to: schema.ClaimStatus = c.status === 'active' ? 'flagged' : 'quarantined'
-  const t = await transitionClaim(db, c.id, to, { by: byRole })
+  const t = await transitionClaimInTx(tx, c.id, to, { by: byRole }, std)
   return { transition: t, refused: null }
 }
 
@@ -307,6 +324,16 @@ export async function runVerifier(
     })
   } catch {
     // 连候选都选不出（DB 抖动）→ 整轮跳过，下轮重试（不崩、不无限重试）。
+    return result
+  }
+
+  // EGR-CR-045：活动规范快照（draft→active 蓝边晋升 conf 判据用）。配置态、低争用，事务外读一次即可、
+  // 整轮各 claim 共用（对齐 HITL editor-action.ts 在事务外读 std 的式样）。选不出候选已上面短路，这里安全。
+  let std: Standards
+  try {
+    std = await getActiveStandards(deps.db)
+  } catch {
+    // 连规范都读不出（DB 抖动）→ 整轮跳过，下轮重试。
     return result
   }
 
@@ -356,30 +383,30 @@ export async function runVerifier(
         judgeVersion: deps.judge.version,
         ...(conflictsWith != null ? { conflictsWith } : {}),
       }
-      const { verificationId } = await writePatrolVerdict(deps.db, {
-        claimId: c.id,
-        byRole,
-        verdict,
-      })
-      result.patrolled += 1
 
-      // not_co_true 的反向证据落在矛盾对端 peer（conflictsWith）的 exact 出处上 —— 同一个 peer 既进 patrol 信号、
-      // 又作 NC-exact 闸门的 reverseEvidenceClaimId（绝不拿目标自身当反向证据）。fail/纯时效不需 peer（不过闸门）。
-      const { transition, refused } = await applyTransition(
-        deps.db,
-        c,
-        entailment,
-        stale,
-        byRole,
-        conflictsWith,
-      )
+      // EGR-CR-045 单事务原子绑定（对齐 HITL editor-action.ts 的式样）：把「写 patrol 裁决」「翻状态」
+      // 「NC-exact 拒判标记」绑进**同一个 db.transaction**——要么一起提交、要么一起回滚。
+      // 关键：transition 阶段任何 DB 故障（并发 FOR UPDATE 冲突 / calibration map 缺失 / DB 抖动）抛错 → 整事务回滚
+      // → 已写的 patrol 一并回滚、绝不留孤儿半裁决污染 f2/recall；外层 catch 仍记 skipped、下轮重试。
+      // result.* 的累加全部移到事务成功 resolve **之后**——回滚后计数不虚增，patrolled 与「是否真处置」一致。
+      const { transition, refused } = await deps.db.transaction(async (tx) => {
+        const { verificationId } = await writePatrolVerdict(tx, { claimId: c.id, byRole, verdict })
+        // not_co_true 的反向证据落在矛盾对端 peer（conflictsWith）的 exact 出处上 —— 同一个 peer 既进 patrol 信号、
+        // 又作 NC-exact 闸门的 reverseEvidenceClaimId（绝不拿目标自身当反向证据）。fail/纯时效不需 peer（不过闸门）。
+        const res = await applyTransition(tx, std, c, entailment, stale, byRole, conflictsWith)
+        if (res.refused) {
+          // EGR-CR-001：not_co_true 判负被 NC-exact 红线拒判（红线#3）。已落的那条 not_co_true patrol 行留作审计，
+          // 但标成非计分——否则读侧重算 f2 会把它当最新有效巡查、映射成 0，从置信度侧悄悄判负（绕过红线#3）。
+          // 同事务内标记：patrol + 拒判标记 + ruling_refused 升级事件一致落地，互不撕裂。
+          await markPatrolVerdictRefused(tx, verificationId)
+        }
+        return res
+      })
+
+      // 事务成功提交后才累加（回滚路径走 catch、不到这里）：patrolled 计数与「真处置」一致。
+      result.patrolled += 1
       if (transition) result.transitions += 1
-      if (refused) {
-        result.ncExactRefusals += 1
-        // EGR-CR-001：not_co_true 判负被 NC-exact 红线拒判（红线#3）。行 351 已落的那条 not_co_true patrol 行留作审计，
-        // 但标成非计分——否则读侧重算 f2 会把它当最新有效巡查、映射成 0，从置信度侧悄悄判负（绕过红线#3）。
-        await markPatrolVerdictRefused(deps.db, verificationId)
-      }
+      if (refused) result.ncExactRefusals += 1
       result.outcomes.push({
         claimId: c.id,
         entailment,

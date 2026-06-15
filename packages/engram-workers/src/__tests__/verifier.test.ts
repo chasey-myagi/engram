@@ -178,6 +178,36 @@ async function patrolRows(claimId: string) {
     )
 }
 
+/**
+ * 把 db 包成「事务内首个 .update() 抛错」的代理（照搬 core editor-actions.test.ts 的故障注入式样）：
+ * 模拟「patrol 裁决已写入、随后状态翻转那一步 DB 故障」。其余方法（select/insert、事务外 getActiveStandards）
+ * 原样透传（绑定到真实 db/tx，避免 this 丢失）。用于证明 Verifier 巡查的写 patrol + 翻状态是单事务原子。
+ */
+function dbThatThrowsOnUpdate(realDb: DB): DB {
+  const wrapTx = (tx: object): object =>
+    new Proxy(tx, {
+      get(t, p, r) {
+        if (p === 'update') {
+          return () => {
+            throw new Error('injected: DB fault during status update')
+          }
+        }
+        const v = Reflect.get(t, p, r)
+        return typeof v === 'function' ? v.bind(t) : v
+      },
+    })
+  return new Proxy(realDb, {
+    get(target, prop, receiver) {
+      if (prop === 'transaction') {
+        return (fn: (tx: unknown) => Promise<unknown>, ...rest: unknown[]) =>
+          (target as DB).transaction((tx) => fn(wrapTx(tx as object)), ...(rest as []))
+      }
+      const v = Reflect.get(target, prop, receiver)
+      return typeof v === 'function' ? v.bind(target) : v
+    },
+  }) as DB
+}
+
 describe('S17 Verifier worker (D3 patrol: 函数/统计 + 点状一次 LLM) — A.4/A.6/A.7', () => {
   it('hallucination: an unentailed active claim moves active→flagged with a {entailment:fail} patrol (by_role=verifier), and drops out of recall; exactly one LLM call', async () => {
     const { claimId } = await mkClaim({
@@ -563,5 +593,58 @@ describe('S17 Verifier worker (D3 patrol: 函数/统计 + 点状一次 LLM) — 
     expect(res.patrolled).toBe(1)
     expect(judge.callCount()).toBe(0)
     expect(await statusOf(claimId)).toBe('draft')
+  })
+
+  // EGR-CR-045 (#120) · 单事务原子性：写 patrol 裁决与状态迁移必须同事务，要么一起成功、要么一起回滚。
+  //   故障注入点 = 状态翻转那一步（事务内 claim.update 抛错），发生在 writePatrolVerdict 之后。
+  //   修前：patrol 用普通 deps.db 先落已 commit、迁移在独立事务里抛错 → 留下孤儿 fail patrol、不回滚、记 skipped；
+  //         孤儿 fail patrol 被 recall/promote 门实时读最新 patrol 喂 f2，把 f2 实时压成 0（污染检索可信度链路）。
+  //   修后：两步绑进同一 db.transaction，迁移抛错整事务回滚 → 无孤儿 patrol、状态不动、f2 不被污染；外层 catch 仍记 skipped、下轮重试。
+  it('EGR-CR-045: a fault during the status transition rolls back the WHOLE patrol — NO orphan scoring patrol, status untouched, recall f2 not polluted (active→flagged path)', async () => {
+    // recallable active claim with independent support so it clears the recall floor at neutral f2 either way —
+    // 这把判别点收窄到 f2：修前孤儿 fail 把 entailment 压 0，修后回滚后保持存档中性 0.5。
+    const { claimId } = await mkClaim({
+      status: 'active',
+      recallable: true,
+      claimText: 'orphan spec',
+      factors: { indepSupport: 1 },
+    })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'fail' }) // fail → 收紧迁移 active→flagged（走 claim.update）
+    const faultyDb = dbThatThrowsOnUpdate(db) // patrol 写入成功之后、transition 的 claim.update 抛错
+    const res = await runVerifier({ db: faultyDb, judge }) // 单条异常被吞、不外抛
+
+    // ① transition 失败后整事务回滚 → 无孤儿 patrol（修前会是 1）。
+    expect(await patrolRows(claimId)).toHaveLength(0)
+    // ② 状态未动。
+    expect(await statusOf(claimId)).toBe('active')
+    // ③ 计数与「未处置」一致：skipped 而非 patrolled（修前 patrolled 会是 1，与 skipped 自相矛盾）。
+    expect(res.skipped).toBe(1)
+    expect(res.patrolled).toBe(0)
+    expect(res.transitions).toBe(0)
+    // ④ claim 仍可召回，且其 f2 未被孤儿 fail 压成 0 —— 沿用存档中性 0.5（修前会被孤儿 fail patrol 实时压成 0）。
+    const hits = await recallClaims(db, embedder, 'orphan spec')
+    expect(hits.map((h) => h.claim.id)).toContain(claimId)
+    expect(hits.find((h) => h.claim.id === claimId)!.confidence.factors.entailment).toBe(0.5)
+  })
+
+  // EGR-CR-045 (#120) · draft 路径对称：promote 失败不留孤儿 pass patrol（台账 :1044 —— draft 拿到 pass 但晋升失败，
+  //   后续被最新 f2 当成"已巡查通过"）。draft 本不进 recall，重点是不留一条会污染下轮判读的孤儿 pass patrol。
+  it('EGR-CR-045: a fault during the draft→active promotion rolls back the patrol — NO orphan {entailment:pass} patrol, claim stays draft (draft path symmetry)', async () => {
+    // 对齐 draft→active 晋升用例的因子（authority1 + indepSupport0.75 + entailment0.5 → 配 pass 的 live-f2 过 0.5 门）。
+    const { claimId } = await mkClaim({
+      status: 'draft',
+      recallable: true,
+      claimText: 'orphan draft spec',
+      factors: { authority: 1, indepSupport: 0.75, entailment: 0.5 },
+    })
+    const judge = makeFakeEntailmentJudge({ verdictOf: () => 'pass' }) // pass → 走晋升的 claim.update
+    const faultyDb = dbThatThrowsOnUpdate(db) // patrol 写入成功之后、晋升的 claim.update 抛错
+    const res = await runVerifier({ db: faultyDb, judge })
+
+    expect(await patrolRows(claimId)).toHaveLength(0) // 无孤儿 pass patrol（修前会是 1）
+    expect(await statusOf(claimId)).toBe('draft') // 未晋升
+    expect(res.skipped).toBe(1)
+    expect(res.patrolled).toBe(0)
+    expect(res.transitions).toBe(0)
   })
 })

@@ -98,7 +98,7 @@ export async function countExactProvenances(q: Queryable, claimId: string): Prom
  *   - 传入 == ruledAgainstClaimId 是**契约误用**（claim 自身 exact 出处是支持它、绝非反对它）→ 直接抛，杜绝语义反转。
  */
 export async function assertNcExactEvidence(
-  db: DB,
+  db: Queryable,
   opts: {
     ruledAgainstClaimId: string
     /** 承载反向命题的对端 claim id；无从指认对端时传 null。**绝不**传 ruledAgainstClaimId 自身。 */
