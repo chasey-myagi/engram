@@ -250,6 +250,53 @@ export function measureFromSamples(
   }
 }
 
+/** pilot 通过门的最低阈值(起步基线,可调;与生产 acceptance-gate 解耦,仅约束本受控实验的"闭环成立"判据)。 */
+export const PILOT_MIN_SAMPLES = 30 // totalSamples 下限(受控语料 ~99,正常应远超)
+export const PILOT_MIN_HELDOUT = 5 // heldoutCount 下限(留出集不能空/过小)
+export const PILOT_MIN_ECE_DROP = 0 // eceDrop 严格 > 此值(g 必须真的把 ECE 压下)
+
+export interface PilotGateResult {
+  passed: boolean
+  /** 人类可读的未过项(每项一句,便于 CLI 打印 + 测试断言)。 */
+  failures: string[]
+}
+
+/**
+ * 纯判据:样本是否够、heldout 是否非空、无泄漏、语料确有可校误差、g 是否真改善。
+ * 供 run.ts(真端口)与测试复用——单一来源(DRY),让任何让样本/heldout/ECE 退化的回归都被同一门拦下。
+ */
+export function checkCalibrationPilotPass(
+  usage: UsageStats,
+  m: CalibrationMeasurement,
+): PilotGateResult {
+  const failures: string[] = []
+  if (usage.recallHits <= 0) {
+    failures.push(`recall 全漏(recallHits=${usage.recallHits}):无 usage 燃料`)
+  }
+  if (m.totalSamples < PILOT_MIN_SAMPLES) {
+    failures.push(`样本不足:totalSamples=${m.totalSamples} < ${PILOT_MIN_SAMPLES}`)
+  }
+  if (m.heldoutCount < PILOT_MIN_HELDOUT) {
+    failures.push(`heldout 空/过小:heldoutCount=${m.heldoutCount} < ${PILOT_MIN_HELDOUT}`)
+  }
+  if (m.factsInBothSides !== 0) {
+    failures.push(`事实跨边泄漏:factsInBothSides=${m.factsInBothSides}(须 0)`)
+  }
+  if (m.identity.ece <= 0) {
+    failures.push(`语料无可校误差:identity.ece=${m.identity.ece.toFixed(4)}(须 > 0)`)
+  }
+  if (m.eceDrop <= PILOT_MIN_ECE_DROP) {
+    failures.push(`g 未改善 ECE:eceDrop=${m.eceDrop.toFixed(4)}(须 > ${PILOT_MIN_ECE_DROP})`)
+  }
+  return { passed: failures.length === 0, failures }
+}
+
+/** fail-loud 包装:不过即 throw(CLI 入口用,确保非零退出)。 */
+export function assertCalibrationPilotPass(usage: UsageStats, m: CalibrationMeasurement): void {
+  const r = checkCalibrationPilotPass(usage, m)
+  if (!r.passed) throw new Error(`[m2] 校准 pilot 未通过:\n  - ${r.failures.join('\n  - ')}`)
+}
+
 /** 读回真 usage 燃料 → measureFromSamples(按 fact 切分,真·样本外事实)。 */
 export async function fitAndMeasure(
   db: DB,

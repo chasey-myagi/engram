@@ -20,9 +20,12 @@ import { createDb, makeFakeEmbedder, type DB, type Embedder } from '@engram/core
 
 import { buildCorpus, NUM_LEVELS } from '../calibration-pilot/corpus.js'
 import {
+  assertCalibrationPilotPass,
+  checkCalibrationPilotPass,
   measureFromSamples,
   runCalibrationPilot,
   type FactSample,
+  type UsageStats,
 } from '../calibration-pilot/pilot.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
@@ -154,5 +157,75 @@ describe('M2 · 校准 pilot(g 拟合闭环:接地语料 → 真 recall+usage �
     await expect(
       runCalibrationPilot(db, embedderWithForcedMiss, { heldoutEvery: 3 }),
     ).rejects.toThrow(/recall 未覆盖|recallMisses|覆盖不一致|recall 命中/)
+  }, 120_000)
+})
+
+/**
+ * pilot 结果门(fail-loud)回归:补齐缺失的失败路径(样本不足 / heldout 空 / ECE 未改善),
+ * 断言 checkCalibrationPilotPass 据实裁决、assertCalibrationPilotPass 在失败时 throw(对应 CLI 非零退出)。
+ * R1/R2/R3/R5 纯判据、无需 DB;R4 复用端到端健康输出守住"正常不误伤"。
+ */
+describe('M2 · 校准 pilot 结果门(fail-loud:诊断失败必须吵闹,不能伪装成"跑通 ✓")', () => {
+  const usageZero: UsageStats = { recallHits: 0, recallMisses: 0, usageRows: 0 }
+  const usageOk: UsageStats = { recallHits: 99, recallMisses: 0, usageRows: 99 }
+
+  it('R1 空样本 ⇒ 判据不通过(样本不足 + heldout 空)', () => {
+    const m = measureFromSamples([], { heldoutEvery: 3 })
+    expect(m.totalSamples).toBe(0)
+    expect(m.heldoutCount).toBe(0)
+
+    const r = checkCalibrationPilotPass(usageZero, m)
+    expect(r.passed).toBe(false)
+    expect(r.failures.some((f) => f.includes('样本不足'))).toBe(true)
+    expect(r.failures.some((f) => f.includes('heldout'))).toBe(true)
+  })
+
+  it('R2 heldout 空/过小(fact 太少)⇒ 判据不通过(heldout 项)', () => {
+    // splitByFact 把 index%heldoutEvery===0 的 fact 整组放 heldout。fact 太少 ⇒ heldout 子集过小(< PILOT_MIN_HELDOUT)。
+    // 三个不同 fact、heldoutEvery=3 ⇒ 仅 fact[0] 落 heldout ⇒ heldoutCount=1,远低于门。
+    const samples: FactSample[] = [
+      { factId: 'f-a', rawPredicted: 0.7, correct: true },
+      { factId: 'f-b', rawPredicted: 0.8, correct: false },
+      { factId: 'f-c', rawPredicted: 0.9, correct: true },
+    ]
+    const m = measureFromSamples(samples, { heldoutEvery: 3 })
+    expect(m.heldoutCount).toBeLessThan(5)
+    const r = checkCalibrationPilotPass(usageOk, m)
+    expect(r.passed).toBe(false)
+    expect(r.failures.some((f) => f.includes('heldout'))).toBe(true)
+  })
+
+  it('R3 ECE 未改善(良校准输入,eceDrop≈0)⇒ 判据不通过(g 未改善 ECE 项)', () => {
+    // 复用测试 ③ 的良校准构造:5 档 × 20,每档 k=round(raw·20) 正确 ⇒ 留出子集上 g 无东西可压、eceDrop≈0。
+    const samples: FactSample[] = []
+    let fid = 0
+    for (const raw of [0.5, 0.6, 0.7, 0.8, 0.9]) {
+      const n = 20
+      const k = Math.round(raw * n)
+      for (let i = 0; i < n; i++)
+        samples.push({ factId: `nc-${fid++}`, rawPredicted: raw, correct: i < k })
+    }
+    const m = measureFromSamples(samples, { heldoutEvery: 3 })
+    // 样本/heldout 充足,唯一未过项应是 eceDrop:把测试 ③ 的"静默通过 eceDrop≈0"反转成"门应拒"。
+    expect(m.totalSamples).toBeGreaterThanOrEqual(30)
+    expect(m.heldoutCount).toBeGreaterThanOrEqual(5)
+    const r = checkCalibrationPilotPass(usageOk, m)
+    expect(r.passed).toBe(false)
+    expect(r.failures.some((f) => f.includes('g 未改善 ECE'))).toBe(true)
+  })
+
+  it('R5 assertCalibrationPilotPass 在失败输入上 throw(CLI-level fail-loud)', () => {
+    const m = measureFromSamples([], { heldoutEvery: 3 })
+    expect(() => assertCalibrationPilotPass(usageZero, m)).toThrow(/未通过|未改善|样本/)
+  })
+})
+
+describe('M2 · 校准 pilot 结果门 · 健康闭环(端到端,需测试 DB)', () => {
+  it('R4 健康闭环 ⇒ 判据通过、failures 为空(守正常不误伤)', async () => {
+    const { usage, measurement } = await runCalibrationPilot(db, embedder, { heldoutEvery: 3 })
+    const r = checkCalibrationPilotPass(usage, measurement)
+    expect(r.failures).toEqual([])
+    expect(r.passed).toBe(true)
+    expect(() => assertCalibrationPilotPass(usage, measurement)).not.toThrow()
   }, 120_000)
 })
