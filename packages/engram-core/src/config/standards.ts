@@ -20,7 +20,7 @@ import {
   assertWeights,
   type FactorWeights,
 } from '../confidence/confidence.js'
-import type { DB } from '../db/client.js'
+import type { DB, Tx } from '../db/client.js'
 import { standards } from '../db/schema.js'
 
 export interface Standards {
@@ -76,17 +76,17 @@ function assertThresholds(consumeFloor: number, mustVerify: number): void {
 }
 
 /**
- * 设新规范（append-only）。校验权重 + 门限，违反即抛、不写。返回落库的新版本行。
- * 不重算任何历史 claim、不动任何已发快照——只影响此后的新召回请求。
+ * 在给定执行器（DB 或 Tx）上设新规范（append-only）。校验权重 + 门限（insert 前），违反即抛、不写。返回落库行。
+ * 抽出供 runGovernanceCycle 在「write-policy + raise-gate」同一事务内复用，保证两步跨表写原子。
  */
-export async function setStandards(db: DB, input: StandardsInput): Promise<StandardsRow> {
+export async function setStandardsTx(exec: DB | Tx, input: StandardsInput): Promise<StandardsRow> {
   assertWeights(input.factorWeights) // 各≥0 / 0<Σw≤1 / authority>0
   const consumeFloor = input.consumeFloor ?? KERNEL_CONFIDENCE_FLOOR
   const mustVerifyThreshold = input.mustVerifyThreshold ?? MUST_VERIFY_THRESHOLD
   assertThresholds(consumeFloor, mustVerifyThreshold)
 
   const id = randomUUID()
-  const rows = await db
+  const rows = await exec
     .insert(standards)
     .values({
       id,
@@ -107,9 +107,17 @@ export async function setStandards(db: DB, input: StandardsInput): Promise<Stand
   }
 }
 
-/** 活动规范 = created_at 最新一行（平手按 id 倒序）；表空则内置默认。 */
-export async function getActiveStandards(db: DB): Promise<Standards> {
-  const rows = await db
+/**
+ * 设新规范（append-only）。校验权重 + 门限，违反即抛、不写。返回落库的新版本行。
+ * 不重算任何历史 claim、不动任何已发快照——只影响此后的新召回请求。单写本就原子，薄包装 setStandardsTx。
+ */
+export async function setStandards(db: DB, input: StandardsInput): Promise<StandardsRow> {
+  return setStandardsTx(db, input)
+}
+
+/** 活动规范 = created_at 最新一行（平手按 id 倒序）；表空则内置默认。接 DB 或 Tx（供事务内一致快照读）。 */
+export async function getActiveStandards(exec: DB | Tx): Promise<Standards> {
+  const rows = await exec
     .select({
       factorWeights: standards.factorWeights,
       consumeFloor: standards.consumeFloor,

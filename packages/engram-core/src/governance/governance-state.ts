@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto'
 
 import { desc, eq } from 'drizzle-orm'
 
-import type { DB } from '../db/client.js'
+import type { DB, Tx } from '../db/client.js'
 import { governanceState } from '../db/schema.js'
 import { BASELINE_POLICY, type GovernanceMetrics, type GovernancePolicy } from './control-law.js'
 
@@ -50,13 +50,16 @@ function toRow(r: typeof governanceState.$inferSelect): GovernanceStateRow {
   }
 }
 
-/** 落一行新策略版本（append-only）。返回落库行。 */
-export async function writeGovernanceState(
-  db: DB,
+/**
+ * 在给定执行器（DB 或 Tx）上落一行新策略版本（append-only）。返回落库行。
+ * 抽出供 runGovernanceCycle 在「write-policy + raise-gate」同一事务内复用，保证两步跨表写原子。
+ */
+export async function writeGovernanceStateTx(
+  exec: DB | Tx,
   input: WriteGovernanceStateInput,
 ): Promise<GovernanceStateRow> {
   const id = randomUUID()
-  const rows = await db
+  const rows = await exec
     .insert(governanceState)
     .values({
       id,
@@ -70,6 +73,14 @@ export async function writeGovernanceState(
     })
     .returning()
   return toRow(rows[0]!)
+}
+
+/** 落一行新策略版本（append-only）。返回落库行。单写本就原子，薄包装 writeGovernanceStateTx。 */
+export async function writeGovernanceState(
+  db: DB,
+  input: WriteGovernanceStateInput,
+): Promise<GovernanceStateRow> {
+  return writeGovernanceStateTx(db, input)
 }
 
 /** 活动策略 = createdAt 最新一行（平手按 id 倒序）；表空则 BASELINE_POLICY。 */

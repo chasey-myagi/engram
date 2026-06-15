@@ -19,7 +19,13 @@ import {
 } from '../confidence/confidence.js'
 import { getActiveStandards, setStandards } from '../config/standards.js'
 import { createDb, type DB } from '../db/client.js'
-import { claim, claimProvenance, governanceState, type ClaimStatus } from '../db/schema.js'
+import {
+  claim,
+  claimProvenance,
+  governanceState,
+  standards,
+  type ClaimStatus,
+} from '../db/schema.js'
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { addSource } from '../spi/append-claim.js'
 import { recallClaims } from '../spi/recall-claims.js'
@@ -38,6 +44,7 @@ import {
   readConflictQueueDepth,
   readImmuneLag,
   readFalseQuarantineRate,
+  gateThresholdsFor,
   BASELINE_POLICY,
   type MetricReaders,
   type MetricRead,
@@ -392,6 +399,114 @@ describe('S26 governance — gate tightening respects S7 invariants + frozen sna
     expect(before!.confidence.value).toBeCloseTo(0.525, 6)
     // a NEW recall now drops the 0.525 claim (below the raised floor)
     expect(await recallClaims(db, embedder, 'engram frozen snapshot demo')).toHaveLength(0)
+  })
+})
+
+/**
+ * 把 db 包成「事务内对某张表的 .insert() 抛错」的代理：模拟 runGovernanceCycle 单事务里某一步 DB 故障，
+ * 其余方法（含事务外读、另一张表的 insert）原样透传（绑回真实 db/tx，避免 this 丢失）。
+ * 用于证明 write-policy + raise-gate 是单事务原子：任一 insert 失败 → 整轮回滚、无半提交行。
+ * 仿 editor-actions.test.ts:543-566 的 dbThatThrowsOnUpdate Proxy 故障注入范式，注入点改为事务内对目标表的 insert。
+ */
+function dbThatThrowsOnInsertInto(realDb: DB, faultTable: object, message: string): DB {
+  const wrapTx = (tx: object): object =>
+    new Proxy(tx, {
+      get(t, p, r) {
+        if (p === 'insert') {
+          const realInsert = Reflect.get(t, p, r) as (table: unknown) => unknown
+          return (table: unknown) => {
+            if (table === faultTable) {
+              throw new Error(message)
+            }
+            return realInsert.call(t, table)
+          }
+        }
+        const v = Reflect.get(t, p, r)
+        return typeof v === 'function' ? v.bind(t) : v
+      },
+    })
+  return new Proxy(realDb, {
+    get(target, prop, receiver) {
+      if (prop === 'transaction') {
+        return (fn: (tx: unknown) => Promise<unknown>, ...rest: unknown[]) =>
+          (target as DB).transaction((tx) => fn(wrapTx(tx as object)), ...(rest as []))
+      }
+      const v = Reflect.get(target, prop, receiver)
+      return typeof v === 'function' ? v.bind(target) : v
+    },
+  }) as DB
+}
+
+/** 构造一个会让控制器抬严 D2 门的局面：5 条 claim 各带一个 fail 巡检判定 → entail-reject 高 → promotionGateLevel 抬升。 */
+async function seedGateTighteningPressure(): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    const id = await seedClaim({})
+    await writePatrolVerdict(db, {
+      claimId: id,
+      byRole: 'agent:verifier',
+      verdict: { entailment: 'fail' },
+    })
+  }
+}
+
+describe('S26 governance — cycle is atomic: write-policy + raise-gate share one transaction (EGR-CR-033)', () => {
+  it('state write succeeds but standards write throws → NO half-committed policy row, baseline untouched', async () => {
+    await seedGateTighteningPressure()
+    // 前置自检：无故障注入时这一局面确实会走到 setStandards（raisedGate=true），否则故障注入打不到本 bug 窗口。
+    const baselineStandards = await getActiveStandards(db)
+    expect(baselineStandards.consumeFloor).toBe(KERNEL_CONFIDENCE_FLOOR)
+    expect(await getActivePolicy(db)).toEqual(BASELINE_POLICY)
+
+    // 注入：事务内对 standards 表的 insert 抛错（governance_state 的 insert 必须放行 → 命中「policy 写成功之后」窗口）。
+    const faultyDb = dbThatThrowsOnInsertInto(db, standards, 'injected: standards insert fault')
+    const r = await runGovernanceCycle(faultyDb)
+
+    // 外层 catch 仍兜底（fail-silent 契约不变）。
+    expect(r.ran).toBe(false)
+    expect(r.reason).toMatch(/degraded silently/)
+
+    // 关键回归断言（修复前必失败：半提交的 policy 行存在 → 长度为 1）：policy 行被事务回滚，零半提交。
+    expect(await getGovernanceHistory(db)).toHaveLength(0)
+    // 下一轮基线未被半提交行污染。
+    expect(await getActivePolicy(db)).toEqual(BASELINE_POLICY)
+    // 数据面真实 recall 门未变（控制面/数据面无裂缝）。
+    expect(await getActiveStandards(db)).toEqual(baselineStandards)
+  })
+
+  it('a healthy tightening cycle keeps the control plane and data plane consistent (no regression in the raise-gate path)', async () => {
+    await seedGateTighteningPressure()
+    const r = await runGovernanceCycle(db)
+
+    expect(r.ran).toBe(true)
+    expect(r.raisedGate).toBe(true)
+    // 控制面：恰好落了一行新 policy 版本，且就是本轮派生的 policy。
+    const history = await getGovernanceHistory(db)
+    expect(history).toHaveLength(1)
+    expect(history[0]!.policy).toEqual(r.policy)
+    // 数据面：活动门 === gateThresholdsFor(本轮 promotionGateLevel)（控制面/数据面同步落地）。
+    const after = await getActiveStandards(db)
+    const expected = gateThresholdsFor(r.policy!.promotionGateLevel)
+    expect(after.consumeFloor).toBeCloseTo(expected.consumeFloor, 9)
+    expect(after.mustVerifyThreshold).toBeCloseTo(expected.mustVerifyThreshold, 9)
+  })
+
+  it('symmetric: when the governance_state write itself throws inside the tx, the data plane also gets zero writes', async () => {
+    await seedGateTighteningPressure()
+    const baselineStandards = await getActiveStandards(db)
+
+    // 注入：事务内对 governance_state 表的 insert 抛错（step ③ 写 policy 就挂；与 dead-DB 测试在 step ① 挂互补）。
+    const faultyDb = dbThatThrowsOnInsertInto(
+      db,
+      governanceState,
+      'injected: governance_state insert fault',
+    )
+    const r = await runGovernanceCycle(faultyDb)
+
+    expect(r.ran).toBe(false)
+    expect(r.reason).toMatch(/degraded silently/)
+    // 控制面与数据面均零写。
+    expect(await getGovernanceHistory(db)).toHaveLength(0)
+    expect(await getActiveStandards(db)).toEqual(baselineStandards)
   })
 })
 
