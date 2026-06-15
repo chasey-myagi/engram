@@ -87,6 +87,64 @@ export interface ImmunityScore {
 }
 
 /**
+ * insert 前的 fail-loud 准入校验（EGR-CR-051）：冻结是世代落库的唯一闸口，在此把任何 malformed item 在写库前拒掉，
+ * 保证「凡是进了 redteam_generations 的世代，items 必良构」——这是 DB UNIQUE「世代不可重写」的对称另一半
+ * （「坏世代不可被冻结」）。TS 的 RedTeamItem 编译后在运行时被擦除，对 `as RedTeamItem[]` 强转 / JSON 来源数组毫无
+ * 约束力，故这里逐项手写 runtime guard。第一条不合法即 throw（不静默跳过、不部分写入），错误带 item id/下标便于定位。
+ */
+export function validateRedTeamItems(items: RedTeamItem[]): void {
+  const seen = new Set<string>()
+  items.forEach((item, idx) => {
+    const where = `item[${idx}]${typeof item?.id === 'string' && item.id ? ` (id=${item.id})` : ''}`
+    // id 非空字符串 + 世代内唯一（稳定 id 是纵向重打分的对齐锚；重复 id 让 per-item 比较失语）。
+    if (typeof item.id !== 'string' || item.id.trim().length === 0) {
+      throw new Error(`validateRedTeamItems: ${where}: id must be a non-empty string`)
+    }
+    if (seen.has(item.id)) {
+      throw new Error(`validateRedTeamItems: duplicate item id: ${item.id}`)
+    }
+    seen.add(item.id)
+    // class 合法：把晚爆点（injector default 分支）的校验提前到冻结时。
+    if (!isRedTeamClass(item.redteamClass)) {
+      throw new Error(
+        `validateRedTeamItems: ${where}: unknown redteam class: ${JSON.stringify(item.redteamClass)} ` +
+          `(must be one of REDTEAM_CLASSES: ${REDTEAM_CLASSES.join(', ')})`,
+      )
+    }
+    // 必填文本字段非空。
+    for (const field of ['claimText', 'evidence', 'sourceKind'] as const) {
+      const v = item[field]
+      if (typeof v !== 'string' || v.trim().length === 0) {
+        throw new Error(`validateRedTeamItems: ${where}: ${field} must be a non-empty string`)
+      }
+    }
+    // asOf 若存在须可解析为 ISO（避免 stale 类远古 asOf 写成垃圾串）。
+    if (item.asOf !== undefined && Number.isNaN(Date.parse(item.asOf))) {
+      throw new Error(
+        `validateRedTeamItems: ${where}: asOf is not a parseable ISO date: ${item.asOf}`,
+      )
+    }
+    // contradiction / near_dup_poison 类必须带合法 anchor（注入前要先 seed 这条 active 锚，缺了注入即无意义）。
+    if (item.redteamClass === 'contradiction' || item.redteamClass === 'near_dup_poison') {
+      const anchor = item.anchor
+      if (anchor === undefined || anchor === null) {
+        throw new Error(
+          `validateRedTeamItems: ${where}: ${item.redteamClass} requires a non-empty anchor`,
+        )
+      }
+      for (const field of ['claimText', 'evidence', 'sourceKind'] as const) {
+        const v = anchor[field]
+        if (typeof v !== 'string' || v.trim().length === 0) {
+          throw new Error(
+            `validateRedTeamItems: ${where}: anchor.${field} must be a non-empty string`,
+          )
+        }
+      }
+    }
+  })
+}
+
+/**
  * **冻结**一个新红队世代（append-only）。version UNIQUE：同名世代重复写直接抛（世代落定即不可静默重写）。
  * 新世代必须是新版本；旧世代行原样保留。items 是这一代固定下来的对抗样本集（纵向比较的锚）。
  */
@@ -100,6 +158,8 @@ export async function freezeRedTeamGeneration(
   if (!Array.isArray(input.items) || input.items.length === 0) {
     throw new Error('freezeRedTeamGeneration: a generation must freeze >=1 adversarial item')
   }
+  // insert 前 fail-loud：任何 malformed item 在写库前被拒，DB 里永不留半冻结坏 version（EGR-CR-051）。
+  validateRedTeamItems(input.items)
   const id = randomUUID()
   // version UNIQUE 在 DB 层硬执行「世代不可重写」：撞名 INSERT 直接抛（不 onConflict 静默覆盖——那正是要禁的）。
   const rows = await db
