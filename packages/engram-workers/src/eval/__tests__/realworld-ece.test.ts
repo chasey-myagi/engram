@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { eq } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -17,14 +18,17 @@ import {
   createDb,
   makeFakeEmbedder,
   makeFakeSameFactJudge,
+  schema,
   type DB,
   type Embedder,
 } from '@engram/core'
 
 import { makeFakeSourceReader } from '../../read/fake-source-reader.js'
-import { buildRealWorldCorpus } from '../realworld-ece/corpus.js'
+import { buildRealWorldCorpus, type RealWorldFact } from '../realworld-ece/corpus.js'
 import {
+  ingestCorpus,
   makeExtractingFakeRuntime,
+  promoteEligible,
   runRealWorldEce,
   type RealWorldDeps,
 } from '../realworld-ece/harness.js'
@@ -113,11 +117,13 @@ describe('M3-A · lean 真实世界 ECE 骨架', () => {
     expect(result.promotion.outcomes.length).toBe(facts.length)
     expect(result.promotion.noClaim).toBe(0)
 
-    // 核心:0 晋升,全部被门拦,且拦的原因是 conf<0.5(不是别的偶发错误)。
+    // 核心:0 晋升,全部归**预期**门拦截(conf<0.5),无非门错误(接线故障)。
     expect(result.promotion.promoted).toBe(0)
-    expect(result.promotion.blocked).toBe(facts.length)
+    expect(result.promotion.expectedBlocked).toBe(facts.length)
+    expect(result.promotion.unexpectedError).toBe(0)
     for (const o of result.promotion.outcomes) {
-      expect(o.reason).toContain('< 0.5')
+      expect(o.kind).toBe('expected_blocked')
+      expect(o.detail).toContain('< 0.5')
     }
 
     // emergent raw 实测符合公式 base=0.3·auth+0.075(单源 indep=0、entail 中性 0.5),且全 < 0.4 ≪ 0.5 门。
@@ -133,5 +139,82 @@ describe('M3-A · lean 真实世界 ECE 骨架', () => {
     expect(result.usage.usageRows).toBe(0)
     expect(result.sampleCount).toBe(0)
     expect(result.measurement).toBeNull()
+  }, 120_000)
+
+  it('③ 回归(EGR-CR-061):非门 transition error(claim 被删)→ fail-loud,不计入 expectedBlocked', async () => {
+    // 落实台账 Regression Test Map 第 1472 行:非 confidence-gate 的 transition error 不得静默吞成正常 blocked。
+    // 直接调 promoteEligible(绕开 runRealWorldEce)以便注入异常前置态;单 fact、与 corpus 其他事实隔离。
+    const marker = randomUUID()
+    const fact: RealWorldFact = {
+      id: `egr-cr-061-${marker}`,
+      subject: `RegressionSentinel-${marker}`,
+      predicate: 'is',
+      docText: `RegressionSentinel-${marker} is a sentinel fact`,
+      query: `RegressionSentinel-${marker}`,
+      isTrue: true,
+      sourceAuthority: 0.9,
+    }
+    const facts = [fact]
+    const ingest = await ingestCorpus(deps(), facts, { sourcesPerFact: 1 })
+    const claimId = ingest.claimsByFact.get(fact.id)?.[0]
+    expect(claimId).toBeTruthy()
+
+    // 预置非门错误:删掉 claim ⇒ transitionClaim 抛 `transition: claim <id> not found`(transition.ts:104,非门)。
+    // 先清掉指向它的 provenance(FK 约束),再删 claim 本体。
+    await db.delete(schema.claimProvenance).where(eq(schema.claimProvenance.claimId, claimId!))
+    await db.delete(schema.claim).where(eq(schema.claim.id, claimId!))
+
+    // 方案 A(rethrow):非门错误必须 fail-loud,而非被吞成 expected_blocked。
+    await expect(promoteEligible(deps(), facts, ingest.claimsByFact)).rejects.toThrow(
+      /unexpected transition failure/,
+    )
+    // 错误链路保留被删 claimId / not found,定位用。
+    await expect(promoteEligible(deps(), facts, ingest.claimsByFact)).rejects.toThrow(
+      new RegExp(`${claimId}.*not found`),
+    )
+  }, 120_000)
+
+  it('④ 回归(EGR-CR-061):entailment 门(entailmentPass=false)归 expected_blocked,不误判为非门错误', async () => {
+    // 证明白名单覆盖 transition.ts:148 那条门文案(`entailment did not pass`),不被当成接线故障 rethrow。
+    const marker = randomUUID()
+    const fact: RealWorldFact = {
+      id: `egr-cr-061-entail-${marker}`,
+      subject: `EntailSentinel-${marker}`,
+      predicate: 'is',
+      docText: `EntailSentinel-${marker} is a sentinel fact`,
+      query: `EntailSentinel-${marker}`,
+      isTrue: true,
+      sourceAuthority: 0.9,
+    }
+    const facts = [fact]
+    const ingest = await ingestCorpus(deps(), facts, { sourcesPerFact: 1 })
+    const claimId = ingest.claimsByFact.get(fact.id)?.[0]
+    expect(claimId).toBeTruthy()
+
+    // 人为把 conf 抬过 0.5 门(直接写 stored factors,让 raw 重算结果 ≥0.5),使晋升只可能卡在 entailment 门。
+    // f0=indepSupport 给满 → base 抬高;identity 校准 ⇒ conf=raw。这样 conf<0.5 门不再触发,改由 entailmentPass=false 拦。
+    const [before] = await db
+      .select({ factors: schema.claim.confidenceFactors })
+      .from(schema.claim)
+      .where(eq(schema.claim.id, claimId!))
+    const stored = before!.factors as {
+      factors: Record<string, number>
+      weights: Record<string, number>
+      calibrationVersion: string
+    }
+    const bumped = { ...stored, factors: { ...stored.factors, indepSupport: 1, authority: 1 } }
+    await db
+      .update(schema.claim)
+      .set({ confidenceFactors: bumped })
+      .where(eq(schema.claim.id, claimId!))
+
+    const stats = await promoteEligible(deps(), facts, ingest.claimsByFact, {
+      entailmentPass: false,
+    })
+    // 若 conf 仍未过门则拦在 conf<0.5;两条门文案都属 expected_blocked,核心断言是:不 rethrow、不计 unexpectedError。
+    expect(stats.unexpectedError).toBe(0)
+    expect(stats.promoted).toBe(0)
+    expect(stats.expectedBlocked).toBe(1)
+    expect(stats.outcomes[0]!.kind).toBe('expected_blocked')
   }, 120_000)
 })

@@ -108,16 +108,23 @@ async function main(): Promise<void> {
 
     console.log('\n=== ③ 晋升门 ===')
     console.log(
-      `  晋升 ${promo.promoted} / 被拦 ${promo.blocked} / 无 claim ${promo.noClaim};距门最近的 raw=${pct(promo.rawSorted, 1)}(差 ${(0.5 - Number(pct(promo.rawSorted, 1))).toFixed(3)})`,
+      `  晋升 ${promo.promoted} / 预期拦截 ${promo.expectedBlocked} / 非门错误 ${promo.unexpectedError} / 无 claim ${promo.noClaim};距门最近的 raw=${pct(promo.rawSorted, 1)}(差 ${(0.5 - Number(pct(promo.rawSorted, 1))).toFixed(3)})`,
     )
-    const sampleBlock = promo.outcomes.find((o) => !o.promoted && o.reason.startsWith('blocked'))
-    if (sampleBlock) console.log(`  拦截原因样例:${sampleBlock.reason}`)
+    const sampleBlock = promo.outcomes.find((o) => o.kind === 'expected_blocked')
+    if (sampleBlock) console.log(`  拦截原因样例:${sampleBlock.detail}`)
 
+    // verdict 收紧:不止「0 晋升」,还要全部 fact 落 expected_blocked、无非门错误、无 no_claim,
+    // 否则「claim not found 被吞成 blocked → promoted 仍为 0」这类故障会蒙混成「设计使然」。
+    // (方案 A 下非门错误已在 promoteEligible 内 rethrow 提前终止,unexpectedError 恒 0;此处 verdict
+    //  收紧主要防漏抽/裂解/意外晋升,与 EGR-CR-059 对齐。)
+    const allExpected = promo.expectedBlocked === facts.length
+    const noLeak = promo.unexpectedError === 0 && promo.noClaim === 0
     const verdict =
-      faithful === facts.length && promo.promoted === 0
-        ? '✓ 真 Qwen 忠实抽取 + 0 晋升 —— 实证「extraction-only 测空集」在真模型下成立'
-        : '⚠ 出现偏差(见上),需人看:真 Qwen 抽取非「一文档一条」或有意外晋升'
+      faithful === facts.length && promo.promoted === 0 && allExpected && noLeak
+        ? '✓ 真 Qwen 忠实抽取 + 全部因 conf<0.5 预期拦截 —— 实证「extraction-only 测空集」在真模型下成立'
+        : '⚠ 出现偏差(见上),需人看:漏抽/裂解/意外晋升,或非门 transition 故障被掩盖'
     console.log(`\n[m3a] 用时 ${secs}s。${verdict}`)
+    if (verdict.startsWith('⚠')) process.exitCode = 1
   } finally {
     if (pool) await pool.end()
     await admin.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`)

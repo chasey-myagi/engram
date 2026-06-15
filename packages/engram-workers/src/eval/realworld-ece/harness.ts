@@ -16,6 +16,7 @@ import { eq } from 'drizzle-orm'
 import {
   addSource,
   computeConfidenceFromProvenances,
+  PROMOTE_CONFIDENCE_FLOOR,
   recallClaims,
   reportUsage,
   schema,
@@ -128,28 +129,59 @@ export async function ingestCorpus(
   }
 }
 
+/**
+ * 结构化的晋升结局判别。分类在数据结构层落定,下游(CLI/测试/未来调用方)不再 substring 匹配自由文本:
+ *   - 'promoted'          晋升成功;
+ *   - 'no_claim'          该 fact 抽不出 claim;
+ *   - 'expected_blocked'  **预期**的 A.4 晋升门拦截(conf<0.5 或 entailment 未过)—— M3-A lean 唯一该出现的 blocked;
+ *   - 'unexpected_error'  非门的 transition 故障(claim not found / no-op / 非法迁移 / calibration / DB …)—— 接线故障,fail-loud。
+ */
+export type PromotionKind = 'promoted' | 'no_claim' | 'expected_blocked' | 'unexpected_error'
+
 export interface PromotionOutcome {
   factId: string
   claimId: string | null
   /** 抽取后 claim 的存档 raw(emergent)。无 claim 时 null。 */
   raw: number | null
   promoted: boolean
-  /** 'promoted' | 'no_claim' | 'blocked:<门错误信息>'。 */
-  reason: string
+  /** 结构化判别字段(分类靠它,不靠 detail 文案)。 */
+  kind: PromotionKind
+  /** 仅供人读的原始错误/门信息(不再用于分类)。 */
+  detail: string
 }
 
 export interface PromotionStats {
   outcomes: PromotionOutcome[]
   promoted: number
-  blocked: number
+  /** 仅 conf<0.5(或 entailment 未过)这类**预期**门拦截。 */
+  expectedBlocked: number
+  /** 非门错误(claim not found / no-op / illegal / calibration / DB …)。>0 即接线故障。 */
+  unexpectedError: number
   noClaim: number
   /** 抽取后各 claim 的 emergent raw(升序),人读 sanity:看离 0.5 门多远。 */
   rawSorted: number[]
 }
 
+// 与 packages/engram-core/src/spi/transition.ts 的晋升门抛文案耦合(143/148 行)。
+// 仅这两类是 M3-A lean 预期的 blocked;其余 transition 抛错(claim not found / no-op / 非法迁移 /
+// calibration / DB …)都是接线故障,必须 fail-loud,绝不能伪装成「设计使然的 0 晋升」。
+const EXPECTED_GATE_MARKERS = [
+  `< ${PROMOTE_CONFIDENCE_FLOOR}`, // transition.ts:143 conf 不达标
+  'entailment did not pass', // transition.ts:148 entailment 门
+] as const
+
+/** 错误信息是否命中**预期**的 A.4 晋升门(conf<0.5 或 entailment 未过)。其余一律视作非预期接线故障。 */
+function isExpectedGateBlock(msg: string): boolean {
+  return EXPECTED_GATE_MARKERS.some((m) => msg.includes(m))
+}
+
 /**
  * 对每条 fact 的 draft claim 走**真状态机 A.4 门**尝试晋升(蓝边 agent:distiller,声称 entailmentPass)。
- * 门 = conf≥0.5 ∧ entailment-pass;**新鲜抽取 claim 因 raw<0.5 必被拦**(实证内核红线),拦错原样收集不吞。
+ * 门 = conf≥0.5 ∧ entailment-pass;**新鲜抽取 claim 因 raw<0.5 必被拦**(实证内核红线)。
+ *
+ * **fail-loud 边界**:catch 只把命中门文案白名单的拦截归为 `expected_blocked`;非门 transition 故障
+ *   (claim not found / no-op / 非法迁移 / calibration / DB …)**rethrow**——这是「测量仪器」,遇接线故障
+ *   就该立即停、不该继续产出可疑数据,更不该把它静默吞成「预期 blocked」让坏接线在绿伪装下溜过。
  */
 export async function promoteEligible(
   deps: RealWorldDeps,
@@ -161,14 +193,21 @@ export async function promoteEligible(
   const outcomes: PromotionOutcome[] = []
   const rawSorted: number[] = []
   let promoted = 0
-  let blocked = 0
+  let expectedBlocked = 0
   let noClaim = 0
 
   for (const f of facts) {
     const claimId = claimsByFact.get(f.id)?.[0] ?? null
     if (!claimId) {
       noClaim += 1
-      outcomes.push({ factId: f.id, claimId: null, raw: null, promoted: false, reason: 'no_claim' })
+      outcomes.push({
+        factId: f.id,
+        claimId: null,
+        raw: null,
+        promoted: false,
+        kind: 'no_claim',
+        detail: 'no_claim',
+      })
       continue
     }
     const [row] = await deps.db
@@ -183,15 +222,37 @@ export async function promoteEligible(
         entailmentPass,
       })
       promoted += 1
-      outcomes.push({ factId: f.id, claimId, raw, promoted: true, reason: 'promoted' })
+      outcomes.push({
+        factId: f.id,
+        claimId,
+        raw,
+        promoted: true,
+        kind: 'promoted',
+        detail: 'promoted',
+      })
     } catch (err) {
-      blocked += 1
       const msg = err instanceof Error ? err.message : String(err)
-      outcomes.push({ factId: f.id, claimId, raw, promoted: false, reason: `blocked:${msg}` })
+      if (isExpectedGateBlock(msg)) {
+        expectedBlocked += 1
+        outcomes.push({
+          factId: f.id,
+          claimId,
+          raw,
+          promoted: false,
+          kind: 'expected_blocked',
+          detail: msg,
+        })
+      } else {
+        // 非门错误:不吞。让冒烟 fail-loud(rethrow),不能伪装成「设计使然的 0 晋升」。
+        throw new Error(
+          `promoteEligible: unexpected transition failure for claim ${claimId} (fact ${f.id}): ${msg}`,
+          { cause: err },
+        )
+      }
     }
   }
   rawSorted.sort((a, b) => a - b)
-  return { outcomes, promoted, blocked, noClaim, rawSorted }
+  return { outcomes, promoted, expectedBlocked, unexpectedError: 0, noClaim, rawSorted }
 }
 
 export interface UsageStats {
