@@ -7,7 +7,7 @@ export const ENGRAM_VERSION = '0.0.0' as const
 
 export * as schema from './db/schema.js'
 export type { SourceKind, ClaimStatus } from './db/schema.js'
-export { createPool, createDb, type DB } from './db/client.js'
+export { createPool, createDb, type DB, type Tx } from './db/client.js'
 export { halfLifeDaysForKind } from './confidence/confidence.js'
 export {
   addSource,
@@ -287,6 +287,7 @@ export {
 } from './eval/l5-migration.js'
 export {
   transitionClaim,
+  transitionClaimInTx,
   PROMOTE_CONFIDENCE_FLOOR,
   type TransitionOptions,
   type PositiveEvidence,
