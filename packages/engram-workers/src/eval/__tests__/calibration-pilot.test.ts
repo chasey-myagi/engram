@@ -6,7 +6,7 @@
  * **射程**:验命门的**校准映射(g)半边**(usage→拟合→压 ECE)在真 recall+真 usage 上闭环;raw 七因子计算半边在 seed
  * 时被直接设值绕过(它本身在 core 的 confidence 单测里验),M2 不测它。
  *
- * 三测:①闭环 + 真泛化(留出事实零跨边 + g 在未见事实上压 ECE);②语料前提不变量(过自信被真注入);③负对照(良校准输入 ⇒ g 不无中生有压 ECE)。
+ * 四测:①闭环 + 真泛化(留出事实零跨边 + g 在未见事实上压 ECE);②语料前提不变量(过自信被真注入);③负对照(良校准输入 ⇒ g 不无中生有压 ECE);④强制 recall miss ⇒ pilot fail-loud(不在幸存子集上证明闭环)。
  */
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -73,6 +73,14 @@ describe('M2 · 校准 pilot(g 拟合闭环:接地语料 → 真 recall+usage �
     // 读回口径一致:本地读回样本数 = 生产校准取样器(collectUsageCalibrationSamples)所见。
     expect(persistedSamples).toBe(measurement.totalSamples)
 
+    // 覆盖一致性:把存活样本数 tie 回「丢弃之前」的口径(promoted facts),而非两条丢弃后读回的互校。
+    // 本语料一 fact 一 usage(每 subject 唯一)⇒ promoted === usageRows === totalSamples === persisted 是可钉死的精确等式。
+    expect(usage.recallMisses).toBe(0) // 全命中:零 miss
+    expect(usage.usageRows).toBe(usage.recallHits) // usage 写入无缺口
+    expect(usage.usageRows).toBe(seed.promoted) // 关键:tie 回「丢弃之前」的 promoted facts
+    expect(measurement.totalSamples).toBe(seed.promoted) // 测量集等宽于 promoted
+    expect(persistedSamples).toBe(seed.promoted) // SPI 读回等宽于 promoted
+
     // 结构性 sanity(本语料一 fact 一 usage ⇒ 恒 0,非硬泛化证据);真泛化的实证是下面 ECE 在**同档不同事实**上下降。
     expect(measurement.factsInBothSides).toBe(0)
 
@@ -121,4 +129,30 @@ describe('M2 · 校准 pilot(g 拟合闭环:接地语料 → 真 recall+usage �
     // g 不该在已良校准的输入上无中生有"改善"(防"总把 ECE 压向基率"的 bug)。
     expect(Math.abs(m.eceDrop)).toBeLessThan(0.05)
   })
+
+  it('④ 强制 recall miss ⇒ pilot fail-loud:整条 throw,绝不静默在幸存子集上证明闭环', async () => {
+    // 构造「必 miss」的真实场景:包装 fake embedder,让 corpus 中**某一个** fact 的 query 嵌入指向
+    // 与全部 document 无公共三元组的"垃圾"向量(cosine=0 < minSimilarity 0.1 ⇒ 该 claim 必召不回)。
+    // document 嵌入与其余 query 全透传 ⇒ 仅这一个 fact recall miss,其余全命中。这正是真 DashScope 嵌入下
+    // 「一批事实召回不到」的最小复现:miss 的 fact 不进 usage_truth、不进测量集 ⇒ pilot 必须 fail-loud,
+    // 不能在剩下的幸存命中子集上拟合 g 并"证明" ECE 下降。
+    const base = makeFakeEmbedder()
+    const missQuery = buildCorpus()[0]!.query // 取确定性语料的第一个 fact 的 query 作为被强制 miss 的目标
+    const embedderWithForcedMiss: Embedder = {
+      version: base.version,
+      dim: base.dim,
+      embed: (text, kind) =>
+        // 只拦截那一个 query 的 query-嵌入,映射到与任何真实 statement 都无公共三元组的文本 ⇒ 召回 cosine=0、必 miss。
+        kind === 'query' && text === missQuery
+          ? base.embed('zzzqqqxxx_no_such_trigram_anywhere_zzz', 'query')
+          : base.embed(text, kind),
+    }
+
+    // red(未修前):runCalibrationPilot 无 fail-loud 校验,有 miss 也只 recallMisses+=1 后静默 continue,
+    //              在幸存子集上照常拟合 g、正常 return ⇒ "期望 throw" 失败。
+    // green(修后):recallMisses !== 0(或覆盖不一致)让整条 pilot throw。
+    await expect(
+      runCalibrationPilot(db, embedderWithForcedMiss, { heldoutEvery: 3 }),
+    ).rejects.toThrow(/recall 未覆盖|recallMisses|覆盖不一致|recall 命中/)
+  }, 120_000)
 })
