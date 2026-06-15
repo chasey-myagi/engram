@@ -210,6 +210,13 @@ export async function computeSystemDimensions(
   opts: ComputeOptions = {},
 ): Promise<SystemDimensions> {
   const k = opts.k ?? DEFAULT_K
+  // 入口 fail-loud：k 必须是正整数。挡掉 0 / 负 / 0.5 / NaN / Infinity，在任何 recall / 计算 / 落库之前抛出，
+  // 从根上消除「recall 对非正 limit 静默回退到 50 ↔ P@k 分母仍用原始 k」的脑裂，并保证 dimension_events 绝不半批写入。
+  if (!Number.isInteger(k) || k <= 0) {
+    throw new Error(
+      `computeSystemDimensions: k must be a positive integer (got ${JSON.stringify(opts.k)})`,
+    )
+  }
   const golden = opts.golden ?? L3_GOLDEN
   const ctx = opts.ctx ?? {}
 
