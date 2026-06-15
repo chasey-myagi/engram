@@ -530,6 +530,10 @@ export async function injectAndAssert(
 /**
  * 跑整个世代的红队注入 → per-class 打分（detected/injected → detectionRate）。
  * resetDb 在**每条样本前**清库：每条对抗样本独立注入（互不串扰），与 l1-reconciler golden 的 per-item 隔离同款。
+ *
+ * **后置不变量（EGR-CR-049）**：调用返回后 work tables 已清空——`finally` 在正常返回与异常抛出两条路径上都补一次
+ * resetDb，兜底清掉最后一条样本（红队 item 都是故意构造的毒株）。caller 拿回的永远是干净 DB，**无需**自己后清。
+ * 取舍：不保留最后样本供调试（诊断应走返回的 outcome 快照，而非靠脏库）。
  */
 export async function runRedTeamGeneration(
   deps: RedTeamRunDeps,
@@ -537,24 +541,29 @@ export async function runRedTeamGeneration(
   resetDb: () => Promise<void>,
 ): Promise<ClassScore[]> {
   const byClass = new Map<RedTeamClass, InjectionOutcome[]>()
-  for (const item of items) {
+  try {
+    for (const item of items) {
+      await resetDb()
+      const outcome = await injectAndAssert(deps, item)
+      const list = byClass.get(item.redteamClass) ?? []
+      list.push(outcome)
+      byClass.set(item.redteamClass, list)
+    }
+    const scores: ClassScore[] = []
+    for (const [redteamClass, outcomes] of byClass) {
+      const injected = outcomes.length
+      const detected = outcomes.filter((o) => o.detected).length
+      scores.push({
+        redteamClass,
+        injected,
+        detected,
+        detectionRate: injected === 0 ? 0 : detected / injected,
+        outcomes,
+      })
+    }
+    return scores
+  } finally {
+    // 返回前（含异常路径）兜底清掉最后一条样本：把「返回后 DB 干净」从隐性契约升级为单点强制的不变量。
     await resetDb()
-    const outcome = await injectAndAssert(deps, item)
-    const list = byClass.get(item.redteamClass) ?? []
-    list.push(outcome)
-    byClass.set(item.redteamClass, list)
   }
-  const scores: ClassScore[] = []
-  for (const [redteamClass, outcomes] of byClass) {
-    const injected = outcomes.length
-    const detected = outcomes.filter((o) => o.detected).length
-    scores.push({
-      redteamClass,
-      injected,
-      detected,
-      detectionRate: injected === 0 ? 0 : detected / injected,
-      outcomes,
-    })
-  }
-  return scores
 }
