@@ -122,6 +122,18 @@ describe('S31 longitudinal frozen-golden recompete — the 8th dimension (reloca
     expect(t0RowsAfter).toEqual(t0RowsBefore)
   })
 
+  it('EGR-CR-029 — recompete payload records the calibrationFromVersions actually used for its ECE reading', async () => {
+    // With no calibration map committed, the active version is identity ⇒ the ECE reading is taken over ['identity'].
+    // Every recompete row must carry that version set in its payload so the longitudinal curve is口径-traceable.
+    const report = await runRecompeteSnapshot(db, embedder, 'rel-versioned')
+    expect(report.results.length).toBe(RECOMPETE_DIMENSIONS.length)
+    const rows = await getRecompeteEvents(db, { releaseSnapshot: 'rel-versioned' })
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) {
+      expect(row.payload.calibrationFromVersions).toEqual(['identity'])
+    }
+  })
+
   it('Δcoverage-up curve is DRAWABLE: getRecompeteSeries reads the value/delta series across releases', async () => {
     await runRecompeteSnapshot(db, embedder, 'T0') // coverage 0
     await selfAuthor(L3_GOLDEN[0]!.expectedClaimTexts[0]!)

@@ -8,6 +8,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { CALIBRATION_IDENTITY, DEFAULT_WEIGHTS } from '../confidence/confidence.js'
 import { computeCalibrationFromUsage, DEFAULT_BIN_COUNT } from '../calibration/calibration.js'
+import {
+  commitCalibrationMap,
+  getActiveCalibrationVersion,
+} from '../calibration/calibration-store.js'
 import { collectUsageCalibrationSamples } from '../calibration/fit-from-usage.js'
 import { createDb, type DB } from '../db/client.js'
 import { addSource } from '../spi/append-claim.js'
@@ -318,5 +322,130 @@ describe('EGR-CR-027 — ECE reader is gated by independent (byRole, taskId) ide
     const fitterSamples = (await collectUsageCalibrationSamples(db)).length
     expect(eceSamples).toBe(4) // spam folds to 1 + 3 distinct
     expect(fitterSamples).toBe(eceSamples) // both readers share the one gate ⇒ identical independent count
+  })
+})
+
+describe('EGR-CR-029 — ECE segments by calibrationVersion (no cross-version pooling)', () => {
+  // These cases activate a non-identity calibration map; the shared beforeEach does not truncate
+  // calibration_map, so wipe it here to keep each version-segmentation case isolated.
+  beforeEach(async () => {
+    await pool.query('TRUNCATE calibration_map CASCADE')
+  })
+
+  /**
+   * Seed a heavily-miscalibrated `identity` batch and a perfectly-calibrated `iso-v1` batch in the
+   * SAME bin (predicted 0.95). Activate iso-v1 so it is the active version. Returns the claim id.
+   *   - identity: 10 adopted / 10 refuted ⇒ observed 0.5 vs predicted 0.95 (gap 0.45).
+   *   - iso-v1:   19 adopted /  1 refuted ⇒ observed 0.95 == predicted 0.95 (gap ~0).
+   * Each row carries a DISTINCT (byRole) identity so independent-identity gating keeps every row.
+   */
+  async function seedTwoVersionBins(): Promise<string> {
+    const id = await seedActiveClaim('cross-version pooling')
+    // activate a non-identity g so getActiveCalibrationVersion(db) === 'iso-v1'
+    await commitCalibrationMap(db, {
+      map: {
+        version: 'iso-v1',
+        knots: [
+          { x: 0, y: 0 },
+          { x: 1, y: 1 },
+        ],
+      },
+      reason: 'test: activate iso-v1',
+    })
+    let n = 0
+    // identity batch — same bin (0.95), deliberately miscalibrated (observed 0.5)
+    for (let i = 0; i < 10; i++)
+      await reportUsage(db, id, 'adopted', {
+        confidenceAtRecall: 0.95,
+        calibrationVersion: 'identity',
+        byRole: `idn:${n++}`,
+      })
+    for (let i = 0; i < 10; i++)
+      await reportUsage(db, id, 'refuted', {
+        confidenceAtRecall: 0.95,
+        calibrationVersion: 'identity',
+        byRole: `idn:${n++}`,
+      })
+    // iso-v1 batch — same bin (0.95), perfectly calibrated (observed 0.95)
+    for (let i = 0; i < 19; i++)
+      await reportUsage(db, id, 'adopted', {
+        confidenceAtRecall: 0.95,
+        calibrationVersion: 'iso-v1',
+        byRole: `iso:${n++}`,
+      })
+    await reportUsage(db, id, 'refuted', {
+      confidenceAtRecall: 0.95,
+      calibrationVersion: 'iso-v1',
+      byRole: `iso:${n++}`,
+    })
+    return id
+  }
+
+  it('T1: default reads ONLY the active version (iso-v1) — the miscalibrated identity batch is excluded', async () => {
+    await seedTwoVersionBins()
+    expect(await getActiveCalibrationVersion(db)).toBe('iso-v1')
+
+    // RED before fix: default pools BOTH versions ⇒ sampleCount 40 and ECE dragged up by identity's 0.45 gap.
+    const rep = await computeCalibrationFromUsage(db)
+    expect(rep.sampleCount).toBe(20) // only the iso-v1 batch
+    expect(rep.ece).toBeLessThan(0.02) // iso-v1 is well calibrated; identity's gap must NOT leak in
+    expect(rep.fromVersions).toEqual(['iso-v1'])
+    expect(rep.mixed).toBe(false)
+  })
+
+  it('T2: explicit fromVersions=[identity, iso-v1] returns the mixed pool and is flagged mixed=true', async () => {
+    await seedTwoVersionBins()
+    const rep = await computeCalibrationFromUsage(db, {
+      fromVersions: ['identity', 'iso-v1'],
+    })
+    expect(rep.sampleCount).toBe(40) // both batches
+    expect(rep.mixed).toBe(true) // mixing is only ever an explicit, flagged choice — never silent
+    expect(new Set(rep.fromVersions)).toEqual(new Set(['identity', 'iso-v1']))
+    expect(rep.ece).toBeGreaterThan(0.2) // identity's 0.45 gap now (correctly) shows up
+  })
+
+  it('T3: explicit fromVersions=[identity] retrieves the old (miscalibrated) report', async () => {
+    await seedTwoVersionBins()
+    const rep = await computeCalibrationFromUsage(db, { fromVersions: ['identity'] })
+    expect(rep.sampleCount).toBe(20) // only the identity batch
+    expect(rep.ece).toBeGreaterThan(0.3) // observed 0.5 vs predicted 0.95
+    expect(rep.fromVersions).toEqual(['identity'])
+  })
+
+  it('T4: a missing calibrationVersion coalesces to identity (counted under identity, excluded under iso-v1)', async () => {
+    const id = await seedActiveClaim('coalesce default')
+    // a usage row WITHOUT calibrationVersion (verdict field null)
+    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 0.85, byRole: 'noversion' })
+
+    const underIdentity = await computeCalibrationFromUsage(db, { fromVersions: ['identity'] })
+    expect(underIdentity.sampleCount).toBe(1) // null version treated as identity (coalesce)
+
+    const underIso = await computeCalibrationFromUsage(db, { fromVersions: ['iso-v1'] })
+    expect(underIso.sampleCount).toBe(0) // not counted under a different version
+  })
+
+  it('T5: with no active map, the default active version is identity — zero behavior change for never-recalibrated KBs', async () => {
+    // mirrors the existing identity-only fixtures: perfect set ECE≈0, miscalibrated set ECE>0.3,
+    // proving the version gate is a no-op when g was never swapped (active == identity).
+    const perfect = await seedActiveClaim('t5 perfect')
+    await reportBin(perfect, 0.55, 11, 9)
+    await reportBin(perfect, 0.75, 15, 5)
+    await reportBin(perfect, 0.95, 19, 1)
+    const repPerfect = await computeCalibrationFromUsage(db)
+    expect(repPerfect.sampleCount).toBe(60)
+    expect(repPerfect.ece).toBeLessThan(0.02)
+    expect(repPerfect.fromVersions).toEqual(['identity'])
+    expect(repPerfect.mixed).toBe(false)
+
+    await pool.query(
+      'TRUNCATE source, claim, claim_provenance, relation, claim_verification, page_claims CASCADE',
+    )
+
+    const bad = await seedActiveClaim('t5 bad')
+    await reportBin(bad, 0.95, 10, 10)
+    await reportBin(bad, 0.55, 19, 1)
+    const repBad = await computeCalibrationFromUsage(db)
+    expect(repBad.sampleCount).toBe(40)
+    expect(repBad.ece).toBeGreaterThan(0.3)
   })
 })
