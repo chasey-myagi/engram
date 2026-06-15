@@ -551,7 +551,12 @@ describe('P4b · EngramRunner 把北极星接成可跑自闭环', () => {
         status: 'active',
       })
       // 本批被审 A：**draft** 的 near-dup poison（A.4 禁止 draft→flagged，升级信号是它唯一下游钩子）。
-      const sourceId = await aSource()
+      // A 出处内容**确定性无数值** ⇒ Verifier 的 boundOracle 取不到数 → NaN → 'fail' → draft 不晋升。
+      // （切忌用默认 `body-${randomUUID()}`：UUID 里的随机数字串被 /(\d+)/ 抓到，~25% 抽到 ≥800 会误把
+      //  draft A 晋升 active → Arbiter 裁 [A,B] → 本测试间歇假阳性失败，是回归测试自身的 flake，非生产 bug。）
+      const sourceId = await aSource(
+        'skuQ capacity spec reference: no numeric lower bound stated in source body',
+      )
       const a = await seedPoisonClaim({
         query: 'skuQ capacity is at least 0800 mah',
         subject: 'skuQ',
@@ -567,7 +572,7 @@ describe('P4b · EngramRunner 把北极星接成可跑自闭环', () => {
           seenPairs.push(pairs)
           return defaultArbiterRuntimeFor(pairs)
         },
-        // Reconciler 判 poison（A⊬B）；Verifier 也用 bound oracle ⇒ A 自身出处无数值 → 不 pass → draft 不晋升。
+        // Reconciler 判 poison（A⊬B）；Verifier 也用 bound oracle ⇒ A 出处确定性无数值 → 'fail' → draft 不晋升。
         { reconciler: boundOracle, verifier: boundOracle },
       )
 
