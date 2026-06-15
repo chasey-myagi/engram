@@ -306,6 +306,7 @@ async function seedClaimRow(opts: {
   claimText?: string
   status?: ClaimStatus
   embedding?: number[] | null
+  embeddingVersion?: string
 }): Promise<string> {
   const id = randomUUID()
   const text =
@@ -338,7 +339,7 @@ async function seedClaimRow(opts: {
     asOf: new Date(),
     createdBy: 'test',
     embedding: opts.embedding === undefined ? await embedder.embed(text) : opts.embedding,
-    embeddingVersion: opts.embedding === null ? null : embedder.version,
+    embeddingVersion: opts.embeddingVersion ?? (opts.embedding === null ? null : embedder.version),
   })
   return id
 }
@@ -648,6 +649,51 @@ describe('S14 commitClaim — same-fact dedup + un-inflatable f3 (A.6)', () => {
     )
     // without the isNotNull(embedding) guard, the null-embedding same-subject row would arrive at similarity 1.0
     // and burn a gray-zone LLM call; the guard excludes it ⇒ no candidate, no call, new claim
+    expect(judge.callCount()).toBe(0)
+    expect(res.merged).toBe(false)
+  })
+
+  it('stage-1 guard: a stale-embeddingVersion claim is excluded from same-fact candidates (no merge, no gray-zone LLM)', async () => {
+    // commit embedder maps every text to unit(0) ⇒ the new claim's document vector is cosine 1.0 with the seed.
+    const ce = makeFakeEmbedder({ vectorOf: () => unit(0) })
+    const judge = makeFakeSameFactJudge({ verdictOf: () => 'same' })
+    // seed a nearest-neighbor (cosine 1.0) free-text claim, but stamped STALE → different semantic space.
+    await seedClaimRow({
+      claimText: 'seeded near neighbor',
+      embedding: unit(0),
+      embeddingVersion: 'fake:OLD',
+    })
+    const res = await commitClaim(db, ce, judge, { claimText: 'a different free text fact' }, [
+      { sourceId: (await aSource()).sourceId, locator: 'a' },
+    ])
+    // red (pre-fix): stale vector enters the NN candidate set ⇒ gray-zone LLM fires ⇒ merges into a dead-space claim.
+    // green: version filter excludes it ⇒ no candidate, no LLM call, a fresh claim.
+    expect(res.merged).toBe(false)
+    expect(judge.callCount()).toBe(0)
+  })
+
+  it('stage-1 guard: a stale-embeddingVersion same-subject claim is NOT pulled into candidates via subjectKey concatenation', async () => {
+    const ce = makeFakeEmbedder({ vectorOf: () => unit(0) })
+    const judge = makeFakeSameFactJudge({ verdictOf: () => 'same' })
+    // same-subject claim with a stale version; subjectKey concatenation does NOT gate on similarity,
+    // so without a version filter this stale row is pulled straight into stage-2 as a strong candidate.
+    await seedClaimRow({
+      subject: 'sku-stale',
+      predicate: 'p',
+      object: 'o',
+      status: 'active',
+      embedding: unit(0),
+      embeddingVersion: 'fake:OLD',
+    })
+    const res = await commitClaim(
+      db,
+      ce,
+      judge,
+      { claimText: 'sku-stale thing', subject: 'sku-stale' },
+      [{ sourceId: (await aSource()).sourceId, locator: 'a' }],
+    )
+    // red (pre-fix): stale same-subject row arrives via subjectKey ⇒ 'same' verdict ⇒ merge / LLM burn.
+    // green: subjectKey query also filters on embeddingVersion ⇒ excluded ⇒ no candidate, no call, new claim.
     expect(judge.callCount()).toBe(0)
     expect(res.merged).toBe(false)
   })

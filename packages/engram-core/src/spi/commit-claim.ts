@@ -65,10 +65,15 @@ function shapeOf(d: DraftClaim): ClaimShape {
   }
 }
 
-/** stage 1：近邻 top-k(≥0.75) ∪ subjectKey 串联（同 subject），均带相似度，排除 superseded / 无嵌入。 */
+/**
+ * stage 1：近邻 top-k(≥0.75) ∪ subjectKey 串联（同 subject），均带相似度，排除 superseded / 无嵌入 /
+ * 跨版本向量（embeddingVersion ≠ 当前 embedder 版本，含 NULL）——stale 向量语义空间不同，
+ * cosine 无意义，绝不进候选，否则会错并出处/烧灰区 LLM（EGR-CR-005）。
+ */
 async function findCandidates(
   db: DB,
   embedding: number[],
+  embeddingVersion: string,
   subject: string | null,
 ): Promise<Candidate[]> {
   const distance = cosineDistance(claim.embedding, embedding)
@@ -85,7 +90,13 @@ async function findCandidates(
   const nn = await db
     .select(cols)
     .from(claim)
-    .where(and(ne(claim.status, 'superseded'), isNotNull(claim.embedding)))
+    .where(
+      and(
+        ne(claim.status, 'superseded'),
+        isNotNull(claim.embedding),
+        eq(claim.embeddingVersion, embeddingVersion), // 版本等值门（EGR-CR-005）
+      ),
+    )
     .orderBy(distance)
     .limit(SAME_FACT_TOPK)
   const byId = new Map<string, Candidate>()
@@ -102,7 +113,13 @@ async function findCandidates(
       .select(cols)
       .from(claim)
       .where(
-        and(ne(claim.status, 'superseded'), isNotNull(claim.embedding), eq(claim.subject, subject)),
+        and(
+          ne(claim.status, 'superseded'),
+          isNotNull(claim.embedding),
+          eq(claim.subject, subject),
+          // subjectKey 串联不卡相似度门——是 stale 向量混入判同的最危险入口，这条不能漏（EGR-CR-005）。
+          eq(claim.embeddingVersion, embeddingVersion),
+        ),
       )
     for (const c of subjMatches) {
       if (!byId.has(c.id)) byId.set(c.id, { ...c, similarity: 1 - Number(c.distance) })
@@ -228,7 +245,7 @@ export async function commitClaim(
   validateProvenanceInput(provenances) // D1 完整门：≥1 出处 + 每条 sourceId/locator 可钻回（与 append 同一 guard）
   const embedding = await embedder.embed(draft.claimText, 'document') // 事务外算（纯计算/远程）
   const me = shapeOf(draft)
-  const candidates = await findCandidates(db, embedding, me.subject)
+  const candidates = await findCandidates(db, embedding, embedder.version, me.subject)
 
   // stage 2：逐候选判同。命中 same → 合并目标；contradicts/refines → 记边。
   let sameTarget: Candidate | null = null
