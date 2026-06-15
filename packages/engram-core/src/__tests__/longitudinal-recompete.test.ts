@@ -246,6 +246,107 @@ describe('S31 longitudinal frozen-golden recompete — the 8th dimension (reloca
     expect(new Set(allCov.map((p) => p.ring))).toEqual(new Set(['inner', 'mid', 'outer']))
   })
 
+  // EGR-CR-028 — write-side prior-value lookup must be ring-isolated: outer's longitudinal delta
+  // must reference the previous OUTER reading, never an intervening mid/inner reading. Regression
+  // for "outer T0 -> mid T0 -> outer T1, outer delta only references the prior outer value".
+
+  it('EGR-CR-028 — outer delta is ring-isolated: an intervening mid reading does NOT become outer T1 prev', async () => {
+    // A1) seed a non-zero ECE baseline so the ece reading is meaningful, and one answerable golden so
+    //     coverage is non-zero (sown via the path proven in the 'ring distinction' test).
+    await seedMiscalibration(L3_GOLDEN[0]!.expectedClaimTexts[0]!, L3_GOLDEN[0]!.query)
+    const outer0 = await runRecompeteSnapshot(db, embedder, 'T0', { ring: RING.outer })
+    const outer0Cov = outer0.results.find((r) => r.dimension === DIMENSION.coverage)!
+    const outer0Ece = outer0.results.find((r) => r.dimension === DIMENSION.ece)!
+
+    // A2) INTERLEAVE a mid snapshot whose value is DISTINCT from outer0: grow the KB (more coverage)
+    //     and add well-calibrated distinct usages (lowers ECE) so BOTH dims move before the mid read.
+    const claimId = await selfAuthor(L3_GOLDEN[1]!.expectedClaimTexts[0]!)
+    const [hit] = await recallClaims(db, embedder, L3_GOLDEN[1]!.query)
+    for (let i = 0; i < 10; i++) {
+      await reportUsage(db, claimId, 'adopted', {
+        byRole: `consumer:mid-${i}`,
+        taskId: `mid-task-${i}`,
+        confidenceAtRecall: hit!.confidence.value,
+        calibrationVersion: hit!.confidence.calibrationVersion,
+      })
+    }
+    const mid = await runRecompeteSnapshot(db, embedder, 'T0', { ring: RING.mid })
+    const midCov = mid.results.find((r) => r.dimension === DIMENSION.coverage)!
+    const midEce = mid.results.find((r) => r.dimension === DIMENSION.ece)!
+    // guard the construction: the mid reading must differ from outer0, else pollution is unobservable
+    expect(midCov.value).not.toBe(outer0Cov.value)
+    expect(midEce.value).not.toBe(outer0Ece.value)
+
+    // A3) outer T1 — its prior must be outer0, NOT the intervening mid.
+    const outer1 = await runRecompeteSnapshot(db, embedder, 'T1', { ring: RING.outer })
+    const outer1Cov = outer1.results.find((r) => r.dimension === DIMENSION.coverage)!
+    const outer1Ece = outer1.results.find((r) => r.dimension === DIMENSION.ece)!
+
+    const t1Rows = await getRecompeteEvents(db, { releaseSnapshot: 'T1' })
+    const outer1CovRow = t1Rows.find(
+      (r) => r.dimension === DIMENSION.coverage && r.ring === 'outer',
+    )!
+    const outer1EceRow = t1Rows.find((r) => r.dimension === DIMENSION.ece && r.ring === 'outer')!
+
+    // coverage (curr - prev): prev pinned to outer0, NOT the mid that landed in between
+    expect(outer1CovRow.payload.prev).toBe(outer0Cov.value)
+    expect(outer1CovRow.payload.prev).not.toBe(midCov.value)
+    expect(outer1Cov.delta!).toBeCloseTo(outer1Cov.value - outer0Cov.value, 10)
+    expect(outer1Cov.delta!).not.toBeCloseTo(outer1Cov.value - midCov.value, 10)
+
+    // ece (prev - curr): same ring isolation
+    expect(outer1EceRow.payload.prev).toBe(outer0Ece.value)
+    expect(outer1EceRow.payload.prev).not.toBe(midEce.value)
+    expect(outer1Ece.delta!).toBeCloseTo(outer0Ece.value - outer1Ece.value, 10)
+    expect(outer1Ece.delta!).not.toBeCloseTo(midEce.value - outer1Ece.value, 10)
+  })
+
+  it('EGR-CR-028 — isolation is symmetric: mid delta references the prior MID value, not an intervening outer', async () => {
+    // Sequence: mid T0 -> outer T0 (DISTINCT, lands LAST before mid T1) -> mid T1. The buggy unfiltered
+    // lookup would grab the outer row (most-recent overall) as mid T1's prev; isolation must pick mid T0.
+    await selfAuthor(L3_GOLDEN[0]!.expectedClaimTexts[0]!)
+    const mid0 = await runRecompeteSnapshot(db, embedder, 'T0', { ring: RING.mid })
+    const mid0Cov = mid0.results.find((r) => r.dimension === DIMENSION.coverage)!
+
+    // grow the KB so the intervening outer reading is DISTINCT from mid T0
+    await selfAuthor(L3_GOLDEN[1]!.expectedClaimTexts[0]!)
+    const outer0 = await runRecompeteSnapshot(db, embedder, 'T0', { ring: RING.outer })
+    const outer0Cov = outer0.results.find((r) => r.dimension === DIMENSION.coverage)!
+    expect(outer0Cov.value).not.toBe(mid0Cov.value) // the polluting value differs ⇒ pollution is observable
+
+    const mid1 = await runRecompeteSnapshot(db, embedder, 'T1', { ring: RING.mid })
+    const mid1Cov = mid1.results.find((r) => r.dimension === DIMENSION.coverage)!
+
+    const t1Rows = await getRecompeteEvents(db, { releaseSnapshot: 'T1' })
+    const mid1CovRow = t1Rows.find((r) => r.dimension === DIMENSION.coverage && r.ring === 'mid')!
+    // mid T1 prev must be mid T0, NOT the intervening outer T0
+    expect(mid1CovRow.payload.prev).toBe(mid0Cov.value)
+    expect(mid1CovRow.payload.prev).not.toBe(outer0Cov.value)
+    expect(mid1Cov.delta!).toBeCloseTo(mid1Cov.value - mid0Cov.value, 10)
+    expect(mid1Cov.delta!).not.toBeCloseTo(mid1Cov.value - outer0Cov.value, 10)
+  })
+
+  it('EGR-CR-028 — first snapshot of a ring stays a baseline (delta null) even when another ring already has rows', async () => {
+    await selfAuthor(L3_GOLDEN[0]!.expectedClaimTexts[0]!)
+    // a mid row lands FIRST (itself a baseline since it is the first mid row)...
+    const mid0 = await runRecompeteSnapshot(db, embedder, 'T0', { ring: RING.mid })
+    expect(mid0.results.find((r) => r.dimension === DIMENSION.coverage)!.delta).toBeNull()
+
+    // ...then the FIRST outer snapshot — it has no prior OUTER row ⇒ baseline (delta null, prev null),
+    // and must NOT pick up the pre-existing mid row as its prior.
+    const outer0 = await runRecompeteSnapshot(db, embedder, 'T0', { ring: RING.outer })
+    const outer0Cov = outer0.results.find((r) => r.dimension === DIMENSION.coverage)!
+    const outer0Ece = outer0.results.find((r) => r.dimension === DIMENSION.ece)!
+    expect(outer0Cov.delta).toBeNull()
+    expect(outer0Ece.delta).toBeNull()
+
+    const t0Rows = await getRecompeteEvents(db, { releaseSnapshot: 'T0' })
+    const outer0CovRow = t0Rows.find(
+      (r) => r.dimension === DIMENSION.coverage && r.ring === 'outer',
+    )!
+    expect(outer0CovRow.payload.prev).toBeNull()
+  })
+
   it('A3 RED LINE: ELO / win-rate / reward is BARRED — recordRecompete physically rejects any non-whitelisted dimension', async () => {
     // the longitudinal deltas are ECE/coverage only; an ELO/win-rate/reward signal cannot be recorded at all.
     for (const banned of ['elo', 'win_rate', 'reward', 'precision_at_k', 'immunity']) {
