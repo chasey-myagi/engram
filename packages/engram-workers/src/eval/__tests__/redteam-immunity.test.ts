@@ -42,7 +42,7 @@ import {
 
 import { runNearDupPoison, runRedTeamGeneration, type ClassScore } from '../redteam-injector.js'
 import { REDTEAM_GENERATION_ITEMS } from '../redteam.gen.js'
-import { truncateEvalWorkTablesSql } from '../work-tables.js'
+import { EVAL_WORK_TABLES, truncateEvalWorkTablesSql } from '../work-tables.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
 const migrationsFolder = join(
@@ -596,6 +596,71 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
       expect(samples.length).toBe(1)
       // GoldenSample 只有 rawPredicted + correct —— 无 detectionRate/win-rate/ELO 字段（结构性边界）。
       expect(Object.keys(samples[0]!).sort()).toEqual(['correct', 'rawPredicted'])
+    })
+  })
+
+  // EGR-CR-049：runRedTeamGeneration 逐条「前清」却不「后清」，正常返回 / 异常抛出后都会把
+  // 最后一条对抗样本（毒株）残留在 caller DB，破坏「红队样本用完即清」的评测隔离不变量。
+  // 把「返回后 work tables 必为空」从隐性契约钉成显式、被测试守护的不变量（含异常路径，锁死 try/finally）。
+  describe('EGR-CR-049 · 返回后工作表不残留', () => {
+    beforeEach(resetWorkTables)
+
+    /** 查每张 work table 当前行数（断言「返回后全空」用）。 */
+    async function workTableCounts(): Promise<Record<string, number>> {
+      const out: Record<string, number> = {}
+      for (const t of EVAL_WORK_TABLES) {
+        const r = await pool.query(`SELECT count(*)::int AS n FROM ${t}`)
+        out[t] = r.rows[0].n
+      }
+      return out
+    }
+
+    it('T1：正常返回后所有 work tables 为空，且 scores 四类各 injected>=1', async () => {
+      // 干净起跑（beforeEach 已清）；跑完整世代，最后一条 item 的写入若不被后清就会残留。
+      const scores = await runRedTeamGeneration(
+        { db, embedder },
+        REDTEAM_GENERATION_ITEMS,
+        resetWorkTables,
+      )
+
+      // 确实注入过（不是因为压根没写才空）：四类齐全、每类至少注入 1 条。
+      expect(new Set(scores.map((s) => s.redteamClass))).toEqual(
+        new Set(['false', 'contradiction', 'stale', 'near_dup_poison']),
+      )
+      for (const s of scores) {
+        expect(s.injected).toBeGreaterThanOrEqual(1)
+      }
+
+      // 返回后 EVAL_WORK_TABLES 全部为 0（含 claim/source/claim_provenance/relation/claim_verification）。
+      // red（未修）：最后一条 item 的 claim 及其 source/relation/claim_verification 残留 → 非 0 → 失败。
+      const counts = await workTableCounts()
+      for (const t of EVAL_WORK_TABLES) {
+        expect(counts[t]).toBe(0)
+      }
+    })
+
+    it('T2：注入中途抛错时 reject，且 work tables 仍全空（钉住 try/finally 而非裸 resetDb）', async () => {
+      // 让注入「写了一半库再抛」：injectClaim 先 addSource（不经 embedder）写若干 source 行，
+      // 再 appendClaim 调 embedder.embed 算向量——此处 embed 抛错 ⇒ source 表已有脏行 + 函数冒泡抛错。
+      // 这复现「resetDb 之后已注入数据、当前迭代未跑完就抛」的最坏情形，唯有 finally 兜底能清。
+      const failingEmbedder = {
+        ...embedder,
+        embed: async (): Promise<number[]> => {
+          throw new Error('redteam injection boom (simulated)')
+        },
+      }
+      const item = REDTEAM_GENERATION_ITEMS.find((i) => i.redteamClass === 'false')!
+
+      // red（return 前裸 resetDb 而非 finally）：异常路径跳过清理 → source 残留 → 下面断言失败。
+      await expect(
+        runRedTeamGeneration({ db, embedder: failingEmbedder }, [item], resetWorkTables),
+      ).rejects.toThrow(/boom/)
+
+      // green（finally 兜底）：即便抛错，返回前也清了 → 全空（含已写一半的 source 行）。
+      const counts = await workTableCounts()
+      for (const t of EVAL_WORK_TABLES) {
+        expect(counts[t]).toBe(0)
+      }
     })
   })
 })
