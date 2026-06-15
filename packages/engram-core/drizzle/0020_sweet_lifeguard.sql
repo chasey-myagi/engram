@@ -1,0 +1,1 @@
+ALTER TABLE "redteam_immunity_scores" ADD CONSTRAINT "redteam_immunity_scores_redteam_class_check" CHECK ("redteam_immunity_scores"."redteam_class" IN ('false', 'contradiction', 'stale', 'near_dup_poison'));

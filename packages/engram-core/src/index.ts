@@ -183,6 +183,7 @@ export {
   recordImmunityScore,
   getImmunityScores,
   REDTEAM_CLASSES,
+  isRedTeamClass,
   type RedTeamClass,
   type RedTeamItem,
   type RedTeamGeneration,

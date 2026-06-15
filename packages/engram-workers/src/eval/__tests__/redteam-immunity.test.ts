@@ -25,6 +25,7 @@ import {
   addSource,
   appendClaim,
   collectUsageCalibrationSamples,
+  computeSystemDimensions,
   createDb,
   freezeRedTeamGeneration,
   getImmunityScores,
@@ -325,6 +326,46 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
       const afterRows = await getImmunityScores(db, 'rt-dim-test', 'false')
       expect(afterRows.length).toBe(beforeRows.length + 1) // append-only，不覆盖
       expect(afterRows[0]).toEqual(priorFirst) // 旧行逐字段原样保留（detected/injected/rate/时间…全不变）
+    })
+
+    // EGR-CR-055（#130）：四类是免疫维度的语义不变量。伪造类别既不能经 SPI 进表（Fix 1），
+    // 也不能绕过 SPI 经 plain SQL 进表（Fix 2 的 DB check constraint），且永不抬高 immunity 聚合。
+    describe('EGR-CR-055 · 伪造 redteamClass 不进表、不污染 immunity 聚合', () => {
+      it('B1 · recordImmunityScore 经真 DB 拒未知 class，行数 / byClass / immunity 读数全不变', async () => {
+        const beforeRows = await getImmunityScores(db, 'rt-dim-test')
+        const beforeImmunity = (
+          await computeSystemDimensions(db, embedder, { immunityGeneration: 'rt-dim-test' })
+        ).immunity
+
+        await expect(
+          recordImmunityScore(db, {
+            generationVersion: 'rt-dim-test',
+            redteamClass: 'sql_injection' as any,
+            injected: 100,
+            detected: 100, // 若进表会把 immunity 抬向 1
+          }),
+        ).rejects.toThrow(/unknown redteamClass/)
+
+        const afterRows = await getImmunityScores(db, 'rt-dim-test')
+        expect(afterRows.length).toBe(beforeRows.length) // 没新增脏行
+        expect(new Set(afterRows.map((r) => r.redteamClass))).toEqual(
+          new Set(['false', 'contradiction', 'stale', 'near_dup_poison']),
+        )
+        const afterImmunity = (
+          await computeSystemDimensions(db, embedder, { immunityGeneration: 'rt-dim-test' })
+        ).immunity
+        expect(afterImmunity).toBe(beforeImmunity) // 伪造的 100/100 未抬高免疫分
+      })
+
+      it('B2 · DB check constraint 挡绕过 SPI 的 plain SQL 写未知 class', async () => {
+        await expect(
+          pool.query(
+            `INSERT INTO redteam_immunity_scores
+               (id, generation_version, redteam_class, injected, detected, detection_rate, payload, created_by)
+             VALUES (gen_random_uuid(), 'rt-dim-test', 'reward', 1, 1, 1.0, '{}', 'test')`,
+          ),
+        ).rejects.toThrow(/redteam_immunity_scores_redteam_class_check/)
+      })
     })
   })
 

@@ -466,8 +466,16 @@ export const redteamImmunityScores = pgTable(
     createdBy: text('created_by').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  // 按世代 + 类别取最新一次打分（纵向比较）。
-  (t) => [index('idx_redteam_scores_gen_class').on(t.generationVersion, t.redteamClass)],
+  (t) => [
+    // 按世代 + 类别取最新一次打分（纵向比较）。
+    index('idx_redteam_scores_gen_class').on(t.generationVersion, t.redteamClass),
+    // EGR-CR-055：四类是免疫维度的语义不变量，DB 层挡绕过 SPI 的 plain SQL 写未知 class
+    // （字面与 REDTEAM_CLASSES 白名单同步；内核不解释 class 语义，故用轻量 check 而非 lookup FK）。
+    check(
+      'redteam_immunity_scores_redteam_class_check',
+      sql`${t.redteamClass} IN ('false', 'contradiction', 'stale', 'near_dup_poison')`,
+    ),
+  ],
 )
 
 /**
