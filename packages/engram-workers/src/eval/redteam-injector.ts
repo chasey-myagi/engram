@@ -128,6 +128,12 @@ export interface ClassScore {
 export interface RedTeamRunDeps {
   db: DB
   embedder: Embedder
+  /**
+   * 测试钩子：被审/对抗 claim 默认挂的独立 supports 源数（默认 INDEPENDENT_SOURCES_PER_CLAIM=4，base≥0.5 可晋升）。
+   * 调小到 3 → base=0.487<0.5 → draft→active 晋升门抛错 → 留 draft（复现「独立印证薄、晋升回归」这一真实失败路径，
+   * 用于回归测试 near_dup_poison 的 detected 口径不把停在 draft 的 poison 计为检出）。锚的源数不受此影响（锚须晋升 active）。
+   */
+  itemSourceCount?: number
 }
 
 /**
@@ -234,11 +240,13 @@ async function injectClaim(
   }
 
   // 2) 注入被审/对抗 claim（经真 append_claim：D1 强制出处、S8 同事实落 contradicts 边、连续 confidence）。
+  //    源数默认 INDEPENDENT_SOURCES_PER_CLAIM；测试可经 deps.itemSourceCount 调小以复现「独立印证薄→晋升不过门」。
   const provs = await buildProvenances(
     db,
     item.evidence,
     item.sourceKind as SourceKind,
     `redteam:item:${item.id}`,
+    deps.itemSourceCount ?? INDEPENDENT_SOURCES_PER_CLAIM,
   )
   const appended = await appendClaim(
     db,
@@ -451,19 +459,24 @@ async function runStale(deps: RedTeamRunDeps, item: RedTeamItem): Promise<Inject
 /**
  * near_dup_poison 类免疫：注入伪装成「精炼」但 object 被悄悄改小的 claim（同 subject、相似度近既有锚）→ 跑**真 Reconciler**
  * → objectSubsetViaEntailment 实算 A⊄B → poison → flag(active→flagged) + 升级信号（带对端 anchorId，S18）。
- * detected = 记了带 anchorId 的 escalation ∧ claim 被 flag。被审 claim 先晋升 active（poison 才能 active→flagged）。
+ * detected = 记了带 anchorId 的 escalation ∧ Reconciler 判 poison ∧ **claim 真被收紧到 flagged**（口径与 runFalse 对齐）。
+ * 被审 claim 先晋升 active（poison 才能 active→flagged）；晋升失败留 draft 时由 promotionFailed 显式标注、且**不计**检出
+ * （EGR-CR-050：停在 draft、从未被 flag 的 poison 只是 escalation-only 诊断，不能虚高计检出）。
  */
-async function runNearDupPoison(
+export async function runNearDupPoison(
   deps: RedTeamRunDeps,
   item: RedTeamItem,
 ): Promise<InjectionOutcome> {
   const { db } = deps
   const injected = await injectClaim(deps, item)
   const { claimId, anchorId } = injected
+  // 晋升 active 失败不再静默吞掉：显式记 promotionFailed（晋升回归 / D2 floor 耦合 / entailment 不过门时留 draft）。
+  // draft→flagged 非法（A.4），故留 draft；但 escalation 仍会记（信号不丢）——见下方 detected 口径与 reaction.promotionFailed。
+  let promotionFailed = false
   try {
     await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
   } catch {
-    /* 留 draft：draft 不能 flag（A.4），但 escalation 仍会记（信号不丢）——见 detected 口径 */
+    promotionFailed = true
   }
   const judge = makeBoundEntailmentOracle()
   const res = await reconcileBatch({ db, judge }, [claimId])
@@ -471,9 +484,12 @@ async function runNearDupPoison(
   const escalatedToAnchor =
     anchorId !== undefined && escalations.some((e) => e.conflictsWith === anchorId)
   const finalStatus = await statusOf(db, claimId)
-  // 逮到 = Reconciler 判 poison 并记了带对端 id 的升级信号（active 时还应 flag；draft 留影子区但信号已记 = 逮到）。
+  // 逮到 = Reconciler 判 poison ∧ 记了带对端 id 的升级信号 ∧ claim **真被收紧到 flagged**。
+  // 停在 draft 的 poison（escalation 记了但未收紧）不计检出——口径与 runFalse 的 detected=finalStatus==='flagged' 对齐，
+  // 防「晋升回归让 poison 留影子区」时这条评测仍虚报满分检出（EGR-CR-050）。escalation-only 诊断由 reaction 的
+  // escalatedToAnchor && !flagged 表达，无需新增独立维度。
   const poisonPair = res.pairs.find((p) => p.claimId === claimId && p.verdict === 'poison')
-  const detected = escalatedToAnchor && poisonPair !== undefined
+  const detected = escalatedToAnchor && poisonPair !== undefined && finalStatus === 'flagged'
   return {
     itemId: item.id,
     redteamClass: 'near_dup_poison',
@@ -485,6 +501,7 @@ async function runNearDupPoison(
       verdict: poisonPair?.verdict ?? null,
       flagged: finalStatus === 'flagged',
       escalatedToAnchor,
+      promotionFailed,
     },
   }
 }
