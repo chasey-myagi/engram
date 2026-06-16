@@ -14,6 +14,7 @@ import {
   type ConfidenceFactorBreakdown,
   type StoredConfidence,
 } from '../confidence/confidence.js'
+import { trustedHumanActor, agentActor } from '../spi/actor.js'
 import { createDb, type DB } from '../db/client.js'
 import { claim, claimVerification, type ClaimStatus } from '../db/schema.js'
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
@@ -186,7 +187,7 @@ describe('S17 f2 entailment factor — patrol → f2 (命门 A.3)', () => {
     await commitClaim(db, embedder, judge, { claimText: 'sku-1 weight 5kg', ...triple }, [
       { sourceId: s2.sourceId, locator: 'b' },
     ])
-    await transitionClaim(db, first.claimId, 'active', { by: 'human:editor' }) // promote (human bypass)
+    await transitionClaim(db, first.claimId, 'active', { actor: trustedHumanActor('human:editor') }) // promote (human bypass)
 
     // no patrol: entailment is the stored neutral 0.5
     const h0 = await recallClaims(db, embedder, 'sku-1 weight 5kg')
@@ -253,7 +254,7 @@ describe('S17 f2 entailment factor — patrol → f2 (命门 A.3)', () => {
     })
     // no patrol yet → gate sees neutral 0.5 → conf 0.4875 < 0.5 → blocked (entailmentPass flag alone is not enough)
     await expect(
-      transitionClaim(db, id, 'active', { by: VERIFIER_ROLE, entailmentPass: true }),
+      transitionClaim(db, id, 'active', { actor: agentActor(VERIFIER_ROLE), entailmentPass: true }),
     ).rejects.toThrow(new RegExp(`conf 0\\.\\d+ < ${PROMOTE_CONFIDENCE_FLOOR}`))
     const [d] = await db.select({ s: claim.status }).from(claim).where(eq(claim.id, id))
     expect(d!.s).toBe('draft') // unchanged
@@ -264,7 +265,10 @@ describe('S17 f2 entailment factor — patrol → f2 (命门 A.3)', () => {
       byRole: VERIFIER_ROLE,
       verdict: { entailment: 'pass' },
     })
-    const res = await transitionClaim(db, id, 'active', { by: VERIFIER_ROLE, entailmentPass: true })
+    const res = await transitionClaim(db, id, 'active', {
+      actor: agentActor(VERIFIER_ROLE),
+      entailmentPass: true,
+    })
     expect(res).toEqual({ from: 'draft', to: 'active' })
   })
 
@@ -280,9 +284,9 @@ describe('S17 f2 entailment factor — patrol → f2 (命门 A.3)', () => {
       verdict: { entailment: 'pass' },
     })
     // conf now ≥ 0.5 (live f2=1) but entailmentPass omitted → still blocked on the entailment gate
-    await expect(transitionClaim(db, id, 'active', { by: VERIFIER_ROLE })).rejects.toThrow(
-      /entailment did not pass/,
-    )
+    await expect(
+      transitionClaim(db, id, 'active', { actor: agentActor(VERIFIER_ROLE) }),
+    ).rejects.toThrow(/entailment did not pass/)
   })
 
   // EGR-CR-001 (#82): a not_co_true patrol row refused by the NC-exact red line (red line #3) must NEVER score into f2.

@@ -14,6 +14,7 @@ import {
   type ConfidenceFactorBreakdown,
   type StoredConfidence,
 } from '../confidence/confidence.js'
+import { trustedHumanActor, agentActor } from '../spi/actor.js'
 import { createDb, type DB } from '../db/client.js'
 import {
   claim,
@@ -152,8 +153,16 @@ describe('S22 f1 humanReview producer — human review → f1 (命门 A.3, last 
     expect(await latestHumanReview(db, id)).toBeNull()
     expect(await computeHumanReviewFactor(db, id)).toBe(NEUTRAL_FACTORS.humanReview) // 0
 
-    await writeHumanReview(db, { claimId: id, byRole: EDITOR, verdict: { humanReview: 0 } })
-    await writeHumanReview(db, { claimId: id, byRole: EDITOR, verdict: { humanReview: 1 } })
+    await writeHumanReview(db, {
+      claimId: id,
+      actor: trustedHumanActor(EDITOR),
+      verdict: { humanReview: 0 },
+    })
+    await writeHumanReview(db, {
+      claimId: id,
+      actor: trustedHumanActor(EDITOR),
+      verdict: { humanReview: 1 },
+    })
     expect(await latestHumanReview(db, id)).toBe(1) // latest of two reviews
     expect(await computeHumanReviewFactor(db, id)).toBe(1)
     // append-only: both rows persisted, both kind=patrol & human
@@ -165,7 +174,11 @@ describe('S22 f1 humanReview producer — human review → f1 (命门 A.3, last 
   it('writeHumanReview rejects a non-human caller — f1 is a human-only factor (red line #2)', async () => {
     const id = await seedClaim({ query: 'agent cannot endorse', status: 'draft' })
     await expect(
-      writeHumanReview(db, { claimId: id, byRole: 'agent:distiller', verdict: { humanReview: 1 } }),
+      writeHumanReview(db, {
+        claimId: id,
+        actor: agentActor('agent:distiller'),
+        verdict: { humanReview: 1 },
+      }),
     ).rejects.toThrow(/is not human/)
     // nothing written, factor stays neutral
     expect(await latestHumanReview(db, id)).toBeNull()
@@ -176,9 +189,21 @@ describe('S22 f1 humanReview producer — human review → f1 (命门 A.3, last 
     const a = await seedClaim({ query: 'a', status: 'active' })
     const b = await seedClaim({ query: 'b', status: 'active' })
     const c = await seedClaim({ query: 'c', status: 'active' }) // never reviewed
-    await writeHumanReview(db, { claimId: a, byRole: EDITOR, verdict: { humanReview: 1 } })
-    await writeHumanReview(db, { claimId: b, byRole: EDITOR, verdict: { humanReview: 1 } })
-    await writeHumanReview(db, { claimId: b, byRole: EDITOR, verdict: { humanReview: 0 } }) // newer
+    await writeHumanReview(db, {
+      claimId: a,
+      actor: trustedHumanActor(EDITOR),
+      verdict: { humanReview: 1 },
+    })
+    await writeHumanReview(db, {
+      claimId: b,
+      actor: trustedHumanActor(EDITOR),
+      verdict: { humanReview: 1 },
+    })
+    await writeHumanReview(db, {
+      claimId: b,
+      actor: trustedHumanActor(EDITOR),
+      verdict: { humanReview: 0 },
+    }) // newer
     const m = await latestHumanReviewFactors(db, [a, b, c])
     expect(m.get(a)).toBe(1)
     expect(m.get(b)).toBe(0) // latest = reject
@@ -197,7 +222,11 @@ describe('S22 f1 humanReview producer — human review → f1 (命门 A.3, last 
     expect(await latestHumanReview(db, id)).toBeNull() // no human-review row yet
 
     // a NEWER human Approve row (no entailment field) must NOT drop f2 back to neutral
-    await writeHumanReview(db, { claimId: id, byRole: EDITOR, verdict: { humanReview: 1 } })
+    await writeHumanReview(db, {
+      claimId: id,
+      actor: trustedHumanActor(EDITOR),
+      verdict: { humanReview: 1 },
+    })
     expect(await computeEntailmentFactor(db, id)).toBe(1) // still reads the latest entailment-bearing row
     expect(await latestHumanReview(db, id)).toBe(1) // f1 reads the human-review row
 
@@ -219,7 +248,10 @@ describe('S22 Approve — endorse f1 (=1), promote/relax via the state machine (
     const id = await seedClaim({ query: q, status: 'draft', factors: { authority: 0.9 } })
     expect(await recallClaims(db, embedder, q)).toHaveLength(0) // draft shadow zone: not recalled
 
-    const res = await approveClaim(db, id, { by: EDITOR, note: 'verified against datasheet' })
+    const res = await approveClaim(db, id, {
+      actor: trustedHumanActor(EDITOR),
+      note: 'verified against datasheet',
+    })
     expect(res.status).toBe('active')
     expect(res.overturnEventId).toBeUndefined() // draft promote is not an overturn
     expect(await statusOf(id)).toBe('active')
@@ -246,7 +278,7 @@ describe('S22 Approve — endorse f1 (=1), promote/relax via the state machine (
     expect(before[0]!.confidence.factors.humanReview).toBe(0) // neutral pre-approve
     const vBefore = before[0]!.confidence.value
 
-    await approveClaim(db, id, { by: EDITOR })
+    await approveClaim(db, id, { actor: trustedHumanActor(EDITOR) })
     const after = await recallClaims(db, embedder, q)
     expect(after[0]!.confidence.factors.humanReview).toBe(1)
     expect(after[0]!.confidence.value).toBeGreaterThan(vBefore) // f1 raised the value
@@ -256,7 +288,7 @@ describe('S22 Approve — endorse f1 (=1), promote/relax via the state machine (
     // prove f1 is wired at the single factor seam (computeConfidenceFromProvenances opts.claimId), not only at recall.
     const q = 'commit-time f1 seam'
     const id = await seedClaim({ query: q, status: 'active', factors: { authority: 0.9 } })
-    await approveClaim(db, id, { by: EDITOR })
+    await approveClaim(db, id, { actor: trustedHumanActor(EDITOR) })
     // Assert the single factor seam directly: a commit-time recompute for this claimId reads f1 live (=1 after Approve).
     const { computeConfidenceFromProvenances } = await import('../spi/append-claim.js')
     const provs = await db
@@ -279,7 +311,10 @@ describe('S22 Approve — endorse f1 (=1), promote/relax via the state machine (
     const id = await seedClaim({ query: q, status: 'quarantined', factors: { authority: 0.9 } })
     expect(await recallClaims(db, embedder, q)).toHaveLength(0) // quarantined: not recalled
 
-    const res = await approveClaim(db, id, { by: EDITOR, note: 'patrol was too aggressive' })
+    const res = await approveClaim(db, id, {
+      actor: trustedHumanActor(EDITOR),
+      note: 'patrol was too aggressive',
+    })
     expect(res.status).toBe('active')
     expect(res.overturnEventId).toBeDefined()
     expect(await statusOf(id)).toBe('active') // relaxed via the red edge
@@ -302,7 +337,7 @@ describe('S22 Approve — endorse f1 (=1), promote/relax via the state machine (
       status: 'flagged',
       factors: { authority: 0.9 },
     })
-    await approveClaim(db, f, { by: EDITOR })
+    await approveClaim(db, f, { actor: trustedHumanActor(EDITOR) })
     expect((await getHumanOverturns(db, f))[0]!.payload.overturn).toBe('pardon')
     expect(await statusOf(f)).toBe('active')
 
@@ -311,7 +346,7 @@ describe('S22 Approve — endorse f1 (=1), promote/relax via the state machine (
       status: 'superseded',
       factors: { authority: 0.9 },
     })
-    await approveClaim(db, s, { by: EDITOR })
+    await approveClaim(db, s, { actor: trustedHumanActor(EDITOR) })
     expect((await getHumanOverturns(db, s))[0]!.payload.overturn).toBe('rollback')
     expect(await statusOf(s)).toBe('active')
   })
@@ -322,7 +357,7 @@ describe('S22 Approve — endorse f1 (=1), promote/relax via the state machine (
       status: 'active',
       factors: { authority: 0.9 },
     })
-    const res = await approveClaim(db, id, { by: EDITOR })
+    const res = await approveClaim(db, id, { actor: trustedHumanActor(EDITOR) })
     expect(res.status).toBe('active')
     expect(res.overturnEventId).toBeUndefined()
     expect(await getHumanOverturns(db, id)).toHaveLength(0)
@@ -335,7 +370,9 @@ describe('S22 Approve — endorse f1 (=1), promote/relax via the state machine (
       status: 'quarantined',
       factors: { authority: 0.9 },
     })
-    await expect(approveClaim(db, id, { by: 'agent:rogue' })).rejects.toThrow(/only a human/)
+    await expect(approveClaim(db, id, { actor: agentActor('agent:rogue') })).rejects.toThrow(
+      /only a human/,
+    )
     expect(await statusOf(id)).toBe('quarantined') // unchanged
     expect(await latestHumanReview(db, id)).toBeNull() // no f1 written
     expect(await getHumanOverturns(db, id)).toHaveLength(0)
@@ -359,7 +396,7 @@ describe('S22 Edit-Approve — append-only NEW version, then endorse the new one
       oldId,
       { claimText: `claim for ${q} (corrected to 42Nm)` },
       [{ sourceId, locator: 'rev-2', excerpt: 'measured 42Nm' }],
-      { by: EDITOR, note: 'corrected torque' },
+      { actor: trustedHumanActor(EDITOR), note: 'corrected torque' },
     )
     expect(res.claimId).not.toBe(oldId) // a NEW version id
     expect(res.status).toBe('active')
@@ -408,7 +445,7 @@ describe('S22 Edit-Approve — append-only NEW version, then endorse the new one
       oldId,
       { claimText: 'a totally new revised text' },
       [{ sourceId, locator: 'r2' }],
-      { by: EDITOR },
+      { actor: trustedHumanActor(EDITOR) },
     )
     const [after] = await db.select({ t: claim.claimText }).from(claim).where(eq(claim.id, oldId))
     expect(after!.t).toBe(oldText) // old row text unchanged — never destructive
@@ -427,12 +464,14 @@ describe('S22 Edit-Approve — append-only NEW version, then endorse the new one
         oldId,
         { claimText: 'x' },
         [{ sourceId: (await aSource()).sourceId, locator: 'r' }],
-        { by: 'agent:x' },
+        { actor: agentActor('agent:x') },
       ),
     ).rejects.toThrow(/only a human/)
     // D1: no provenance → physically refused (no new version, old stays the head)
     await expect(
-      editApproveClaim(db, embedder, oldId, { claimText: 'x' }, [], { by: EDITOR }),
+      editApproveClaim(db, embedder, oldId, { claimText: 'x' }, [], {
+        actor: trustedHumanActor(EDITOR),
+      }),
     ).rejects.toThrow(/forced provenance|>=1 provenance/)
     expect(await statusOf(oldId)).toBe('active') // old still the active head, untouched
   })
@@ -448,7 +487,10 @@ describe('S22 Reject — tighten to quarantined (f1=0), audit-preserved, never d
     })
     expect((await recallClaims(db, embedder, q)).map((h) => h.claim.id)).toContain(id) // recallable while active
 
-    const res = await rejectClaim(db, id, { by: EDITOR, note: 'contradicts the spec' })
+    const res = await rejectClaim(db, id, {
+      actor: trustedHumanActor(EDITOR),
+      note: 'contradicts the spec',
+    })
     expect(res.status).toBe('quarantined')
     expect(res.overturnEventId).toBeDefined()
     expect(await statusOf(id)).toBe('quarantined')
@@ -475,9 +517,9 @@ describe('S22 Reject — tighten to quarantined (f1=0), audit-preserved, never d
       status: 'active',
       factors: { authority: 0.9 },
     })
-    await approveClaim(db, id, { by: EDITOR })
+    await approveClaim(db, id, { actor: trustedHumanActor(EDITOR) })
     expect(await computeHumanReviewFactor(db, id)).toBe(1) // approved first
-    await rejectClaim(db, id, { by: EDITOR })
+    await rejectClaim(db, id, { actor: trustedHumanActor(EDITOR) })
     expect(await computeHumanReviewFactor(db, id)).toBe(0) // reject floors f1
   })
 
@@ -487,7 +529,7 @@ describe('S22 Reject — tighten to quarantined (f1=0), audit-preserved, never d
       status: 'flagged',
       factors: { authority: 0.9 },
     })
-    const res = await rejectClaim(db, id, { by: EDITOR })
+    const res = await rejectClaim(db, id, { actor: trustedHumanActor(EDITOR) })
     expect(res.status).toBe('quarantined')
     expect(res.overturnEventId).toBeUndefined()
     expect(await getHumanOverturns(db, id)).toHaveLength(0)
@@ -501,7 +543,7 @@ describe('S22 Reject — tighten to quarantined (f1=0), audit-preserved, never d
       status: 'draft',
       factors: { authority: 0.95, indepSupport: 0.9 },
     })
-    const res = await rejectClaim(db, id, { by: EDITOR })
+    const res = await rejectClaim(db, id, { actor: trustedHumanActor(EDITOR) })
     expect(res.status).toBe('draft') // A.4 has no legal draft→quarantined edge
     expect(await latestHumanReview(db, id)).toBe(0) // f1=0 ⇒ can never cross the promote gate
     expect(await recallClaims(db, embedder, q)).toHaveLength(0) // shadow zone
@@ -513,10 +555,12 @@ describe('S22 Reject — tighten to quarantined (f1=0), audit-preserved, never d
       status: 'active',
       factors: { authority: 0.9 },
     })
-    await expect(rejectClaim(db, id, { by: 'agent:x' })).rejects.toThrow(/only a human/)
+    await expect(rejectClaim(db, id, { actor: agentActor('agent:x') })).rejects.toThrow(
+      /only a human/,
+    )
 
-    await approveClaim(db, id, { by: EDITOR }) // first an approve
-    await rejectClaim(db, id, { by: EDITOR }) // then a reject
+    await approveClaim(db, id, { actor: trustedHumanActor(EDITOR) }) // first an approve
+    await rejectClaim(db, id, { actor: trustedHumanActor(EDITOR) }) // then a reject
     const rows = await db.select().from(claimVerification).where(eq(claimVerification.claimId, id))
     expect(rows.length).toBeGreaterThanOrEqual(2) // both reviews retained (append-only)
     expect(await latestHumanReview(db, id)).toBe(0) // latest wins
@@ -528,7 +572,7 @@ describe('S22 Reject — tighten to quarantined (f1=0), audit-preserved, never d
       status: 'quarantined',
       factors: { authority: 0.9 },
     })
-    const res = await rejectClaim(db, id, { by: EDITOR })
+    const res = await rejectClaim(db, id, { actor: trustedHumanActor(EDITOR) })
     expect(res.status).toBe('quarantined')
     expect(res.overturnEventId).toBeUndefined()
     expect(await getHumanOverturns(db, id)).toHaveLength(0)
@@ -574,8 +618,8 @@ describe('S22 atomicity + concurrency — HITL editor actions are single-transac
     })
     // race two editors un-quarantining the same claim
     const [r1, r2] = await Promise.all([
-      approveClaim(db, id, { by: 'human:editor-a' }),
-      approveClaim(db, id, { by: 'human:editor-b' }),
+      approveClaim(db, id, { actor: trustedHumanActor('human:editor-a') }),
+      approveClaim(db, id, { actor: trustedHumanActor('human:editor-b') }),
     ])
     expect(r1.status).toBe('active')
     expect(r2.status).toBe('active')
@@ -594,8 +638,8 @@ describe('S22 atomicity + concurrency — HITL editor actions are single-transac
       factors: { authority: 0.9 },
     })
     const [r1, r2] = await Promise.all([
-      rejectClaim(db, id, { by: 'human:editor-a' }),
-      rejectClaim(db, id, { by: 'human:editor-b' }),
+      rejectClaim(db, id, { actor: trustedHumanActor('human:editor-a') }),
+      rejectClaim(db, id, { actor: trustedHumanActor('human:editor-b') }),
     ])
     expect(r1.status).toBe('quarantined')
     expect(r2.status).toBe('quarantined')
@@ -612,7 +656,9 @@ describe('S22 atomicity + concurrency — HITL editor actions are single-transac
     })
     const faultyDb = dbThatThrowsOnUpdate(db)
     // writeHumanReview (insert) runs first, THEN the transition's update throws → whole tx must roll back.
-    await expect(approveClaim(faultyDb, id, { by: EDITOR })).rejects.toThrow(/injected/)
+    await expect(approveClaim(faultyDb, id, { actor: trustedHumanActor(EDITOR) })).rejects.toThrow(
+      /injected/,
+    )
     expect(await statusOf(id)).toBe('quarantined') // status never moved
     expect(await latestHumanReview(db, id)).toBeNull() // the f1 row was rolled back (no orphan endorsement)
     expect(await getHumanOverturns(db, id)).toHaveLength(0) // no overturn ever recorded (reached after the throw)
@@ -625,7 +671,9 @@ describe('S22 atomicity + concurrency — HITL editor actions are single-transac
       factors: { authority: 0.9 },
     })
     const faultyDb = dbThatThrowsOnUpdate(db)
-    await expect(rejectClaim(faultyDb, id, { by: EDITOR })).rejects.toThrow(/injected/)
+    await expect(rejectClaim(faultyDb, id, { actor: trustedHumanActor(EDITOR) })).rejects.toThrow(
+      /injected/,
+    )
     expect(await statusOf(id)).toBe('active') // never reached flagged/quarantined
     expect(await latestHumanReview(db, id)).toBeNull()
     expect(await getHumanOverturns(db, id)).toHaveLength(0)
@@ -641,7 +689,7 @@ describe('S22 atomicity + concurrency — HITL editor actions are single-transac
       oldId,
       { claimText: `claim for ${q} (revised)` },
       [{ sourceId, locator: 'r2' }],
-      { by: EDITOR },
+      { actor: trustedHumanActor(EDITOR) },
     )
     expect(res.overturnEventId).toBeUndefined()
     expect(await getHumanOverturns(db, res.claimId)).toHaveLength(0)
@@ -650,15 +698,90 @@ describe('S22 atomicity + concurrency — HITL editor actions are single-transac
 
   it('writeHumanReview clamps an out-of-range humanReview into [0,1] (a removed clamp would fail this)', async () => {
     const id = await seedClaim({ query: 'clamp', status: 'active', factors: { authority: 0.9 } })
-    await writeHumanReview(db, { claimId: id, byRole: EDITOR, verdict: { humanReview: 2 } })
+    await writeHumanReview(db, {
+      claimId: id,
+      actor: trustedHumanActor(EDITOR),
+      verdict: { humanReview: 2 },
+    })
     expect(await latestHumanReview(db, id)).toBe(1) // clamped down to the [0,1] ceiling
     expect(await computeHumanReviewFactor(db, id)).toBe(1)
   })
 
   it('editor actions on a missing claim throw not-found and write nothing', async () => {
     const ghost = randomUUID()
-    await expect(approveClaim(db, ghost, { by: EDITOR })).rejects.toThrow(/not found/)
-    await expect(rejectClaim(db, ghost, { by: EDITOR })).rejects.toThrow(/not found/)
+    await expect(approveClaim(db, ghost, { actor: trustedHumanActor(EDITOR) })).rejects.toThrow(
+      /not found/,
+    )
+    await expect(rejectClaim(db, ghost, { actor: trustedHumanActor(EDITOR) })).rejects.toThrow(
+      /not found/,
+    )
     expect(await getHumanOverturns(db, ghost)).toHaveLength(0)
+  })
+})
+
+// EGR-CR-002 · f1 人审与主编三动作都是「只人能投/做」的红线#2 门。现有的人专属断言只测 byRole:'agent:distiller'
+// 被拒（字符串区分本身生效），回避了「伪造 human:* 身份」这一真正攻击面。这里补上：一个 agentActor 即使把 role
+// 字面量伪造成 'human:fake' 也抬不了权——它绝不能写 f1、绝不能 Approve/Edit-Approve/Reject。
+describe('EGR-CR-002 authz/actor: a forged human:* role cannot vote f1 or drive any editor action', () => {
+  const FORGED = agentActor('human:fake') // a NON-human actor whose display role lies as 'human:fake'
+
+  // T3 — 写 f1 human review：伪造 human role 不能投人审。
+  it('T3: writeHumanReview rejects a forged human:* actor — no f1 row lands, factor stays 0; a trusted human votes f1=1', async () => {
+    const id = await seedClaim({
+      query: 'forged-f1',
+      status: 'active',
+      factors: { authority: 0.9 },
+    })
+    await expect(
+      writeHumanReview(db, { claimId: id, actor: FORGED, verdict: { humanReview: 1 } }),
+    ).rejects.toThrow(/is not human/)
+    expect(await latestHumanReview(db, id)).toBeNull() // nothing written
+    expect(await computeHumanReviewFactor(db, id)).toBe(0) // factor stays neutral
+
+    // a trusted human votes f1=1 (existing behavior preserved)
+    await writeHumanReview(db, {
+      claimId: id,
+      actor: trustedHumanActor(EDITOR),
+      verdict: { humanReview: 1 },
+    })
+    expect(await computeHumanReviewFactor(db, id)).toBe(1)
+  })
+
+  // T4 (editor part) — 主编三动作：伪造 human role 全部被拒，无任何副作用。
+  it('T4: approve / editApprove / reject all reject a forged human:* actor before any side effect', async () => {
+    const id = await seedClaim({
+      query: 'forged-approve',
+      status: 'quarantined',
+      factors: { authority: 0.9 },
+    })
+    await expect(approveClaim(db, id, { actor: FORGED })).rejects.toThrow(/only a human/)
+    expect(await statusOf(id)).toBe('quarantined') // not relaxed
+    expect(await latestHumanReview(db, id)).toBeNull() // no f1 written
+    expect(await getHumanOverturns(db, id)).toHaveLength(0) // no forged overturn trail
+
+    await expect(rejectClaim(db, id, { actor: FORGED })).rejects.toThrow(/only a human/)
+    expect(await latestHumanReview(db, id)).toBeNull()
+
+    const editTarget = await seedClaim({
+      query: 'forged-edit',
+      status: 'active',
+      factors: { authority: 0.9 },
+    })
+    await expect(
+      editApproveClaim(
+        db,
+        embedder,
+        editTarget,
+        { claimText: 'forged edit' },
+        [{ sourceId: (await aSource()).sourceId, locator: 'r' }],
+        { actor: FORGED },
+      ),
+    ).rejects.toThrow(/only a human/)
+    expect(await statusOf(editTarget)).toBe('active') // old head untouched, no new version
+
+    // a trusted human drives the same actions to their normal outcome (existing behavior preserved)
+    const ok = await approveClaim(db, id, { actor: trustedHumanActor(EDITOR) })
+    expect(ok.status).toBe('active')
+    expect(ok.overturnEventId).toBeDefined() // a real human un_quarantine overturn
   })
 })

@@ -26,6 +26,7 @@
 import { randomUUID } from 'node:crypto'
 
 import {
+  agentActor,
   addSource,
   appendClaim,
   attributeFailure,
@@ -138,7 +139,10 @@ async function appendActiveSourceClaim(
     { ...draft, createdBy: 'agent:distiller' },
     provs,
   )
-  await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
+  await transitionClaim(db, claimId, 'active', {
+    actor: agentActor('agent:distiller'),
+    entailmentPass: true,
+  })
   return claimId
 }
 

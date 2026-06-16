@@ -20,6 +20,7 @@
  * 下一轮 cron 再来。整轮的非预期异常也不向上抛（返回部分结果）。
  */
 import {
+  agentActor,
   assertNcExactEvidence,
   getActiveStandards,
   getSource,
@@ -259,7 +260,7 @@ async function applyTransition(
         tx,
         c.id,
         'active',
-        { by: byRole, entailmentPass: true },
+        { actor: agentActor(byRole), entailmentPass: true },
         std,
       )
       return { transition: t, refused: null }
@@ -293,7 +294,7 @@ async function applyTransition(
 
   // 闸门放行（not_co_true 有对端 exact）/ fail / 仅时效 → 落收紧：active→flagged / flagged→quarantined。
   const to: schema.ClaimStatus = c.status === 'active' ? 'flagged' : 'quarantined'
-  const t = await transitionClaimInTx(tx, c.id, to, { by: byRole }, std)
+  const t = await transitionClaimInTx(tx, c.id, to, { actor: agentActor(byRole) }, std)
   return { transition: t, refused: null }
 }
 

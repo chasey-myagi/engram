@@ -6,6 +6,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
+import { trustedHumanActor } from '../spi/actor.js'
 import { createDb, type DB } from '../db/client.js'
 import { CALIBRATION_IDENTITY, DEFAULT_WEIGHTS } from '../confidence/confidence.js'
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
@@ -92,11 +93,14 @@ async function selfAuthor(
   // human Approve → f1 humanReview = 1.0 (real editor path), so the recall value clears the floor.
   await writeHumanReview(db, {
     claimId,
-    byRole: 'human:editor',
+    actor: trustedHumanActor('human:editor'),
     verdict: { humanReview: 1, action: 'approve' },
   })
   // draft → active (the only way a claim becomes recallable). Promote via a human role (humans may approve, S13).
-  await transitionClaim(db, claimId, 'active', { by: 'human:test', entailmentPass: true })
+  await transitionClaim(db, claimId, 'active', {
+    actor: trustedHumanActor('human:test'),
+    entailmentPass: true,
+  })
   return claimId
 }
 

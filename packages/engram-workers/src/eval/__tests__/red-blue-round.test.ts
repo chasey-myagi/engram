@@ -21,6 +21,7 @@ import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import {
+  agentActor,
   addSource,
   appendClaim,
   attributeFailure,
@@ -120,7 +121,10 @@ async function appendActiveClaim(draft: {
     { ...draft, createdBy: 'agent:distiller' },
     provs,
   )
-  await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
+  await transitionClaim(db, claimId, 'active', {
+    actor: agentActor('agent:distiller'),
+    entailmentPass: true,
+  })
   return claimId
 }
 

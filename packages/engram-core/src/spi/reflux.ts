@@ -21,9 +21,15 @@ import { recallClaims } from './recall-claims.js'
 import { randomUUID } from 'node:crypto'
 
 /**
- * 「人确认」判据：by_role 是裸 'human' 或 'human:' 前缀才算人（agent 自报的 kbLacksAnswer 不入 L5 队列）。
- * 仓内角色都冒号分隔（agent:x / consumer:unknown / human:judge），刻意不写成宽松的 startsWith('human')，
- * 免得把 'humanoid-agent' 之类误判成人。
+ * @internal — **不是实时授权判据**（EGR-CR-002）。这只是个对**已落库** by_role 字符串的格式判别：
+ * by_role 是裸 'human' 或 'human:' 前缀才算人。仓内角色都冒号分隔（agent:x / consumer:unknown / human:judge），
+ * 刻意不写成宽松的 startsWith('human')，免得把 'humanoid-agent' 之类误判成人。
+ *
+ * @security-note 纯字符串前缀**可被任意调用方伪造**，绝不可当作「人身份真实性」的实时授权门。所有人专属门
+ * （red-edge 放松 / draft→active 旁路 / 写 f1 人审 / human 冲突裁定 / 主编三动作）已收口到受信 `ActorContext.isHuman`
+ * （见 spi/actor.ts）。本函数仅供两类**非授权**用途：① 读历史落库的 by_role 事实（reflux L5 入队、human-review 读
+ * 过滤、L5 晋升/免疫的 confirmedBy）——这些 by_role 在写入时已由受信门校验过、是既成事实，非实时授权；② factory 内部
+ * 可选的 role 串格式校验。已从公共 index.ts 下线，杜绝业务方再拿它当授权判据。
  */
 export function isHumanRole(byRole: string): boolean {
   return byRole === 'human' || byRole.startsWith('human:')

@@ -6,6 +6,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
+import { trustedHumanActor } from '../spi/actor.js'
 import { createDb, type DB } from '../db/client.js'
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { addSource, appendClaim } from '../spi/append-claim.js'
@@ -70,10 +71,13 @@ async function answerL5(query: string): Promise<string> {
   )
   await writeHumanReview(db, {
     claimId,
-    byRole: 'human:editor',
+    actor: trustedHumanActor('human:editor'),
     verdict: { humanReview: 1, action: 'approve' },
   })
-  await transitionClaim(db, claimId, 'active', { by: 'human:test', entailmentPass: true })
+  await transitionClaim(db, claimId, 'active', {
+    actor: trustedHumanActor('human:test'),
+    entailmentPass: true,
+  })
   return claimId
 }
 

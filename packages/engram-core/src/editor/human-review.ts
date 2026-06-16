@@ -24,6 +24,7 @@ import { and, desc, eq, inArray } from 'drizzle-orm'
 import { NEUTRAL_FACTORS } from '../confidence/confidence.js'
 import type { DB, Tx } from '../db/client.js'
 import { claimVerification } from '../db/schema.js'
+import type { ActorContext } from '../spi/actor.js'
 import { isHumanRole } from '../spi/reflux.js'
 
 /** DB 或事务 Tx（recall 用前者、commit 合并重算用后者；drizzle select 链在两者上同形）。 */
@@ -60,17 +61,18 @@ function clamp01(x: number): number {
 }
 
 /**
- * 落一条人审背书（claim_verification, kind='patrol'，带 humanReview 字段）。by_role 必是人（'human…'）——
- * f1 是「只人能投」的因子，agent 自报的人审一律拒（红线#2：只人能放松；人审背书亦只人可投）。
+ * 落一条人审背书（claim_verification, kind='patrol'，带 humanReview 字段）。授权**只读受信 `actor.isHuman`**
+ * （EGR-CR-002）——f1 是「只人能投」的因子，非人 actor 一律拒，且 agent 把 role 写成 'human:fake' 也抬不了权
+ * （红线#2：只人能放松；人审背书亦只人可投）。落库 by_role 仍写 `actor.role`（审计字段不变）。
  * append-only，多次人审各留一行；最新一行由 latestHumanReview 取。
  */
 export async function writeHumanReview(
   q: Queryable,
-  opts: { claimId: string; byRole: string; verdict: HumanReviewVerdict },
+  opts: { claimId: string; actor: ActorContext; verdict: HumanReviewVerdict },
 ): Promise<{ verificationId: string }> {
-  if (!isHumanRole(opts.byRole)) {
+  if (!opts.actor.isHuman) {
     throw new Error(
-      `writeHumanReview: human review must be cast by a human caller (by_role '${opts.byRole}' is not human)`,
+      `writeHumanReview: human review must be cast by a human caller (actor '${opts.actor.role}' is not human)`,
     )
   }
   const id = randomUUID()
@@ -79,7 +81,7 @@ export async function writeHumanReview(
     claimId: opts.claimId,
     kind: 'patrol',
     verdict: { ...opts.verdict, humanReview: clamp01(opts.verdict.humanReview) },
-    byRole: opts.byRole,
+    byRole: opts.actor.role,
   })
   return { verificationId: id }
 }

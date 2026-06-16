@@ -25,6 +25,7 @@ import {
   applyGMap,
   computeReliability,
 } from '../index.js'
+import { trustedHumanActor, agentActor } from '../spi/actor.js'
 import { DEFAULT_WEIGHTS } from '../confidence/confidence.js'
 import {
   collectUsageCalibrationSamples,
@@ -445,7 +446,10 @@ describe('S28 FIX 1 承重：活动 g 非 identity 下 draft→active promote �
     // 关键回归断言：draft→active 蓝边 promote 在活动 g′（非 identity）下**绝不抛 "requires a resolved map"**。
     let threw: unknown = null
     try {
-      await transitionClaim(db, claimId, 'active', { by: 'agent:verifier', entailmentPass: true })
+      await transitionClaim(db, claimId, 'active', {
+        actor: agentActor('agent:verifier'),
+        entailmentPass: true,
+      })
     } catch (e) {
       threw = e
     }
@@ -563,6 +567,6 @@ async function mkRecallableClaim(text: string): Promise<string> {
     provs.push({ sourceId, locator: `p${i}`, relevance: 'exact' as const })
   }
   const { claimId } = await appendClaim(db, embedder, { claimText: text, createdBy: 'test' }, provs)
-  await transitionClaim(db, claimId, 'active', { by: 'human:editor' })
+  await transitionClaim(db, claimId, 'active', { actor: trustedHumanActor('human:editor') })
   return claimId
 }

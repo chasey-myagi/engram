@@ -10,8 +10,9 @@
  *   Reject（驳回）：投 f1=0（人审否决，压低 f1，是一次**收紧**性 review）→ 尽量收紧到 quarantined（保留可审计，永不物理删）。
  *     驳回一条 agent 已晋升（active）的 claim = 翻案 agent 判决 → 记一条 human_overturn。
  *
- * 红线#2「只人能放松」：放松全程走 transitionClaim 红边（内核硬执行人专属），agent 调本模块的放松动作会在那里被拒。
- * f1 本身也只人能投（writeHumanReview 校验 by_role 必是人）。本模块只编排既有缝（human-review.ts / transition.ts /
+ * 红线#2「只人能放松」：放松全程走 transitionClaim 红边（内核硬执行人专属，授权读受信 actor.isHuman），
+ * agent 调本模块的放松动作会在那里被拒（EGR-CR-002：身份真实性由受信 ActorContext 建立，非裸字符串前缀）。
+ * f1 本身也只人能投（writeHumanReview 校验 actor.isHuman）。本模块只编排既有缝（human-review.ts / transition.ts /
  * append-claim.ts / human-overturn.ts），不新开状态/不碰 schema 不变量。
  */
 import { eq } from 'drizzle-orm'
@@ -22,14 +23,17 @@ import type { Embedder } from '../embedding/embedder.js'
 import { claim, type ClaimStatus } from '../db/schema.js'
 import { supersedeClaimInTx, type DraftClaim, type ProvenanceInput } from '../spi/append-claim.js'
 import { transitionClaimInTx } from '../spi/transition.js'
-import { isHumanRole } from '../spi/reflux.js'
+import type { ActorContext } from '../spi/actor.js'
 import { writeHumanReview, HUMAN_REVIEW_APPROVE, HUMAN_REVIEW_REJECT } from './human-review.js'
 import { recordHumanOverturn, type OverturnKind } from './human-overturn.js'
 
-/** 主编动作的调用上下文。by 必是人（'human…' / 裸 'human'）——三动作都只人可做。 */
+/** 主编动作的调用上下文。actor 必是受信的人（EGR-CR-002）——三动作都只人可做。 */
 export interface EditorActorContext {
-  /** 主编身份（'human:<id>'）。非人调用直接拒（红线#2）。 */
-  by: string
+  /**
+   * 受信主编身份。授权**只读 `actor.isHuman`**（受信、不可伪造）；非人调用直接拒（红线#2），
+   * agent 把 role 写成 'human:fake' 也抬不了权。`actor.role` 仅作审计串（落人审/翻案的 by_role）。
+   */
+  actor: ActorContext
   /** 人类可读备注（可选，落人审 verdict.note / 翻案 reason，离线审计用）。 */
   note?: string
 }
@@ -46,9 +50,11 @@ export interface EditorActionResult {
   overturnEventId?: string
 }
 
-function requireHuman(by: string, action: string): void {
-  if (!isHumanRole(by)) {
-    throw new Error(`editor:${action}: only a human caller may act (by '${by}' is not human)`)
+function requireHuman(actor: ActorContext, action: string): void {
+  if (!actor.isHuman) {
+    throw new Error(
+      `editor:${action}: only a human caller may act (actor '${actor.role}' is not human)`,
+    )
   }
 }
 
@@ -82,14 +88,14 @@ export async function approveClaim(
   claimId: string,
   ctx: EditorActorContext,
 ): Promise<EditorActionResult> {
-  requireHuman(ctx.by, 'approve')
+  requireHuman(ctx.actor, 'approve')
   const std = await getActiveStandards(db) // 配置快照（promote 蓝边判据用；人放松不读它）。事务外读即可。
   return db.transaction(async (tx): Promise<EditorActionResult> => {
     const from = await lockClaimStatus(tx, claimId) // 锁行读态：分支决策不再 TOCTOU
     // ① 投 f1=1 人审背书（append-only 人审行，同事务内）。
     const { verificationId } = await writeHumanReview(tx, {
       claimId,
-      byRole: ctx.by,
+      actor: ctx.actor,
       verdict: {
         humanReview: HUMAN_REVIEW_APPROVE,
         action: 'approve',
@@ -102,19 +108,19 @@ export async function approveClaim(
     }
     if (from === 'draft') {
       // 人 Approve 旁路晋升门（A.4「或人 Approve」）。非翻案（draft 是影子区、未被 agent 判过）。
-      await transitionClaimInTx(tx, claimId, 'active', { by: ctx.by }, std)
+      await transitionClaimInTx(tx, claimId, 'active', { actor: ctx.actor }, std)
       return { claimId, status: 'active', verificationId }
     }
     // quarantined/flagged/superseded：放松 = 翻案 agent 判决。**先红边翻转成功、再落翻案痕**（同事务原子）。
     const overturn: OverturnKind =
       from === 'quarantined' ? 'un_quarantine' : from === 'flagged' ? 'pardon' : 'rollback'
-    await transitionClaimInTx(tx, claimId, 'active', { by: ctx.by }, std) // 红边放松（仅人）；agent 到这里被拒
+    await transitionClaimInTx(tx, claimId, 'active', { actor: ctx.actor }, std) // 红边放松（仅人）；agent 到这里被拒
     const ov = await recordHumanOverturn(tx, {
       overturn,
       claimId,
       fromStatus: from,
       toStatus: 'active',
-      byRole: ctx.by,
+      byRole: ctx.actor.role,
       ...(ctx.note !== undefined ? { reason: ctx.note } : {}),
     })
     return { claimId, status: 'active', verificationId, overturnEventId: ov.eventId }
@@ -136,7 +142,7 @@ export async function editApproveClaim(
   provenances: ProvenanceInput[],
   ctx: EditorActorContext,
 ): Promise<EditorActionResult> {
-  requireHuman(ctx.by, 'edit_approve')
+  requireHuman(ctx.actor, 'edit_approve')
   const std = await getActiveStandards(db)
   const embedding = await embedder.embed(draft.claimText, 'document') // 事务外算嵌入
   return db.transaction(async (tx): Promise<EditorActionResult> => {
@@ -152,14 +158,14 @@ export async function editApproveClaim(
     // ② Approve 新版本：投 f1=1（标 edit_approve）+ 人 Approve 晋升门旁路 → active。同事务原子。
     const { verificationId } = await writeHumanReview(tx, {
       claimId: newId,
-      byRole: ctx.by,
+      actor: ctx.actor,
       verdict: {
         humanReview: HUMAN_REVIEW_APPROVE,
         action: 'edit_approve',
         ...(ctx.note !== undefined ? { note: ctx.note } : {}),
       },
     })
-    await transitionClaimInTx(tx, newId, 'active', { by: ctx.by }, std) // 人 Approve 旁路晋升门
+    await transitionClaimInTx(tx, newId, 'active', { actor: ctx.actor }, std) // 人 Approve 旁路晋升门
     return { claimId: newId, status: 'active', verificationId }
   })
 }
@@ -181,14 +187,14 @@ export async function rejectClaim(
   claimId: string,
   ctx: EditorActorContext,
 ): Promise<EditorActionResult> {
-  requireHuman(ctx.by, 'reject')
+  requireHuman(ctx.actor, 'reject')
   const std = await getActiveStandards(db)
   return db.transaction(async (tx): Promise<EditorActionResult> => {
     const from = await lockClaimStatus(tx, claimId)
     // ① 投 f1=0 人审否决（append-only，同事务内）。
     const { verificationId } = await writeHumanReview(tx, {
       claimId,
-      byRole: ctx.by,
+      actor: ctx.actor,
       verdict: {
         humanReview: HUMAN_REVIEW_REJECT,
         action: 'reject',
@@ -198,20 +204,20 @@ export async function rejectClaim(
     // ② 尽量收紧到 quarantined（合法蓝边；人也可收紧）。翻案痕在收紧成功之后才落（同事务原子）。
     if (from === 'active') {
       // 驳回 agent 已晋升的 claim = 翻案 → 先 active→flagged→quarantined，**再**记翻案痕。
-      await transitionClaimInTx(tx, claimId, 'flagged', { by: ctx.by }, std)
-      await transitionClaimInTx(tx, claimId, 'quarantined', { by: ctx.by }, std)
+      await transitionClaimInTx(tx, claimId, 'flagged', { actor: ctx.actor }, std)
+      await transitionClaimInTx(tx, claimId, 'quarantined', { actor: ctx.actor }, std)
       const ov = await recordHumanOverturn(tx, {
         overturn: 'reject_agent_promoted',
         claimId,
         fromStatus: 'active',
         toStatus: 'quarantined',
-        byRole: ctx.by,
+        byRole: ctx.actor.role,
         ...(ctx.note !== undefined ? { reason: ctx.note } : {}),
       })
       return { claimId, status: 'quarantined', verificationId, overturnEventId: ov.eventId }
     }
     if (from === 'flagged') {
-      await transitionClaimInTx(tx, claimId, 'quarantined', { by: ctx.by }, std)
+      await transitionClaimInTx(tx, claimId, 'quarantined', { actor: ctx.actor }, std)
       return { claimId, status: 'quarantined', verificationId }
     }
     // quarantined/draft/superseded：无更紧的合法迁移可走，f1=0 否决留痕已足（draft 影子区永不召回、可审计）。

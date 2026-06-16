@@ -18,6 +18,7 @@
 import { randomUUID } from 'node:crypto'
 
 import {
+  agentActor,
   addSource,
   appendClaim,
   getReconcileEscalations,
@@ -236,7 +237,10 @@ async function injectClaim(
     )
     anchorId = appended.claimId
     // 锚晋升 active（蓝边 promote，需 conf≥0.5 ∧ entailmentPass）——锚 evidence 蕴含锚 claim，pass 合法。
-    await transitionClaim(db, anchorId, 'active', { by: 'agent:distiller', entailmentPass: true })
+    await transitionClaim(db, anchorId, 'active', {
+      actor: agentActor('agent:distiller'),
+      entailmentPass: true,
+    })
   }
 
   // 2) 注入被审/对抗 claim（经真 append_claim：D1 强制出处、S8 同事实落 contradicts 边、连续 confidence）。
@@ -281,7 +285,10 @@ async function runFalse(deps: RedTeamRunDeps, item: RedTeamItem): Promise<Inject
   // 晋升 active（桩 entailmentPass：晋升不是免疫断言点，免疫点是 Verifier 把**活跃**幻觉收紧到 flagged）。
   // **断言晋升真成功**：若 D2 floor 耦合（auth/indepSupport/PROMOTE_FLOOR 常量）变动让它停在 draft，则**大声失败**——
   // 而不是把「judge 说 fail 但停 draft」当弱检出蒙混过去（gate#1 test-review/linus：draft 兜底会掩盖晋升路径回归）。
-  await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
+  await transitionClaim(db, claimId, 'active', {
+    actor: agentActor('agent:distiller'),
+    entailmentPass: true,
+  })
   const promoted = await statusOf(db, claimId)
   if (promoted !== 'active') {
     throw new Error(
@@ -318,7 +325,10 @@ async function runContradiction(
   const { claimId, anchorId } = injected
   // 被审 claim 晋升 active（活跃矛盾 = 双方 active；Arbiter 只裁 active↔active）。
   try {
-    await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
+    await transitionClaim(db, claimId, 'active', {
+      actor: agentActor('agent:distiller'),
+      entailmentPass: true,
+    })
   } catch {
     /* 留 draft：仍可断言 contradicts 边已落（S8），但 Arbiter 不裁非 active 对 */
   }
@@ -396,7 +406,7 @@ async function runStale(deps: RedTeamRunDeps, item: RedTeamItem): Promise<Inject
   let promoted = true
   try {
     await transitionClaim(db, stale.claimId, 'active', {
-      by: 'agent:distiller',
+      actor: agentActor('agent:distiller'),
       entailmentPass: true,
     })
   } catch {
@@ -422,7 +432,7 @@ async function runStale(deps: RedTeamRunDeps, item: RedTeamItem): Promise<Inject
     freshProvs,
   )
   await transitionClaim(db, fresh.claimId, 'active', {
-    by: 'agent:distiller',
+    actor: agentActor('agent:distiller'),
     entailmentPass: true,
   })
   const hits = await recallClaims(db, embedder, item.claimText)
@@ -474,7 +484,10 @@ export async function runNearDupPoison(
   // draft→flagged 非法（A.4），故留 draft；但 escalation 仍会记（信号不丢）——见下方 detected 口径与 reaction.promotionFailed。
   let promotionFailed = false
   try {
-    await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
+    await transitionClaim(db, claimId, 'active', {
+      actor: agentActor('agent:distiller'),
+      entailmentPass: true,
+    })
   } catch {
     promotionFailed = true
   }

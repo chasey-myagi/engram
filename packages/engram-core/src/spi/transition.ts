@@ -29,7 +29,7 @@ import type { DB, Tx } from '../db/client.js'
 import { claim, claimProvenance, type ClaimStatus } from '../db/schema.js'
 import { computeEntailmentFactor } from '../verifier/patrol-verdict.js'
 import { computeHumanReviewFactor } from '../editor/human-review.js'
-import { isHumanRole } from './reflux.js'
+import type { ActorContext } from './actor.js'
 
 /** draft→active 的连续 confidence 晋升门（A.4）：蓝边 promote 需 conf≥此值 ∧ entailment 通过。 */
 export const PROMOTE_CONFIDENCE_FLOOR = 0.5
@@ -53,8 +53,11 @@ export interface PositiveEvidence {
 }
 
 export interface TransitionOptions {
-  /** 调用方身份。'human…' = 人（可放松）；其余 = 蓝/agent（只能收紧）。 */
-  by: string
+  /**
+   * 受信调用方（EGR-CR-002）。放松/旁路的授权**只读 `actor.isHuman`**（受信、不可伪造）——
+   * 不再吃裸字符串前缀：agent 把 role 写成 'human:fake' 也抬不了权。`actor.role` 仅作审计串落库。
+   */
+  actor: ActorContext
   /** draft→active 蓝边晋升需要的 entailment 判据（S13 合成注入；S17 由真 Verifier 产出替换）。 */
   entailmentPass?: boolean
   /** 红边放松（X→active）**可选**的新正向 exact 证据；给了才记一条出处。赦免/回滚无证据也可（仅人授权）。 */
@@ -114,7 +117,7 @@ export async function transitionClaimInTx(
 
   if (kind === 'promote') {
     // draft→active：人 Approve 旁路门；蓝边须 conf≥0.5 ∧ entailment 通过。
-    if (!isHumanRole(opts.by)) {
+    if (!opts.actor.isHuman) {
       const stored = row.factors as StoredConfidence
       // conf 用存档因子 × 活动权重现算（与 recall 一致）；conflictDecay 取存档快照（draft 通常尚无矛盾，
       // 活值冲突一致性留作后续与 recall 的 S8 实时口径对齐）。
@@ -160,7 +163,7 @@ export async function transitionClaimInTx(
   }
 
   // kind === 'red'：放松（X→active）。仅人可做（红线#2）。证据可选：赦免/回滚无证据亦可。
-  if (!isHumanRole(opts.by)) {
+  if (!opts.actor.isHuman) {
     throw new Error(
       `transition: relaxation ${from} → active requires a human caller (blue/agent can only tighten)`,
     )

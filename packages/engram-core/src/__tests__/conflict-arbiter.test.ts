@@ -7,6 +7,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
+import { trustedHumanActor, agentActor } from '../spi/actor.js'
 import { CALIBRATION_IDENTITY, DEFAULT_WEIGHTS } from '../confidence/confidence.js'
 import { createDb, type DB } from '../db/client.js'
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
@@ -19,6 +20,7 @@ import {
   escalateConflict,
   getEditorConflictQueue,
   getResolvedConflicts,
+  humanAdjudicateConflict,
   loadConflictSide,
   resolveConflict,
 } from '../spi/conflict-arbiter.js'
@@ -88,7 +90,7 @@ async function activeClaim(opts: {
     [{ sourceId: opts.sourceId, locator: 'L1', relevance: 'exact' }],
   )
   // human Approve bypasses the promote gate so we can recall the claim.
-  await transitionClaim(db, claimId, 'active', { by: 'human:editor' })
+  await transitionClaim(db, claimId, 'active', { actor: trustedHumanActor('human:editor') })
   return claimId
 }
 
@@ -421,5 +423,42 @@ describe('S20 conflict-arbiter SPI (A.5): deterministic adjudication, no status 
         byRole: 'agent:arbiter',
       }),
     ).rejects.toThrow(/unique winner/)
+  })
+})
+
+// EGR-CR-002 · rung-① human ruling 凌驾机判阶梯②③④⑤，是「只人能裁定」的红线#2 门。
+// 这里补上「伪造 human:* 身份」攻击面：一个 agentActor 即使把 role 字面量伪造成 'human:fake' 也抬不了权——
+// 它绝不能 humanAdjudicateConflict，更不能在 ① 推翻机判结论；只有受信 human actor 能。
+describe('EGR-CR-002 authz/actor: a forged human:* role cannot make a rung-① human ruling', () => {
+  it('T4: humanAdjudicateConflict rejects a forged human:* actor before any side effect; a trusted human rules and overrides the machine ladder', async () => {
+    const t = new Date('2025-01-01T00:00:00.000Z')
+    const { a, b } = await seedConflictPair({
+      query: 'k p A',
+      aAsOf: t,
+      bAsOf: t,
+      aAuthority: 0.95, // machine ladder ④ authority would pick A
+      bAuthority: 0.3,
+    })
+
+    // forged: a NON-human actor whose display role lies as 'human:fake' — rejected before any believed/trust marker.
+    await expect(
+      humanAdjudicateConflict(db, { a, b, winnerId: b, actor: agentActor('human:fake') }),
+    ).rejects.toThrow(/is human-exclusive|is not human/)
+    expect(await getResolvedConflicts(db)).toHaveLength(0) // no forged ruling landed
+
+    // a trusted human rules — and rung ① lets them pick B over the machine ladder's authority-winner A.
+    const res = await humanAdjudicateConflict(db, {
+      a,
+      b,
+      winnerId: b,
+      actor: trustedHumanActor('human:judge'),
+      reason: 'B is the authoritative correction',
+    })
+    expect(res.outcome).toBe('resolved')
+    expect(res.winnerId).toBe(b)
+    const resolved = await getResolvedConflicts(db)
+    expect(resolved).toHaveLength(1)
+    expect(resolved[0]!.payload.rung).toBe('human') // recorded as a rung-① human ruling
+    expect(resolved[0]!.payload.byRole).toBe('human:judge')
   })
 })

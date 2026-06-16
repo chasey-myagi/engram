@@ -7,6 +7,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
+import { trustedHumanActor, agentActor } from '../spi/actor.js'
 import { CALIBRATION_IDENTITY, DEFAULT_WEIGHTS } from '../confidence/confidence.js'
 import { createDb, type DB } from '../db/client.js'
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
@@ -115,7 +116,7 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
     expect(await recallClaims(db, embedder, q)).toHaveLength(0) // draft shadow zone: not recalled
 
     const res = await transitionClaim(db, id, 'active', {
-      by: 'agent:verifier',
+      actor: agentActor('agent:verifier'),
       entailmentPass: true,
     })
     expect(res).toEqual({ from: 'draft', to: 'active' })
@@ -127,10 +128,13 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
     const q = 'draft with conf but no entailment'
     const id = await seedClaim({ query: q, status: 'draft', profile: HIGH }) // conf 0.8 ≥ 0.5
     await expect(
-      transitionClaim(db, id, 'active', { by: 'agent:verifier' }), // entailmentPass omitted
+      transitionClaim(db, id, 'active', { actor: agentActor('agent:verifier') }), // entailmentPass omitted
     ).rejects.toThrow(/entailment did not pass/)
     await expect(
-      transitionClaim(db, id, 'active', { by: 'agent:verifier', entailmentPass: false }),
+      transitionClaim(db, id, 'active', {
+        actor: agentActor('agent:verifier'),
+        entailmentPass: false,
+      }),
     ).rejects.toThrow(/entailment did not pass/)
     expect(await statusOf(id)).toBe('draft')
     expect(await recallClaims(db, embedder, q)).toHaveLength(0)
@@ -140,7 +144,10 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
     const q = 'low-confidence draft'
     const id = await seedClaim({ query: q, status: 'draft', profile: MID }) // conf 0.435 < 0.5
     await expect(
-      transitionClaim(db, id, 'active', { by: 'agent:verifier', entailmentPass: true }),
+      transitionClaim(db, id, 'active', {
+        actor: agentActor('agent:verifier'),
+        entailmentPass: true,
+      }),
     ).rejects.toThrow(/conf .* < 0\.5/)
     expect(await statusOf(id)).toBe('draft')
   })
@@ -150,7 +157,7 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
     const id = await seedClaim({ query: q, status: 'draft', profile: MID }) // conf 0.435: blue would be blocked
     // human Approve bypasses BOTH halves of the blue gate: sub-0.5 conf AND an explicit entailment fail
     const res = await transitionClaim(db, id, 'active', {
-      by: 'human:editor',
+      actor: trustedHumanActor('human:editor'),
       entailmentPass: false,
     })
     expect(res.to).toBe('active')
@@ -161,11 +168,13 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
 
   it('blue tightening is free for agents: active→flagged→quarantined', async () => {
     const id = await seedClaim({ query: 'tighten me', status: 'active', profile: HIGH })
-    expect((await transitionClaim(db, id, 'flagged', { by: 'agent:patrol' })).to).toBe('flagged')
+    expect(
+      (await transitionClaim(db, id, 'flagged', { actor: agentActor('agent:patrol') })).to,
+    ).toBe('flagged')
     expect(await statusOf(id)).toBe('flagged')
-    expect((await transitionClaim(db, id, 'quarantined', { by: 'agent:patrol' })).to).toBe(
-      'quarantined',
-    )
+    expect(
+      (await transitionClaim(db, id, 'quarantined', { actor: agentActor('agent:patrol') })).to,
+    ).toBe('quarantined')
     expect(await statusOf(id)).toBe('quarantined')
   })
 
@@ -176,16 +185,18 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
       status: 'quarantined',
       profile: HIGH,
     })
-    await expect(transitionClaim(db, amnesty, 'active', { by: 'agent:rogue' })).rejects.toThrow(
-      /requires a human caller/,
-    )
+    await expect(
+      transitionClaim(db, amnesty, 'active', { actor: agentActor('agent:rogue') }),
+    ).rejects.toThrow(/requires a human caller/)
     expect(await statusOf(amnesty)).toBe('quarantined')
 
     // amnesty (赦免): a human relaxes WITHOUT any new evidence — authority alone authorizes; no provenance added
     const provBefore = (
       await db.select().from(claimProvenance).where(eq(claimProvenance.claimId, amnesty))
     ).length
-    const res = await transitionClaim(db, amnesty, 'active', { by: 'human:judge' })
+    const res = await transitionClaim(db, amnesty, 'active', {
+      actor: trustedHumanActor('human:judge'),
+    })
     expect(res).toEqual({ from: 'quarantined', to: 'active' })
     expect(await statusOf(amnesty)).toBe('active')
     expect(
@@ -203,7 +214,7 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
       await db.select().from(claimProvenance).where(eq(claimProvenance.claimId, withEv))
     ).length
     await transitionClaim(db, withEv, 'active', {
-      by: 'human:judge',
+      actor: trustedHumanActor('human:judge'),
       evidence: { sourceId, locator: 'rehab-doc#1', excerpt: 'p.4: the figure was re-measured' },
     })
     expect(await statusOf(withEv)).toBe('active')
@@ -232,7 +243,10 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
         await db.select().from(claimProvenance).where(eq(claimProvenance.claimId, id))
       ).length
       await expect(
-        transitionClaim(db, id, 'active', { by: 'human:judge', evidence: { sourceId, locator } }),
+        transitionClaim(db, id, 'active', {
+          actor: trustedHumanActor('human:judge'),
+          evidence: { sourceId, locator },
+        }),
       ).rejects.toThrow(/locator/i)
       expect(await statusOf(id)).toBe('quarantined') // relaxation rejected as a whole — NOT flipped to active
       expect(
@@ -243,37 +257,43 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
 
   it('A.4 red line — flagged→active (amnesty) and superseded→active (rollback) are human-only and need no new evidence', async () => {
     const flagged = await seedClaim({ query: 'flagged claim', status: 'flagged', profile: HIGH })
-    await expect(transitionClaim(db, flagged, 'active', { by: 'agent:x' })).rejects.toThrow(
-      /requires a human caller/,
-    )
-    expect((await transitionClaim(db, flagged, 'active', { by: 'human:j' })).to).toBe('active') // amnesty, no evidence
+    await expect(
+      transitionClaim(db, flagged, 'active', { actor: agentActor('agent:x') }),
+    ).rejects.toThrow(/requires a human caller/)
+    expect(
+      (await transitionClaim(db, flagged, 'active', { actor: trustedHumanActor('human:j') })).to,
+    ).toBe('active') // amnesty, no evidence
 
     const sup = await seedClaim({ query: 'superseded claim', status: 'superseded', profile: HIGH })
-    await expect(transitionClaim(db, sup, 'active', { by: 'agent:x' })).rejects.toThrow(
-      /requires a human caller/,
-    )
-    expect((await transitionClaim(db, sup, 'active', { by: 'human:j' })).to).toBe('active') // rollback, no evidence
+    await expect(
+      transitionClaim(db, sup, 'active', { actor: agentActor('agent:x') }),
+    ).rejects.toThrow(/requires a human caller/)
+    expect(
+      (await transitionClaim(db, sup, 'active', { actor: trustedHumanActor('human:j') })).to,
+    ).toBe('active') // rollback, no evidence
   })
 
   it('illegal transitions are rejected (draft→quarantined, superseded→flagged, active→quarantined skip); →superseded routes to supersedeClaim', async () => {
     const draft = await seedClaim({ query: 'd', status: 'draft', profile: HIGH })
-    await expect(transitionClaim(db, draft, 'quarantined', { by: 'human:j' })).rejects.toThrow(
-      /illegal transition draft → quarantined/,
-    )
+    await expect(
+      transitionClaim(db, draft, 'quarantined', { actor: trustedHumanActor('human:j') }),
+    ).rejects.toThrow(/illegal transition draft → quarantined/)
 
     const sup = await seedClaim({ query: 's', status: 'superseded', profile: HIGH })
-    await expect(transitionClaim(db, sup, 'flagged', { by: 'human:j' })).rejects.toThrow(
-      /illegal transition superseded → flagged/,
-    )
+    await expect(
+      transitionClaim(db, sup, 'flagged', { actor: trustedHumanActor('human:j') }),
+    ).rejects.toThrow(/illegal transition superseded → flagged/)
 
     const active = await seedClaim({ query: 'a', status: 'active', profile: HIGH })
-    await expect(transitionClaim(db, active, 'quarantined', { by: 'agent:x' })).rejects.toThrow(
-      /illegal transition active → quarantined/,
-    )
-    await expect(transitionClaim(db, active, 'active', { by: 'agent:x' })).rejects.toThrow(/no-op/)
-    await expect(transitionClaim(db, active, 'superseded', { by: 'agent:x' })).rejects.toThrow(
-      /supersedeClaim/,
-    )
+    await expect(
+      transitionClaim(db, active, 'quarantined', { actor: agentActor('agent:x') }),
+    ).rejects.toThrow(/illegal transition active → quarantined/)
+    await expect(
+      transitionClaim(db, active, 'active', { actor: agentActor('agent:x') }),
+    ).rejects.toThrow(/no-op/)
+    await expect(
+      transitionClaim(db, active, 'superseded', { actor: agentActor('agent:x') }),
+    ).rejects.toThrow(/supersedeClaim/)
   })
 
   it('append-only supersede: new version reuses lineage_id + supersedes relation; old marked superseded, not deleted', async () => {
@@ -329,11 +349,11 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
     const s2 = await aSource()
     const results = await Promise.allSettled([
       transitionClaim(db, id, 'active', {
-        by: 'human:a',
+        actor: trustedHumanActor('human:a'),
         evidence: { sourceId: s1.sourceId, locator: 'ev-a' },
       }),
       transitionClaim(db, id, 'active', {
-        by: 'human:b',
+        actor: trustedHumanActor('human:b'),
         evidence: { sourceId: s2.sourceId, locator: 'ev-b' },
       }),
     ])
@@ -361,7 +381,7 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
       supersedeClaim(db, embedder, id, { claimText: 'v2 supersedes it' }, [
         { sourceId, locator: 'v2' },
       ]),
-      transitionClaim(db, id, 'flagged', { by: 'agent:patrol' }),
+      transitionClaim(db, id, 'flagged', { actor: agentActor('agent:patrol') }),
     ])
     // whichever ordering won, the claim ends 'superseded' — never stuck in 'flagged' on a taken-over claim
     // (without the row lock a last-write-wins flag could revive a superseded claim back to 'flagged').
@@ -372,7 +392,7 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
     const id = await seedClaim({ query: 'atomic relax', status: 'quarantined', profile: HIGH })
     await expect(
       transitionClaim(db, id, 'active', {
-        by: 'human:j',
+        actor: trustedHumanActor('human:j'),
         evidence: { sourceId: randomUUID(), locator: 'ghost' }, // no such source ⇒ FK violation
       }),
     ).rejects.toThrow()
@@ -381,17 +401,67 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
 
   it('a bare "human" role may relax, and a human may also tighten (belt-and-suspenders on the authority seam)', async () => {
     const relaxId = await seedClaim({ query: 'bare human relax', status: 'flagged', profile: HIGH })
-    expect((await transitionClaim(db, relaxId, 'active', { by: 'human' })).to).toBe('active') // bare 'human' counts
+    expect(
+      (await transitionClaim(db, relaxId, 'active', { actor: trustedHumanActor('human') })).to,
+    ).toBe('active') // bare 'human' counts
 
     const tightenId = await seedClaim({ query: 'human tightens', status: 'active', profile: HIGH })
-    expect((await transitionClaim(db, tightenId, 'flagged', { by: 'human:editor' })).to).toBe(
-      'flagged',
-    ) // humans tighten too
+    expect(
+      (
+        await transitionClaim(db, tightenId, 'flagged', {
+          actor: trustedHumanActor('human:editor'),
+        })
+      ).to,
+    ).toBe('flagged') // humans tighten too
   })
 
   it('a transition on a missing claim throws', async () => {
-    await expect(transitionClaim(db, randomUUID(), 'active', { by: 'human:j' })).rejects.toThrow(
-      /not found/,
-    )
+    await expect(
+      transitionClaim(db, randomUUID(), 'active', { actor: trustedHumanActor('human:j') }),
+    ).rejects.toThrow(/not found/)
+  })
+})
+
+// EGR-CR-002 · 红线#2 的承重授权边界：人身份的「真实性」由受信 ActorContext 建立，**不再**是可被任意调用方
+// 伪造的裸字符串前缀。现有测试只断言 by:'agent:x' 被拒（字符串区分本身生效），刻意回避了「伪造 human:* 身份」
+// 这一真正攻击面——这里补上：一个 agentActor 即使把 role 字面量伪造成 'human:fake' 也抬不了权。
+describe('EGR-CR-002 authz/actor: a forged human:* role cannot trigger any human-only side effect', () => {
+  // T1 — red-edge 放松：伪造 human role 不能放松（quarantined → active）。
+  it('T1: a non-human actor with a forged human:* role CANNOT relax a quarantined claim; a trusted human can', async () => {
+    const id = await seedClaim({ query: 'forged-relax', status: 'quarantined', profile: HIGH })
+    const provBefore = (
+      await db.select().from(claimProvenance).where(eq(claimProvenance.claimId, id))
+    ).length
+
+    // forged: an AGENT actor whose display role literally says 'human:fake' — must still be rejected.
+    await expect(
+      transitionClaim(db, id, 'active', { actor: agentActor('human:fake') }),
+    ).rejects.toThrow(/requires a human caller/)
+    expect(await statusOf(id)).toBe('quarantined') // not relaxed
+    expect(
+      (await db.select().from(claimProvenance).where(eq(claimProvenance.claimId, id))).length,
+    ).toBe(provBefore) // no side effect
+
+    // a genuinely trusted human actor relaxes it (existing behavior preserved)
+    expect(
+      (await transitionClaim(db, id, 'active', { actor: trustedHumanActor('human:judge') })).to,
+    ).toBe('active')
+    expect(await statusOf(id)).toBe('active')
+  })
+
+  // T2 — draft→active 旁路：伪造 human role 不能旁路晋升门（conf<0.5 仍被拦）。
+  it('T2: a forged human:* role CANNOT bypass the draft→active promote gate (conf<0.5 still blocks); a trusted human bypasses it', async () => {
+    const id = await seedClaim({ query: 'forged-bypass', status: 'draft', profile: MID }) // conf 0.435 < 0.5
+    // forged human actor is treated as blue/agent → hits the conf gate (NOT the human bypass), entailment omitted too.
+    await expect(
+      transitionClaim(db, id, 'active', { actor: agentActor('human:fake') }),
+    ).rejects.toThrow(/conf .* < 0\.5|entailment did not pass/)
+    expect(await statusOf(id)).toBe('draft') // did NOT bypass to active
+
+    // a trusted human bypasses both halves of the gate (existing behavior preserved)
+    expect(
+      (await transitionClaim(db, id, 'active', { actor: trustedHumanActor('human:judge') })).to,
+    ).toBe('active')
+    expect(await statusOf(id)).toBe('active')
   })
 })

@@ -22,6 +22,7 @@ import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import {
+  agentActor,
   addSource,
   appendClaim,
   collectUsageCalibrationSamples,
@@ -117,7 +118,10 @@ async function appendActiveClaim(draft: {
     { ...draft, createdBy: 'agent:distiller' },
     provs,
   )
-  await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
+  await transitionClaim(db, claimId, 'active', {
+    actor: agentActor('agent:distiller'),
+    entailmentPass: true,
+  })
   return claimId
 }
 
@@ -210,7 +214,10 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
         provs,
       )
       // 晋升到 active（桩 entailmentPass）——一条**活跃**幻觉，本可被 Verifier 收紧到 flagged。
-      await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
+      await transitionClaim(db, claimId, 'active', {
+        actor: agentActor('agent:distiller'),
+        entailmentPass: true,
+      })
       const promoted = (
         await db
           .select({ s: schema.claim.status })

@@ -159,12 +159,14 @@ export {
   getL5Candidates,
   replayRegressionItem,
   replayRegressionPool,
-  isHumanRole,
   type RegressionItem,
   type L5Candidate,
   type ReplayVerdict,
   type ReplayReport,
 } from './spi/reflux.js'
+// EGR-CR-002 · 受信 actor 信任锚：红线#2「只人能放松/裁定」的承重授权边界。授权门只读受信 actor.isHuman，
+// 不再吃可被任意调用方伪造的裸字符串前缀（isHumanRole 已从公共面下线、降级为内部历史读 helper）。
+export { trustedHumanActor, agentActor, type ActorContext } from './spi/actor.js'
 export {
   promoteCandidate,
   getGoldenQuestions,
