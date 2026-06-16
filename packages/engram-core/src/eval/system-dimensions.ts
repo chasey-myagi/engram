@@ -140,7 +140,16 @@ export interface SystemDimensions {
     staleClaimCount: number
     /** ECE 诊断：样本数 + bin 数 + **本次读数所用的 g 版本集合**（EGR-CR-029：让 sampleCount 重获解释力，混版不再静默）。 */
     ece: { sampleCount: number; binCount: number; fromVersions: string[] }
-    immunity: { scoreRows: number; injected: number; detected: number } | null
+    /**
+     * immunity 诊断：scoreRows = 参与聚合的 (generationVersion, redteamClass) **键数**（每键仅最新一次打分，
+     * 非历史行数）；discardedStaleRows = 被丢弃的旧重打分行数（= 取数总行数 − 键数），让看板能解释「丢了多少历史」。
+     */
+    immunity: {
+      scoreRows: number
+      injected: number
+      detected: number
+      discardedStaleRows: number
+    } | null
   }
 }
 
@@ -209,7 +218,10 @@ export interface ComputeOptions {
  *   - coverage = 被答出的题数 / golden 题数。
  *   - staleness = 越过半衰期的召回 claim 数 / 召回 claim 总数。
  *   - ece = computeCalibrationFromUsage().ece。
- *   - immunity = Σdetected / Σinjected（跨免疫分行；无行则 null）。
+ *   - immunity = Σdetected / Σinjected，但**对每个 (generationVersion, redteamClass) 仅取最新一次打分**
+ *     （EGR-CR-052：redteam_immunity_scores 是 append-only 重打分历史，旧读数不计入当前免疫；与
+ *     attribution-spine.ts latest-wins 口径对齐）。不传 immunityGeneration 时＝跨世代「latest per (generation, class) 再求和」。
+ *     无任何分行则 null（未度量，区别于检出率 0）。
  */
 export async function computeSystemDimensions(
   db: DB,
@@ -279,9 +291,12 @@ export async function computeSystemDimensions(
   const ece = reliability.ece
 
   // ★⑥immunity：S29 substrate（检出率，不重算）。无免疫分行 → null（未度量，区别于检出率 0）。
+  // EGR-CR-052：redteam_immunity_scores 是 append-only 重打分历史，同一 (generationVersion, redteamClass)
+  // 可有多行。当前免疫读数只反映**最新一次**打分——旧重打分不应稀释「当前系统对固定敌手的检出率」。
   const scores = await getImmunityScores(db, opts.immunityGeneration)
-  let injected = 0
-  let detected = 0
+  // 折叠到每键最新一行：getImmunityScores 已按 (createdAt, id) 升序 ⇒ Map 后写覆盖前写 ⇒ 末值=最新。
+  // 与 attribution-spine.ts latest-wins 口径对齐。
+  const latestByKey = new Map<string, (typeof scores)[number]>()
   for (const s of scores) {
     // 纵深防御（兜底任何已落库的历史脏行）：四类是免疫维度的语义不变量，未知 class
     // 绝不静默累加进分子分母——fail-loud 暴露之，而非让看板「免疫力」口径被悄悄污染。
@@ -290,10 +305,15 @@ export async function computeSystemDimensions(
         `computeSystemDimensions: immunity row has unknown redteamClass ${JSON.stringify(s.redteamClass)}`,
       )
     }
+    latestByKey.set(`${s.generationVersion} ${s.redteamClass}`, s)
+  }
+  let injected = 0
+  let detected = 0
+  for (const s of latestByKey.values()) {
     injected += s.injected
     detected += s.detected
   }
-  const immunity = scores.length === 0 ? null : injected === 0 ? 0 : detected / injected
+  const immunity = latestByKey.size === 0 ? null : injected === 0 ? 0 : detected / injected
 
   return {
     precisionAtK,
@@ -315,7 +335,17 @@ export async function computeSystemDimensions(
         binCount: reliability.binCount,
         fromVersions: reliability.fromVersions,
       },
-      immunity: scores.length === 0 ? null : { scoreRows: scores.length, injected, detected },
+      immunity:
+        latestByKey.size === 0
+          ? null
+          : {
+              // scoreRows = 参与聚合的 (generation, class) 键数（每键最新一行），非历史行数。
+              scoreRows: latestByKey.size,
+              injected,
+              detected,
+              // 被丢弃的旧重打分行数（取数总行 − 键数），让看板能解释丢了多少历史（EGR-CR-052）。
+              discardedStaleRows: scores.length - latestByKey.size,
+            },
     },
   }
 }
