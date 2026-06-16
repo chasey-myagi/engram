@@ -120,7 +120,7 @@ agent 的使用是**嵌在 loop 内的闭环**:检索(claim 即用)→ 悲观核
 
 - **运行时**:Express + ws(Node ≥22 ESM)。
 - **存储**:PostgreSQL + Drizzle ORM;向量检索用 **pgvector + HNSW**。append-only(supersede 不物理删)。
-- **agent 运行时**:`harness-pi`(自研后端 agent runtime,站在 `@mariozechner/pi-ai` 上;pi-coding-agent 的 sibling 而非其 fork/扩展)。5 工种跑在 `@harness-pi/core`(AgentSession + hook/plugin/controller)上,各自独立 session + DB 角色隔离;有界 loop 工种(Distiller/Arbiter)= maxTurns + tokenBudget + LifecycleRestart。与 bidding-agent 复用同一套 hook/plugin 经验。
+- **agent 运行时**:`harness-pi`(自研后端 agent runtime,站在 `@mariozechner/pi-ai` 上;pi-coding-agent 的 sibling 而非其 fork/扩展)。5 工种跑在 `@harness-pi/core`(AgentSession + hook/plugin/controller)上,各自独立 session + 逻辑角色(`by_role` 标记);物理 DB role 隔离(CREATE ROLE / RLS)**待实现**(当前角色边界由应用层守卫强制,见 EGR-CR-006);有界 loop 工种(Distiller/Arbiter)= maxTurns + tokenBudget + LifecycleRestart。与 bidding-agent 复用同一套 hook/plugin 经验。
 - **前端**:React 19(主编 Studio + 评测看板),沿用项目暖色品牌(plum/cream)。
 - **领域适配**:bidding-adapter 作为独立包,通过 Consumer SPI 依赖 Engram 内核,**不反向依赖**。
 

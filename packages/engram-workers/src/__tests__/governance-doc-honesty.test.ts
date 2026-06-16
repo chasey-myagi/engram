@@ -63,6 +63,17 @@ describe('EGR-CR-006 治理文档诚实性（judge≠athlete 不得盖 DB 物理
     expect(judgeriaLine!).toMatch(/待实现/)
   })
 
+  it('PRD.md 的「技术栈」架构陈述（agent 运行时）不再把工种隔离写成既成的「独立 session + DB 角色隔离」', () => {
+    // 技术栈段那行是**架构既成陈述**（紧跟 harness-pi 运行时描述），与 README/工程判据同款，不得盖物理隔离戳。
+    // 区别于 line 72 的 user story（「作为...我想要独立 DB 角色」=需求愿景，刻意保留）。
+    const techLine = PRD.split('\n').find(
+      (l) => l.includes('@harness-pi/core') && l.includes('独立 session'),
+    )
+    expect(techLine, 'PRD 应保留技术栈 agent 运行时那行').toBeTruthy()
+    expect(techLine!).not.toMatch(/DB 角色隔离/)
+    expect(techLine!).toMatch(/待实现/)
+  })
+
   it('choreography.test.ts 不再用暗示「物理 DB 角色」的命名/注释（own DB role / 各自 DB 角色）', () => {
     expect(CHOREO).not.toMatch(/own DB role/)
     expect(CHOREO).not.toMatch(/各自 DB 角色/)
