@@ -15,6 +15,7 @@ import { eq } from 'drizzle-orm'
 
 import {
   addSource,
+  agentActor,
   computeConfidenceFromProvenances,
   PROMOTE_CONFIDENCE_FLOOR,
   recallClaims,
@@ -218,7 +219,7 @@ export async function promoteEligible(
     if (raw !== null) rawSorted.push(raw)
     try {
       await transitionClaim(deps.db, claimId, 'active', {
-        by: 'agent:distiller',
+        actor: agentActor('agent:distiller'),
         entailmentPass,
       })
       promoted += 1

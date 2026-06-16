@@ -9,6 +9,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import {
   addSource,
+  trustedHumanActor,
   createDb,
   getHumanPendingSources,
   makeFakeEmbedder,
@@ -349,7 +350,7 @@ describe('S15 Distiller worker (bounded loop on harness-pi) — A.7 five-stage s
     expect(claims).toHaveLength(1) // cross-source equivalent merged, not duplicated
 
     // promote (human Approve) and recall: indepSupport reflects two independent supporting sources
-    await transitionClaim(db, claims[0]!.id, 'active', { by: 'human:editor' })
+    await transitionClaim(db, claims[0]!.id, 'active', { actor: trustedHumanActor('human:editor') })
     const hits = await recallClaims(db, embedder, 'sku-9 weight 5kg')
     expect(hits).toHaveLength(1)
     expect(hits[0]!.confidence.factors.indepSupport).toBeCloseTo(0.5) // 0 (one source) → 0.5 (two)

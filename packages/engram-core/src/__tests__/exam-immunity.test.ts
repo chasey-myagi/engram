@@ -21,6 +21,7 @@ import { addSource } from '../spi/append-claim.js'
 import { recallClaims } from '../spi/recall-claims.js'
 import { runL5Suite } from '../eval/l5-gap.js'
 import { getGoldenQuestions, getPromotionAudit, promoteCandidate } from '../spi/exam-immunity.js'
+import { agentActor, trustedHumanActor } from '../spi/actor.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
 const migrationsFolder = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'drizzle')
@@ -149,7 +150,9 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     })
     const candidateId = await seedCandidate(q, origin)
 
-    const res = await promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:judge' })
+    const res = await promoteCandidate(db, embedder, candidateId, {
+      actor: trustedHumanActor('human:judge'),
+    })
     expect(res.promoted).toBe(true)
     expect(res.result).toMatchObject({
       humanConfirmed: true,
@@ -211,7 +214,7 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     // S/P/O present (so recordContradictions actually runs the scan, unlike free-text) but nothing in the
     // KB shares this subject+predicate ⇒ no contradicts edge ⇒ the contra.length===0 TRUE branch is taken
     const res = await promoteCandidate(db, embedder, candidateId, {
-      confirmedBy: 'human:judge',
+      actor: trustedHumanActor('human:judge'),
       poison: { subject: 'idler-bearing', predicate: 'lubricant-grade', object: 'iso-vg-46' },
     })
     expect(res.result.noSelfContradiction).toBe(true) // the scan ran on a structured poison and found nothing
@@ -229,7 +232,9 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     })
     const candidateId = await seedCandidate(q, answer)
 
-    const res = await promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:judge' })
+    const res = await promoteCandidate(db, embedder, candidateId, {
+      actor: trustedHumanActor('human:judge'),
+    })
     expect(res.promoted).toBe(false)
     expect(res.result.kbTrulyLacks).toBe(false) // the poison: the KB has an answer
     expect(res.result.passed).toBe(false)
@@ -264,7 +269,7 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
 
     // … but the human frames the poison claim with the same S+P, a different O ⇒ authoring creates a contradicts edge
     const res = await promoteCandidate(db, embedder, candidateId, {
-      confirmedBy: 'human:judge',
+      actor: trustedHumanActor('human:judge'),
       poison: { subject: 'rotor-mount', predicate: 'torque', object: '55nm' },
     })
     expect(res.result.kbTrulyLacks).toBe(true) // the KB indeed lacks an answer to q
@@ -304,7 +309,9 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     const origin = await seedClaim({ claimText: 'origin', embedQuery: q, status: 'quarantined' })
     const candidateId = await seedCandidate(q, origin)
 
-    const res = await promoteCandidate(db, embedder, candidateId, { confirmedBy: 'agent:rogue' })
+    const res = await promoteCandidate(db, embedder, candidateId, {
+      actor: agentActor('agent:rogue'),
+    })
     expect(res.promoted).toBe(false)
     expect(res.result.humanConfirmed).toBe(false)
     expect(res.result.reasons).toContain("not human-confirmed (by_role 'agent:rogue')")
@@ -321,10 +328,38 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     expect(audit[0]!.basis.reasons).toContain("not human-confirmed (by_role 'agent:rogue')")
   })
 
+  // EGR-CR-002 对抗回归（gate exam-immunity.ts:117 HITL 权威门）：授权读 actor.isHuman，伪装 role 越不过。
+  // agentActor('human:fake') ⇒ isHuman:false ⇒ 拒、不晋升、不烧候选；旧门 isHumanRole('human:fake') 会误判成人、
+  // 把毒株考题晋进 golden 知识脊柱。审计落库 by_role 写 actor.role（伪装身份照实留痕）。
+  it('EGR-CR-002: agentActor("human:fake") is REJECTED — a forged human role cannot promote a candidate into golden (authz reads isHuman, not the role string)', async () => {
+    const q = 'forged human promote query'
+    const origin = await seedClaim({ claimText: 'origin', embedQuery: q, status: 'quarantined' })
+    const candidateId = await seedCandidate(q, origin)
+
+    const res = await promoteCandidate(db, embedder, candidateId, {
+      actor: agentActor('human:fake'),
+    })
+    expect(res.promoted).toBe(false)
+    expect(res.result.humanConfirmed).toBe(false)
+    expect(res.result.reasons).toContain("not human-confirmed (by_role 'human:fake')")
+    expect(res.poisonClaimId).toBeUndefined() // no poison authored on a forged attempt
+    expect(await getGoldenQuestions(db)).toHaveLength(0) // nothing entered the golden spine
+
+    const [cand] = await db.select().from(l5Candidates).where(eq(l5Candidates.id, candidateId))
+    expect(cand!.status).toBe('queued') // forged attempt must not burn the candidate
+
+    const audit = await getPromotionAudit(db, candidateId)
+    expect(audit).toHaveLength(1)
+    expect(audit[0]!.decision).toBe('rejected')
+    expect(audit[0]!.decidedBy).toBe('human:fake') // audit records the forged role verbatim
+  })
+
   it('locator traceability: a candidate with no originating claim is not traceable and is rejected (no poison authored)', async () => {
     const candidateId = await seedCandidate('untraceable gap question', null) // claimId null ⇒ no origin to trace
 
-    const res = await promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:judge' })
+    const res = await promoteCandidate(db, embedder, candidateId, {
+      actor: trustedHumanActor('human:judge'),
+    })
     expect(res.result.locatorsTraceable).toBe(false)
     expect(res.result.reasons).toContain('candidate has no traceable originating claim')
     expect(res.promoted).toBe(false)
@@ -362,7 +397,9 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     })
     const candidateId = await seedCandidate(q, originId)
 
-    const res = await promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:judge' })
+    const res = await promoteCandidate(db, embedder, candidateId, {
+      actor: trustedHumanActor('human:judge'),
+    })
     expect(res.result.kbTrulyLacks).toBe(true) // origin is quarantined ⇒ recall(q) empty
     expect(res.result.locatorsTraceable).toBe(false) // …but the origin claim has no provenance to trace
     expect(res.result.reasons).toContain('originating claim lacks provenance (not traceable)')
@@ -378,7 +415,9 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
 
     const t0 = (await db.select().from(l5Candidates).where(eq(l5Candidates.id, candidateId)))[0]!
       .createdAt
-    await promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:architect' })
+    await promoteCandidate(db, embedder, candidateId, {
+      actor: trustedHumanActor('human:architect'),
+    })
 
     const audit = await getPromotionAudit(db, candidateId)
     expect(audit).toHaveLength(1)
@@ -392,13 +431,13 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
     const q = 'single-shot query'
     const origin = await seedClaim({ claimText: 'origin', embedQuery: q, status: 'quarantined' })
     const candidateId = await seedCandidate(q, origin)
-    await promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:judge' }) // → promoted
+    await promoteCandidate(db, embedder, candidateId, { actor: trustedHumanActor('human:judge') }) // → promoted
 
     await expect(
-      promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:judge' }),
+      promoteCandidate(db, embedder, candidateId, { actor: trustedHumanActor('human:judge') }),
     ).rejects.toThrow(/only queued candidates/)
     await expect(
-      promoteCandidate(db, embedder, randomUUID(), { confirmedBy: 'human:judge' }),
+      promoteCandidate(db, embedder, randomUUID(), { actor: trustedHumanActor('human:judge') }),
     ).rejects.toThrow(/not found/)
   })
 
@@ -410,10 +449,10 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
       status: 'active',
     })
     const candidateId = await seedCandidate(q, answer)
-    await promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:judge' }) // → rejected (KB answers)
+    await promoteCandidate(db, embedder, candidateId, { actor: trustedHumanActor('human:judge') }) // → rejected (KB answers)
 
     await expect(
-      promoteCandidate(db, embedder, candidateId, { confirmedBy: 'human:judge' }),
+      promoteCandidate(db, embedder, candidateId, { actor: trustedHumanActor('human:judge') }),
     ).rejects.toThrow(/only queued candidates/)
   })
 
@@ -426,7 +465,7 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
         status: 'quarantined',
       })
       const cid = await seedCandidate(q, origin)
-      await promoteCandidate(db, embedder, cid, { confirmedBy: 'human:judge' })
+      await promoteCandidate(db, embedder, cid, { actor: trustedHumanActor('human:judge') })
       return q
     }
     const q1 = await mk(1)

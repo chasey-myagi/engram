@@ -19,7 +19,7 @@ import type { DB } from '../db/client.js'
 import type { Embedder } from '../embedding/embedder.js'
 import { knowledgeGrewEvents } from '../db/schema.js'
 import { recallClaims, type RecallContext } from '../spi/recall-claims.js'
-import { isHumanRole } from '../spi/reflux.js'
+import type { ActorContext } from '../spi/actor.js'
 import { L5_GAP_QUESTIONS, runL5Suite, type L5Question, type L5SuiteReport } from './l5-gap.js'
 import { randomUUID } from 'node:crypto'
 
@@ -49,8 +49,9 @@ function toEvent(row: typeof knowledgeGrewEvents.$inferSelect): KnowledgeGrewEve
 }
 
 export interface MigrateL5Options {
-  /** 人确认者（须 'human…'：知识长出是人的架构裁断）。 */
-  confirmedBy: string
+  /** 人确认者（受信边界）。授权读 actor.isHuman；非人（含 role 伪装成 'human:fake' 的 agentActor）不迁。
+   *  actor.role 落库审计（knowledge_grew_events.confirmedBy）。 */
+  actor: ActorContext
   /** 变得可答的 release 标识（留作纵向归因锚）。 */
   releaseSnapshot: string
 }
@@ -97,9 +98,9 @@ export async function migrateL5IfGrew(
     reasons.push('L5 question is still zero-recall (knowledge has not grown; remains a blind spot)')
   }
 
-  // ② 人确认（HITL 权威门）。
-  if (!isHumanRole(opts.confirmedBy)) {
-    reasons.push(`not human-confirmed (by_role '${opts.confirmedBy}')`)
+  // ② 人确认（HITL 权威门）。授权读 actor.isHuman（受信边界）；agentActor（含 role 伪装成 'human:fake'）在此被拒。
+  if (!opts.actor.isHuman) {
+    reasons.push(`not human-confirmed (by_role '${opts.actor.role}')`)
   }
 
   if (reasons.length > 0) {
@@ -117,7 +118,7 @@ export async function migrateL5IfGrew(
       query: question.query,
       releaseSnapshot: opts.releaseSnapshot,
       recalledCount,
-      confirmedBy: opts.confirmedBy,
+      confirmedBy: opts.actor.role,
       payload: { recalledClaimIds: hits.map((h) => h.claim.id) },
     })
     .onConflictDoNothing({ target: knowledgeGrewEvents.l5QuestionId })

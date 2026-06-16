@@ -14,6 +14,7 @@ import { claim, claimProvenance, relation, type SourceKind } from '../db/schema.
 import { addSource, appendClaim, supersedeClaim } from '../spi/append-claim.js'
 import { recallClaims } from '../spi/recall-claims.js'
 import { transitionClaim } from '../spi/transition.js'
+import { agentActor, trustedHumanActor } from '../spi/actor.js'
 import { adjudicateConflict } from '../spi/conflict-ladder.js'
 import {
   escalateConflict,
@@ -87,7 +88,7 @@ async function activeClaim(opts: {
     [{ sourceId: opts.sourceId, locator: 'L1', relevance: 'exact' }],
   )
   // human Approve bypasses the promote gate so we can recall the claim.
-  await transitionClaim(db, claimId, 'active', { by: 'human:editor' })
+  await transitionClaim(db, claimId, 'active', { actor: trustedHumanActor('human:editor') })
   return claimId
 }
 

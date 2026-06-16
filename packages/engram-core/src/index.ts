@@ -290,6 +290,7 @@ export {
   type MigrateL5Options,
   type MigrateL5Result,
 } from './eval/l5-migration.js'
+export { trustedHumanActor, agentActor, type ActorContext } from './spi/actor.js'
 export {
   transitionClaim,
   transitionClaimInTx,

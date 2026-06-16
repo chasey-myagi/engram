@@ -11,6 +11,7 @@ import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { addSource, appendClaim } from '../spi/append-claim.js'
 import { writeHumanReview } from '../editor/human-review.js'
 import { transitionClaim } from '../spi/transition.js'
+import { agentActor, trustedHumanActor } from '../spi/actor.js'
 import { recallClaims } from '../spi/recall-claims.js'
 import { L5_GAP_QUESTIONS } from '../eval/l5-gap.js'
 import {
@@ -70,10 +71,13 @@ async function answerL5(query: string): Promise<string> {
   )
   await writeHumanReview(db, {
     claimId,
-    byRole: 'human:editor',
+    actor: trustedHumanActor('human:editor'),
     verdict: { humanReview: 1, action: 'approve' },
   })
-  await transitionClaim(db, claimId, 'active', { by: 'human:test', entailmentPass: true })
+  await transitionClaim(db, claimId, 'active', {
+    actor: trustedHumanActor('human:test'),
+    entailmentPass: true,
+  })
   return claimId
 }
 
@@ -91,7 +95,7 @@ describe('S31 L5 → spine migration ("knowledge grew")', () => {
 
     // migrate: recall≥1 AND human-confirmed ⇒ migrated out, recorded as knowledge-grew (append-only)
     const res = await migrateL5IfGrew(db, embedder, Q0.id, {
-      confirmedBy: 'human:editor',
+      actor: trustedHumanActor('human:editor'),
       releaseSnapshot: 'rel-2',
     })
     expect(res.migrated).toBe(true)
@@ -107,7 +111,7 @@ describe('S31 L5 → spine migration ("knowledge grew")', () => {
 
   it('a STILL zero-recall L5 question is NOT migrated (it remains a blind spot)', async () => {
     const res = await migrateL5IfGrew(db, embedder, Q0.id, {
-      confirmedBy: 'human:editor',
+      actor: trustedHumanActor('human:editor'),
       releaseSnapshot: 'rel-1',
     })
     expect(res.migrated).toBe(false)
@@ -119,7 +123,7 @@ describe('S31 L5 → spine migration ("knowledge grew")', () => {
   it('HITL gate: an answerable L5 question is NOT migrated without a HUMAN confirmation (agent cannot self-report growth)', async () => {
     await answerL5(Q0.query)
     const res = await migrateL5IfGrew(db, embedder, Q0.id, {
-      confirmedBy: 'agent:self', // not human
+      actor: agentActor('agent:self'), // not human
       releaseSnapshot: 'rel-1',
     })
     expect(res.migrated).toBe(false)
@@ -127,15 +131,30 @@ describe('S31 L5 → spine migration ("knowledge grew")', () => {
     expect(await isMigratedOutOfL5(db, Q0.id)).toBe(false)
   })
 
+  // EGR-CR-002 对抗回归（gate l5-migration.ts:101 knowledge-grew 人确认门）：授权读 actor.isHuman，伪装 role 越不过。
+  // agentActor('human:fake') ⇒ isHuman:false ⇒ 不迁、不记 knowledge_grew；旧门 isHumanRole('human:fake') 会误判成人、
+  // 把一条 agent 自报的「我会了」伪造成「人确认知识长出」记进归因脊柱（Goodhart）。
+  it('EGR-CR-002: agentActor("human:fake") is REJECTED — a forged human role cannot record knowledge-grew (authz reads isHuman, not the role string)', async () => {
+    await answerL5(Q0.query) // KB now answers it (recall ≥ 1) — only the human-confirm gate stands between
+    const res = await migrateL5IfGrew(db, embedder, Q0.id, {
+      actor: agentActor('human:fake'),
+      releaseSnapshot: 'rel-1',
+    })
+    expect(res.migrated).toBe(false)
+    expect(res.reasons.some((r) => /not human-confirmed/.test(r))).toBe(true)
+    expect(await isMigratedOutOfL5(db, Q0.id)).toBe(false) // not migrated into the spine
+    expect(await getKnowledgeGrewEvents(db)).toHaveLength(0) // no forged "knowledge grew" event
+  })
+
   it('append-only & idempotent: migrating the same grown question twice does not stack a second row', async () => {
     await answerL5(Q0.query)
     const first = await migrateL5IfGrew(db, embedder, Q0.id, {
-      confirmedBy: 'human:editor',
+      actor: trustedHumanActor('human:editor'),
       releaseSnapshot: 'rel-1',
     })
     expect(first.migrated).toBe(true)
     const second = await migrateL5IfGrew(db, embedder, Q0.id, {
-      confirmedBy: 'human:editor',
+      actor: trustedHumanActor('human:editor'),
       releaseSnapshot: 'rel-1',
     })
     expect(second.migrated).toBe(false)
@@ -146,7 +165,7 @@ describe('S31 L5 → spine migration ("knowledge grew")', () => {
   it('liveL5Questions drops the migrated question from the active blind-spot set (frozen fixture is NOT physically deleted)', async () => {
     await answerL5(Q0.query)
     await migrateL5IfGrew(db, embedder, Q0.id, {
-      confirmedBy: 'human:editor',
+      actor: trustedHumanActor('human:editor'),
       releaseSnapshot: 'r',
     })
     const live = await liveL5Questions(db)
@@ -159,7 +178,7 @@ describe('S31 L5 → spine migration ("knowledge grew")', () => {
   it('only a frozen L5 question id can be migrated (a random id is rejected)', async () => {
     await expect(
       migrateL5IfGrew(db, embedder, 'not-an-l5-id', {
-        confirmedBy: 'human:editor',
+        actor: trustedHumanActor('human:editor'),
         releaseSnapshot: 'r',
       }),
     ).rejects.toThrow(/not a frozen L5 gap question/)
@@ -177,7 +196,7 @@ describe('EGR-CR-016 · runLiveL5Suite (default L5 scoring consumes the migratio
     expect((await recallClaims(db, embedder, Q0.query)).length).toBeGreaterThanOrEqual(1)
     // migrate Q0 out of L5 (recall ≥ 1 + human-confirmed)
     const mig = await migrateL5IfGrew(db, embedder, Q0.id, {
-      confirmedBy: 'human:editor',
+      actor: trustedHumanActor('human:editor'),
       releaseSnapshot: 'r',
     })
     expect(mig.migrated).toBe(true)

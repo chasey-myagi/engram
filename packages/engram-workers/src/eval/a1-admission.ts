@@ -10,10 +10,12 @@ import { randomUUID } from 'node:crypto'
 
 import {
   addSource,
+  agentActor,
   appendClaim,
   promoteCandidate,
   schema,
   transitionClaim,
+  trustedHumanActor,
   type DB,
   type Embedder,
   type ImmunityResult,
@@ -71,7 +73,10 @@ async function appendActiveSourceClaim(
     { ...draft, createdBy: 'agent:distiller' },
     provs,
   )
-  await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
+  await transitionClaim(db, claimId, 'active', {
+    actor: agentActor('agent:distiller'),
+    entailmentPass: true,
+  })
   return claimId
 }
 
@@ -121,7 +126,7 @@ export async function admitViaA1(
     ...(item.object !== undefined ? { object: item.object } : {}),
   }
   const res = await promoteCandidate(db, embedder, candidateId, {
-    confirmedBy,
+    actor: trustedHumanActor(confirmedBy),
     ...(Object.keys(poison).length > 0 ? { poison } : {}),
   })
   return {

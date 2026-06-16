@@ -36,7 +36,7 @@ import {
 import { appendClaim } from './append-claim.js'
 import { recallClaims } from './recall-claims.js'
 import { type RedTeamClass } from './redteam-generation.js'
-import { isHumanRole } from './reflux.js'
+import type { ActorContext } from './actor.js'
 
 /** 四项免疫检查 + 总判 + 失败原因（落进 basis 快照，可审计）。 */
 export interface ImmunityResult {
@@ -54,8 +54,9 @@ export interface ImmunityResult {
 }
 
 export interface PromoteOptions {
-  /** 晋升人身份（人的架构权威，必须 'human…' 前缀，否则不授权）。 */
-  confirmedBy: string
+  /** 晋升人身份（受信边界）。授权读 actor.isHuman；非人（含 role 伪装成 'human:fake' 的 agentActor）不授权。
+   *  actor.role 落库审计（decidedBy / promotedBy / 毒株 createdBy / patrol by_role）。 */
+  actor: ActorContext
   /** 可选：给毒株 claim 的结构化框架（S/P/O），让自相矛盾检查（S8）能被触发。缺省则毒株仅有 claimText。 */
   poison?: { subject?: string; predicate?: string; object?: string }
 }
@@ -112,10 +113,11 @@ export async function promoteCandidate(
   const reasons: string[] = []
 
   // ① HITL 权威门：非人尝试不授权 —— 记审计、**不烧候选**（留 queued，可后续由人重试），直接返回。
+  // 授权读 actor.isHuman（受信边界）；agentActor（含 role 伪装成 'human:fake'）在此被拒。
   // 注：权威门先失败即短路，后三项检查**未运行**；basis 里它们为 false 表示「未评估而非判否」，
   // 权威说明在 reasons（'not human-confirmed …'）—— reasons 才是审计「凭何」的权威半，不要把这三个 false 读成结论。
-  if (!isHumanRole(opts.confirmedBy)) {
-    reasons.push(`not human-confirmed (by_role '${opts.confirmedBy}')`)
+  if (!opts.actor.isHuman) {
+    reasons.push(`not human-confirmed (by_role '${opts.actor.role}')`)
     const result: ImmunityResult = {
       humanConfirmed: false,
       kbTrulyLacks: false,
@@ -128,7 +130,7 @@ export async function promoteCandidate(
       id: randomUUID(),
       candidateId,
       decision: 'rejected',
-      decidedBy: opts.confirmedBy,
+      decidedBy: opts.actor.role,
       basis: result,
     })
     return { promoted: false, result }
@@ -167,7 +169,7 @@ export async function promoteCandidate(
         embedder,
         {
           claimText: cand.query,
-          createdBy: `exam:immunity:${opts.confirmedBy}`,
+          createdBy: `exam:immunity:${opts.actor.role}`,
           // 仅在给了结构化框架时带 S/P/O（exactOptionalPropertyTypes：不显式塞 undefined）。
           ...(opts.poison?.subject !== undefined ? { subject: opts.poison.subject } : {}),
           ...(opts.poison?.predicate !== undefined ? { predicate: opts.poison.predicate } : {}),
@@ -202,7 +204,7 @@ export async function promoteCandidate(
         claimId: poisonClaimId,
         kind: 'patrol',
         verdict: { check: 'exam_immunity', noSelfContradiction, locatorsTraceable },
-        byRole: opts.confirmedBy,
+        byRole: opts.actor.role,
       })
     }
   }
@@ -226,7 +228,7 @@ export async function promoteCandidate(
         candidateId,
         query: cand.query,
         poisonClaimId: poisonClaimId!,
-        promotedBy: opts.confirmedBy,
+        promotedBy: opts.actor.role,
         basis: result,
       })
       await tx
@@ -237,7 +239,7 @@ export async function promoteCandidate(
         id: randomUUID(),
         candidateId,
         decision: 'promoted',
-        decidedBy: opts.confirmedBy,
+        decidedBy: opts.actor.role,
         basis: result,
       })
       return { promoted: true, result, goldenId, poisonClaimId }
@@ -250,7 +252,7 @@ export async function promoteCandidate(
       id: randomUUID(),
       candidateId,
       decision: 'rejected',
-      decidedBy: opts.confirmedBy,
+      decidedBy: opts.actor.role,
       basis: result,
     })
     return { promoted: false, result, poisonClaimId }
