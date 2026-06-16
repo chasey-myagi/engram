@@ -484,4 +484,87 @@ describe('S12 A1 exam-immunity pipeline before golden promotion (A.9 red line)',
       )
     }
   })
+
+  // EGR-CR-020 并发回归（gate exam-immunity.ts 决定事务的 .for('update') 复核 + already-decided 早退）：
+  // promoteCandidate() 曾在事务外无锁读 status、事务内 blind UPDATE，两个 curator 并发晋升同一 queued 候选时
+  // 存在 check↔use 窗口。补行锁前，loser 越过事务外守卫、走进决定事务的 golden insert、撞 candidate_id UNIQUE
+  // （抛 23505 duplicate key，而非干净的 already-decided 早退）；补行锁后，loser 阻塞到 winner 提交、锁内读到非
+  // 'queued' ⇒ 抛 already-decided，绝不触达 golden insert / blind UPDATE。对齐 transition.test.ts:366 的并发范式
+  // 与台账 Regression Test Map（dev-implementation-code-review-2026-06-05.md:1431）。
+  it('FOR UPDATE serializes concurrent promotions of the same queued candidate: loser is cleanly already-decided (not a UNIQUE violation), never golden row + rejected', async () => {
+    const q = 'a contended gap question two curators race to promote'
+    // quarantined origin ⇒ recall(q) empty ⇒ kbTrulyLacks holds, provenance-traceable ⇒无并发时本会 pass
+    const origin = await seedClaim({ claimText: 'origin', embedQuery: q, status: 'quarantined' })
+    const candidateId = await seedCandidate(q, origin)
+
+    // 两个人类 curator 并发晋升同一候选（同一候选 ⇒ 二者免疫计算同构、都本会 pass）
+    const results = await Promise.allSettled([
+      promoteCandidate(db, embedder, candidateId, { actor: trustedHumanActor('human:a') }),
+      promoteCandidate(db, embedder, candidateId, { actor: trustedHumanActor('human:b') }),
+    ])
+
+    // 断言 A：恰一个拿到候选占有权落终态，另一个被行锁早退为 already-decided。
+    // RED（无锁）：loser 走到 golden insert 撞 candidate_id UNIQUE ⇒ 抛 duplicate-key（23505），
+    //   其 message 不含 'already decided' ⇒ 下面的 /already decided/ 断言失败。
+    // GREEN（FOR UPDATE）：loser 锁内读到非 'queued' ⇒ 抛 already-decided，绝不触达 golden insert。
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1)
+    const rejected = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[]
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0]!.reason.message).toMatch(/already decided/)
+
+    // 断言 B（核心不变量）：候选终态与 golden 命名空间一致，绝不存在 (golden 行 ∧ rejected) 的矛盾终态。
+    const [cand] = await db.select().from(l5Candidates).where(eq(l5Candidates.id, candidateId))
+    const goldenForCand = (await getGoldenQuestions(db)).filter(
+      (g) => g.candidateId === candidateId,
+    )
+    expect(cand!.status).toBe('promoted') // winner 是 pass ⇒ 候选终态 promoted
+    expect(goldenForCand).toHaveLength(1) // 恰一条 golden、无重复（行锁早退 ⇒ loser 不再靠 UNIQUE 抛错兜底）
+    // 反向硬断言：永远不存在 (golden 行 ∧ rejected) 的组合
+    expect(goldenForCand.length === 1 && cand!.status === 'rejected').toBe(false)
+
+    // 断言 C：审计流不自相矛盾——同一候选不同时落 promoted 与 rejected 两条决定。
+    // RED（无锁）：loser 撞 UNIQUE 在 golden insert 处即回滚整笔决定事务 ⇒ 它那条 promoted 审计也回滚，
+    //   故旧码 audit 仅一条 promoted（断言 C 在旧码上恰好不发火）——本测试的 RED 由断言 A 锚定，断言 C/B 守不变量。
+    const audit = await getPromotionAudit(db, candidateId)
+    const decisions = new Set(audit.map((a) => a.decision))
+    expect(decisions.has('promoted') && decisions.has('rejected')).toBe(false)
+  })
+
+  it('FOR UPDATE: a human pass racing a human-rejected promotion of the same candidate never leaves golden row + rejected status', async () => {
+    // 反矛盾终态的"对照支"：让一个调用本会 fail（KB 能答 ⇒ kbTrulyLacks=false ⇒ 决定事务走 blind UPDATE rejected、
+    // 不 insert golden），与另一个同候选并发。同一候选 ⇒ 二者免疫判定同构（都 fail），故终态恒为 rejected + 无 golden；
+    // 行锁保证 loser 干净早退而非对同一行做第二次 lost-update blind UPDATE。守的是不变量：绝无 (golden ∧ rejected)。
+    const q = 'a contended gap question the KB can actually answer'
+    const answer = await seedClaim({
+      claimText: 'kb can answer this',
+      embedQuery: q,
+      status: 'active',
+    })
+    const candidateId = await seedCandidate(q, answer)
+
+    const results = await Promise.allSettled([
+      promoteCandidate(db, embedder, candidateId, { actor: trustedHumanActor('human:a') }),
+      promoteCandidate(db, embedder, candidateId, { actor: trustedHumanActor('human:b') }),
+    ])
+
+    // 恰一个落终态、另一个 already-decided 早退（行锁串行化两笔决定事务）。
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1)
+    const rejected = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[]
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0]!.reason.message).toMatch(/already decided/)
+
+    // 不变量：候选 rejected ⇒ 绝无 golden 行（杜绝矛盾终态）。
+    const [cand] = await db.select().from(l5Candidates).where(eq(l5Candidates.id, candidateId))
+    const goldenForCand = (await getGoldenQuestions(db)).filter(
+      (g) => g.candidateId === candidateId,
+    )
+    expect(cand!.status).toBe('rejected')
+    expect(goldenForCand).toHaveLength(0)
+    expect(goldenForCand.length === 1 && cand!.status === 'rejected').toBe(false)
+
+    // 审计：只有一条 rejected 决定（winner 的），无 promoted。
+    const audit = await getPromotionAudit(db, candidateId)
+    expect(audit).toHaveLength(1)
+    expect(audit[0]!.decision).toBe('rejected')
+  })
 })
