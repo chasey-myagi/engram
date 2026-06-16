@@ -8,11 +8,13 @@
  *    **为什么离散档而非每条唯一 raw**:校准的单元是「档(置信水平)」——要在某档上学到 P(correct|档),该档就得有
  *    多条事实凑出一个比率;按 fact 切分时,留出的是该档的**别的**事实,g 用该档**训练事实**学到的比率去预测留出事实
  *    ⇒ 真泛化。若每条 fact 唯一 raw,则每档只 1 条、比率退化成 0/1,isotonic 只能背个体标签、不泛化(这是上一版的坑)。
- *  - **为什么直接给 rawTarget 而非靠 provenance 算**:新鲜、仅有出处的 claim 的 raw 天然窄且低(entailment/humanReview/
+ *  - **为什么 rawTarget 需要一个显式成熟度覆写**:新鲜、仅有出处的 claim 的 raw 天然窄且低(entailment/humanReview/
  *    usageCorrect 因子对未核验/未使用的 claim=0,raw 封顶 ~0.5)——真实 raw 跨度来自 claim **成熟度**(累积核验/使用/人审)。
- *    本 pilot 直接把因子设到 rawTarget = 模拟不同成熟度 claim 的横截面,好让 reliability diagram 有跨度。
- *    召回/使用/拟合/ECE **全是真的**,只有"成熟度"是模拟的。**M2 验的是命门的校准映射(g)半边,不测 raw 七因子计算半边**
- *    (后者在 core 的 confidence 单测里验)。
+ *    本 pilot 的 seed **真走正式写半边**:appendClaim(D1 + 事务 + confidence)→ transitionClaim 过晋升门翻 active
+ *    (见 pilot.ts:seedCorpus,EGR-CR-041 根治),证明写路径通;**随后**用一个**显式命名**的 test-only fixture
+ *    (pilot.ts:applySyntheticMaturity)把因子覆写到 rawTarget = 模拟不同成熟度 claim 的横截面,好让 reliability
+ *    diagram 有跨度。召回/使用/拟合/ECE **全是真的**,只有"成熟度"那一步是 fixture 注入的(且发生在过门之后、命名诚实)。
+ *    **M2 验的是命门的校准映射(g)半边,不测 raw 七因子计算半边**(后者在 core 的 confidence 单测里验)。
  *  - **故意注入「现实式过自信」**:各档真值率 P(correct) 单调升(raw 越高越可能对 ⇒ raw 有信息量),但**每档都低于该档
  *    rawTarget**(高档高估约 18 个百分点)。于是 identity-g 的 ECE 偏高,isotonic g 应学到单调下压、ECE 降。
  *  - **这是受控实验**:真值与档由本文件按透明过程独立赋予,验的是「g 拟合闭环在真嵌入+真 usage 上闭合 + 在**真·样本外

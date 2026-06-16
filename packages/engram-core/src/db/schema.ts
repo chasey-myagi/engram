@@ -249,10 +249,15 @@ export const calibrationMap = pgTable(
   'calibration_map',
   {
     id: uuid('id').primaryKey(),
-    // 具名校准版本（如 'identity' / 'cal-...'）。同一 version 可被多行引用（定义行 + 活动指针行）。
+    // 具名校准版本（如 'identity' / 'cal-...'）。同一 version 可被多行引用（定义行 + 活动指针行）；
+    // 但这些行的 knots 必须 byte-for-byte 一致（version→knots 不可变，EGR-CR-009）——由 store 幂等门
+    // + (version, knots_hash) 唯一索引共同保证：同名同内容幂等放行、同名异内容直接拒（fail-loud）。
     version: text('version').notNull(),
     // 单调升序 (x,y) 结点（CalibrationKnot[]，分段线性插值）。identity 版本为空数组（[]）= 直通 raw。
     knots: jsonb('knots').notNull(),
+    // knots 规范化序列的稳定指纹（EGR-CR-009）：(version, knots_hash) 唯一索引把「同 version 多次写同内容」
+    // 去重为幂等，并把「同 version 写不同 knots」交给应用层门 fail-loud 拒掉（DB 兜底防 TOCTOU/绕过 store 直写）。
+    knotsHash: text('knots_hash').notNull(),
     // 验证依据（A.8）：候选 g' 相对当时活动 g 在 golden 上的 ΔECE 等审计快照（离线，不进在线计分）。
     evidence: jsonb('evidence')
       .notNull()
@@ -267,6 +272,11 @@ export const calibrationMap = pgTable(
   (t) => [
     index('idx_calibration_map_created').on(t.createdAt),
     index('idx_calibration_map_version').using('hash', t.version),
+    // (version, knots_hash) 普通索引（EGR-CR-009）：加速「按 version 查已存在 knots_hash」的应用层幂等门。
+    // **不**做唯一约束——同 version 同内容允许多行（活动指针 / 回退复用 'identity' 再 append 即激活）。
+    // 「同 version 不同 knots」的 DB 兜底由 migration 0021 的 BEFORE INSERT 触发器守（纯 UNIQUE 表达不了
+    // 「同 version 多行但 knots 必须同」，故用触发器）；应用层门是首要防线、触发器防 TOCTOU/绕过 store 直写。
+    index('idx_calibration_map_version_knots').on(t.version, t.knotsHash),
   ],
 )
 

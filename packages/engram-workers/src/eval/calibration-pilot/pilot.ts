@@ -7,12 +7,11 @@
  * 泛化的单元是「事实」:每档很多事实凑出可测正确率,g 用该档**训练事实**学到的比率,去预测该档**留出(未见)事实**
  * ⇒ 真泛化(非查表)。切分按 fact 整组进 fit 或 heldout,故无一事实跨两边(factsInBothSides=0 钉死)。
  */
-import { randomUUID } from 'node:crypto'
-
 import { eq } from 'drizzle-orm'
 
 import {
   addSource,
+  appendClaim,
   applyGMap,
   CALIBRATION_IDENTITY,
   collectUsageCalibrationSamples,
@@ -21,10 +20,12 @@ import {
   recallClaims,
   reportUsage,
   schema,
+  transitionClaim,
   type CalibrationMap,
   type CalibrationSample,
   type DB,
   type Embedder,
+  type ProvenanceInput,
   type ReliabilityReport,
 } from '@engram/core'
 
@@ -37,6 +38,76 @@ const WEIGHTS = {
   entailment: 0.15,
   indepSupport: 0.15,
   usageCorrect: 0.1,
+}
+
+/**
+ * seed 写入者身份(**诚实标注**,EGR-CR-041):eval 自己 seed 的接地语料,不冒用 `agent:distiller`
+ * (后者是真 Distiller 工种的产物身份)。这条 claim 确实经 appendClaim+transitionClaim 真写路径产生,
+ * 但它是 pilot 的受控 fixture,不是真 distiller 抽取的——身份如实写明,杜绝"伪造 distiller 产物"。
+ */
+export const SEED_CREATED_BY = 'agent:eval-seed'
+
+/**
+ * seed 经过的真写 SPI(EGR-CR-041:不再裸 db.insert)。默认接真 appendClaim/transitionClaim;
+ * 测试可注入 spy 适配器,断言"seed 真走正式写半边 + 晋升门"(T1/T3)。
+ */
+export interface SeedSpi {
+  appendClaim: typeof appendClaim
+  transitionClaim: typeof transitionClaim
+}
+
+const DEFAULT_SEED_SPI: SeedSpi = { appendClaim, transitionClaim }
+
+/**
+ * seed 用足量高权威独立 exact 源,让 appendClaim 算出的 raw 过 PROMOTE_CONFIDENCE_FLOOR(0.5)、能真晋升。
+ * 沿用 red-blue-round.test.ts 已验证可用的范式(4 条 authority=1.0 独立 exact 源 ⇒ base≥0.5)。
+ * **每条 content 须字节级不同**(EGR-CR-012:内核据 content 自算 hash,同 content 折成 1 源 ⇒ indepSupport 退化)。
+ */
+const SEED_SOURCE_COUNT = 4
+
+/**
+ * **显式、命名诚实的 test-only 成熟度构造**(EGR-CR-041 方案 1b)。
+ *
+ * 背景张力(见 corpus.ts):新鲜单源 claim 经 appendClaim 算出的 raw 天然又窄又低(~0.5 封顶),无法复现
+ * reliability diagram 需要的 0.5–0.88 rawTarget **跨度**——真实跨度来自 claim 成熟度(累积核验/使用/人审)。
+ *
+ * 本 helper 在 claim **已真正经过** D1 + appendClaim 事务 + transitionClaim 晋升门**之后**,把它的
+ * confidenceFactors/confidenceRaw 覆写到目标 rawTarget,模拟"不同成熟度 claim 的横截面"。诚实点:
+ *   - 这是一个**独立、可见、命名为 synthetic** 的 fixture 步骤,而非藏在 seedCorpus 里裸写 active;
+ *   - claim 的真实性(过晋升门、有事务保护的出处、非冒充 distiller)已在覆写**之前**成立;
+ *   - 覆写只动校准半边要测的 raw 跨度,不碰状态/出处/身份。
+ *
+ * recall 召回时按存档 confidenceFactors **现算** raw(rawFromStoredFactors,见 recall-claims.ts),故把 5 因子
+ * 全设到 v ⇒ base=Σwᵢ·v=v、staleDecay=conflictDecay=1 ⇒ recall 重算 raw≈v=rawTarget。
+ */
+export async function applySyntheticMaturity(
+  db: DB,
+  claimId: string,
+  rawTarget: number,
+): Promise<void> {
+  const v = rawTarget
+  await db
+    .update(schema.claim)
+    .set({
+      confidence: v,
+      confidenceRaw: v,
+      confidenceFactors: {
+        factors: {
+          authority: v,
+          humanReview: v,
+          entailment: v,
+          indepSupport: v,
+          usageCorrect: v,
+          ageDays: 0,
+          activeContradicts: 0,
+          staleDecay: 1,
+          conflictDecay: 1,
+        },
+        weights: WEIGHTS,
+        calibrationVersion: CALIBRATION_IDENTITY,
+      },
+    })
+    .where(eq(schema.claim.id, claimId))
 }
 
 /** 一条带事实归属的校准样本(从真 usage_truth 读回 + factId,用于按 fact 切分)。 */
@@ -55,63 +126,54 @@ export interface SeedStats {
 }
 
 /**
- * 直接 seed 一条 **active、可召回、带 1 条 exact 出处(满足 D1)** 的 claim,5 因子全设到 fact.rawTarget
- * ⇒ recall 现算 raw≈rawTarget(asOf=now ⇒ staleDecay≈1;subject 唯一 ⇒ 无矛盾、conflictDecay=1)。
- * **模拟该 claim 的成熟度横截面**(见 corpus.ts:真实 raw 跨度来自累积核验/使用/人审,非新鲜出处)。
+ * seed 一条 **active、可召回** 的 claim —— **真走正式写半边 + 晋升门**(EGR-CR-041 根治):
+ *   1. addSource ×N(足量高权威独立 exact 源)+ appendClaim ⇒ 经 D1 硬门 + **单事务**写 claim+出处
+ *      (子问题 B:provenance 失败整事务回滚,绝不留 active orphan);算出连续 confidence(命门写半边)。
+ *   2. transitionClaim → active(蓝边晋升门:conf≥0.5 ∧ entailmentPass)⇒ 证明**晋升门**真被走过,非裸写 active。
+ *   3. applySyntheticMaturity(claimId, rawTarget):**显式、命名诚实**的 test-only 成熟度覆写,把 5 因子抬到
+ *      rawTarget,模拟成熟度横截面(见该 helper 与 corpus.ts:真实 raw 跨度来自累积核验/使用/人审)。
+ *
+ * createdBy 用诚实身份 SEED_CREATED_BY('agent:eval-seed'),不冒用 distiller。
+ * recall 现算 raw≈rawTarget(asOf=now ⇒ staleDecay≈1;subject 唯一 ⇒ 无矛盾、conflictDecay=1)。
  */
 export async function seedCorpus(
   db: DB,
   embedder: Embedder,
   facts: CorpusFact[],
+  spi: SeedSpi = DEFAULT_SEED_SPI,
 ): Promise<SeedStats> {
   const claimIdByFact = new Map<string, string>()
   const rawSorted: number[] = []
   const now = new Date()
   for (const f of facts) {
     const v = f.rawTarget
-    const src = await addSource(db, {
-      content: `source attesting: ${f.statement}`,
-      kind: 'formal_document',
-      authorityScore: v,
-    })
-    const claimId = randomUUID()
-    await db.insert(schema.claim).values({
-      id: claimId,
-      claimText: f.statement,
-      subject: f.subject,
-      predicate: f.predicate,
-      object: f.object,
-      status: 'active',
-      confidence: v,
-      confidenceRaw: v,
-      confidenceFactors: {
-        factors: {
-          authority: v,
-          humanReview: v,
-          entailment: v,
-          indepSupport: v,
-          usageCorrect: v,
-          ageDays: 0,
-          activeContradicts: 0,
-          staleDecay: 1,
-          conflictDecay: 1,
-        },
-        weights: WEIGHTS,
-        calibrationVersion: CALIBRATION_IDENTITY,
+    // N 条独立高权威 exact 源 ⇒ appendClaim 算出的 raw 过 0.5 晋升门(content 字节级不同,避免 hash 折叠)。
+    const provenances: ProvenanceInput[] = []
+    for (let i = 0; i < SEED_SOURCE_COUNT; i++) {
+      const src = await addSource(db, {
+        content: `source ${i} attesting: ${f.statement} [${f.id}]`,
+        kind: 'formal_document',
+        authorityScore: 1.0,
+      })
+      provenances.push({ sourceId: src.sourceId, locator: `cal:${f.id}:${i}`, relevance: 'exact' })
+    }
+    // 真写半边:appendClaim 单事务(D1 + confidence)写 draft;transitionClaim 过晋升门翻 active。
+    const { claimId } = await spi.appendClaim(
+      db,
+      embedder,
+      {
+        claimText: f.statement,
+        subject: f.subject,
+        predicate: f.predicate,
+        object: f.object,
+        asOf: now,
+        createdBy: SEED_CREATED_BY,
       },
-      lineageId: randomUUID(),
-      asOf: now,
-      createdBy: 'agent:distiller',
-      embedding: await embedder.embed(f.statement, 'document'),
-      embeddingVersion: embedder.version,
-    })
-    await db.insert(schema.claimProvenance).values({
-      id: randomUUID(),
-      claimId,
-      sourceId: src.sourceId,
-      locator: `cal:${f.id}`,
-      relevance: 'exact',
-    })
+      provenances,
+    )
+    await spi.transitionClaim(db, claimId, 'active', { by: SEED_CREATED_BY, entailmentPass: true })
+    // 显式命名的成熟度构造(覆写发生在过门之后,不冒充真实成熟度计算)。
+    await applySyntheticMaturity(db, claimId, v)
     claimIdByFact.set(f.id, claimId)
     rawSorted.push(v)
   }
@@ -335,7 +397,7 @@ export function renderReliability(r: ReliabilityReport): string {
 export async function runCalibrationPilot(
   db: DB,
   embedder: Embedder,
-  opts: { binCount?: number; heldoutEvery?: number } = {},
+  opts: { binCount?: number; heldoutEvery?: number; spi?: SeedSpi } = {},
 ): Promise<{
   seed: SeedStats
   usage: UsageStats
@@ -344,7 +406,7 @@ export async function runCalibrationPilot(
   persistedSamples: number
 }> {
   const facts = buildCorpus()
-  const seed = await seedCorpus(db, embedder, facts)
+  const seed = await seedCorpus(db, embedder, facts, opts.spi ?? DEFAULT_SEED_SPI)
   const usage = await generateUsage(db, embedder, facts, seed.claimIdByFact)
 
   // fail-loud 硬门:真回路必须覆盖全部 promoted facts,否则是在幸存子集上证明闭环。

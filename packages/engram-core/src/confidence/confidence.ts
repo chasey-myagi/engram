@@ -265,8 +265,9 @@ export function rawFromStoredFactors(
  *   保持纯/同步：recall 与 live-recompute 在请求开头按候选 claim 钉的版本批量解析 map，再逐条同步 applyG 传入。
  *   传入 map.version 与 calibrationVersion 不一致 → 抛（防张冠李戴用错版本的 g）。
  *
- * **快照冻结**靠这条性质天然成立：每条 claim 钉死自己的 calibrationVersion，recall 解析的就是它钉的那版 g'，
- * 后来换活动版本不回溯改写老 claim 的锚 → 老快照永远按它当年的 g 算。
+ * **快照冻结**靠两条性质共同成立：①每条 claim 钉死自己的 calibrationVersion，recall 解析的就是它钉的那版 g'，
+ * 后来换活动版本不回溯改写老 claim 的锚；②「version→knots 不可变」由 calibration-store 的同名同内容幂等门
+ * + (version, knots_hash) DB 触发器共同保证（EGR-CR-009），故同名不能被重定义成另一组 knots——老快照永远按它当年的 g 算。
  */
 export function applyG(
   raw: number,

@@ -9,14 +9,24 @@
  * 四测:①闭环 + 真泛化(留出事实零跨边 + g 在未见事实上压 ECE);②语料前提不变量(过自信被真注入);③负对照(良校准输入 ⇒ g 不无中生有压 ECE);④强制 recall miss ⇒ pilot fail-loud(不在幸存子集上证明闭环)。
  */
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { eq } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
-import { createDb, makeFakeEmbedder, type DB, type Embedder } from '@engram/core'
+import {
+  appendClaim,
+  createDb,
+  makeFakeEmbedder,
+  schema,
+  transitionClaim,
+  type DB,
+  type Embedder,
+} from '@engram/core'
 
 import { buildCorpus, NUM_LEVELS } from '../calibration-pilot/corpus.js'
 import {
@@ -26,8 +36,11 @@ import {
   PILOT_MIN_HELDOUT,
   PILOT_MIN_SAMPLES,
   runCalibrationPilot,
+  SEED_CREATED_BY,
+  seedCorpus,
   type CalibrationMeasurement,
   type FactSample,
+  type SeedSpi,
   type UsageStats,
 } from '../calibration-pilot/pilot.js'
 
@@ -169,6 +182,99 @@ describe('M2 · 校准 pilot(g 拟合闭环:接地语料 → 真 recall+usage �
       runCalibrationPilot(db, embedderWithForcedMiss, { heldoutEvery: 3 }),
     ).rejects.toThrow(/recall 未覆盖|recallMisses|覆盖不一致|recall 命中/)
   }, 120_000)
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // EGR-CR-041(#116)回归:seed 真走正式写 SPI + 晋升门、不冒充 distiller、provenance 失败不留 active orphan。
+  // 选方案 1(证明真闭环)⇒ T1+T2+T3+T4。
+  // ────────────────────────────────────────────────────────────────────────────
+
+  it('T1 · seed 真走正式写 SPI(appendClaim×total + transitionClaim 过晋升门、非冒充 distiller)', async () => {
+    // spy 适配器:包真 appendClaim/transitionClaim,断言 seed 真经它们(而非裸 db.insert)。
+    const appendSpy = vi.fn(appendClaim)
+    const transitionSpy = vi.fn(transitionClaim)
+    const spi: SeedSpi = { appendClaim: appendSpy, transitionClaim: transitionSpy }
+
+    const facts = buildCorpus()
+    const seed = await seedCorpus(db, embedder, facts, spi)
+
+    // appendClaim 每条 fact 调一次(经 D1 + 单事务写半边)。
+    expect(appendSpy).toHaveBeenCalledTimes(seed.total)
+    // transitionClaim 每条 fact 调一次,翻 active、蓝边(agent:*,非 human)、entailmentPass:true(过晋升门)。
+    expect(transitionSpy).toHaveBeenCalledTimes(seed.total)
+    for (const call of transitionSpy.mock.calls) {
+      const [, , toStatus, opts] = call
+      expect(toStatus).toBe('active')
+      expect(opts.entailmentPass).toBe(true)
+      expect(typeof opts.by).toBe('string')
+      expect(opts.by.startsWith('human')).toBe(false) // 蓝边晋升,绝非人 Approve 旁路门
+    }
+
+    // 不再冒用 distiller 身份:seed 出的 claim 一律 createdBy=SEED_CREATED_BY、无一为 'agent:distiller'。
+    const claimIds = [...seed.claimIdByFact.values()]
+    const rows = await db
+      .select({ createdBy: schema.claim.createdBy, status: schema.claim.status })
+      .from(schema.claim)
+    const seeded = rows.filter((r) => r.status === 'active')
+    expect(seeded.length).toBeGreaterThanOrEqual(claimIds.length)
+    expect(rows.every((r) => r.createdBy !== 'agent:distiller')).toBe(true)
+    expect(seeded.every((r) => r.createdBy === SEED_CREATED_BY)).toBe(true)
+  }, 120_000)
+
+  it('T2 · 故障注入:provenance 写失败整事务回滚,不留 active orphan claim', async () => {
+    // 让 transitionClaim 透传,但 appendClaim 注入「provenance 指向不存在的 source」⇒ NOT NULL FK 违例 ⇒
+    // appendClaim 的单事务整体回滚(claim + provenance 一起没写)。
+    // **用一个本测专属、不与确定性语料撞车的 subject**,使本测的「故障 seed」是该 subject 上**唯一**的写入——
+    // 这样「故障后该 subject 无 active claim」就精确等价于「故障没留下 orphan」,不受本文件其它测试共享 DB 的污染。
+    const corpus0 = buildCorpus()[0]!
+    const uniqueSubject = `T2-orphan-probe-${randomUUID()}`
+    const fact = { ...corpus0, id: `t2-${randomUUID()}`, subject: uniqueSubject }
+
+    // 用真 appendClaim,但把出处的 sourceId 换成一个不存在的 UUID ⇒ FK 违例、事务回滚。
+    const ghostSource = randomUUID()
+    const failingSpi: SeedSpi = {
+      appendClaim: (database, emb, draft, _provs) =>
+        appendClaim(database, emb, draft, [
+          { sourceId: ghostSource, locator: 'cal:ghost', relevance: 'exact' },
+        ]),
+      transitionClaim,
+    }
+
+    // red(未修前):seedCorpus 裸两次独立 insert、无事务 ⇒ claim 已 active 后 provenance 失败 ⇒ 留 1 条 active orphan。
+    // green(修后):经 appendClaim 单事务 ⇒ provenance(FK 违例)失败连 claim 一起回滚 ⇒ 0 orphan。
+    await expect(seedCorpus(db, embedder, [fact], failingSpi)).rejects.toThrow()
+
+    const after = await db
+      .select({ id: schema.claim.id, status: schema.claim.status })
+      .from(schema.claim)
+      .where(eq(schema.claim.subject, uniqueSubject))
+    // 关键断言:故障后该 subject **不存在** active claim(事务回滚 ⇒ 0 orphan)。
+    expect(after.filter((r) => r.status === 'active').length).toBe(0)
+    // 更强:连 draft 也没留下(整事务回滚,claim 行根本没落)——该 subject 行数为 0。
+    expect(after.length).toBe(0)
+  }, 120_000)
+
+  it('T3 · seed 出的 active claim 都经晋升门(status=active ∧ T1 spy 证明经 transitionClaim),非裸写', async () => {
+    // 经 transitionClaim spy 真过门 + 终态 active 联合证明:claim 是「过晋升门」翻 active,不是裸 insert status:'active'。
+    const transitionSpy = vi.fn(transitionClaim)
+    const spi: SeedSpi = { appendClaim, transitionClaim: transitionSpy }
+    const facts = buildCorpus()
+    const seed = await seedCorpus(db, embedder, facts, spi)
+
+    const claimIds = [...seed.claimIdByFact.values()]
+    const rows = await db
+      .select({ id: schema.claim.id, status: schema.claim.status })
+      .from(schema.claim)
+    const byId = new Map(rows.map((r) => [r.id, r.status]))
+    // 每条 seed claim:终态 active。
+    for (const id of claimIds) expect(byId.get(id)).toBe('active')
+    // 每条 active claim 都有一次对应的 promote 调用(过门记录),而非裸写。
+    const promotedIds = new Set(
+      transitionSpy.mock.calls
+        .filter((c) => c[2] === 'active' && c[3]?.entailmentPass === true)
+        .map((c) => c[1]),
+    )
+    for (const id of claimIds) expect(promotedIds.has(id)).toBe(true)
+  }, 120_000)
 })
 
 /**
@@ -243,5 +349,38 @@ describe('#117 · pilot 通过门(纯判据:样本不足 / heldout 空 / ECE 未
     // 健康数据不该 throw(对应 run.ts:assert 后才打印「跑通 ✓」的链路)。
     expect(healthyMeasurement, 'R5 依赖测试 ① 先跑出健康输出').toBeDefined()
     expect(() => assertCalibrationPilotPass(healthyUsage!, healthyMeasurement!)).not.toThrow()
+  })
+})
+
+/**
+ * EGR-CR-041(#116)· T4 · 不冒充真闭环 / 主张与证据对齐(纯单元,零 DB)。
+ * 选方案 1:保留"全是真的"措辞**当且仅当** seed 真走 SPI 已被 T1/T3 证明(本 PR 已成立);
+ * 且 seed 身份不得冒用 distiller(诚实标注)。这是防"文案再次脱离实现"的回归。
+ */
+describe('#116 · T4 · 不冒充真闭环(身份诚实 + 文案与实现对齐)', () => {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const pilotSrc = readFileSync(join(here, '..', 'calibration-pilot', 'pilot.ts'), 'utf8')
+  const corpusSrc = readFileSync(join(here, '..', 'calibration-pilot', 'corpus.ts'), 'utf8')
+
+  it('seed 身份诚实:SEED_CREATED_BY 非 distiller、且源码不再裸 insert 出 distiller 产物', () => {
+    // 身份常量不冒充 distiller。
+    expect(SEED_CREATED_BY).not.toBe('agent:distiller')
+    // seedCorpus 不再把 createdBy 写成 'agent:distiller'(防回退到裸 insert 冒充)。
+    expect(pilotSrc).not.toContain("createdBy: 'agent:distiller'")
+  })
+
+  it('seed 真走正式写 SPI:pilot.ts 真 import 并使用 appendClaim + transitionClaim', () => {
+    // 对照 red-blue-round / redteam-immunity:这两个 SPI 必须真被 seed 使用(不再旁路)。
+    expect(pilotSrc).toContain('appendClaim')
+    expect(pilotSrc).toContain('transitionClaim')
+    // 不再有裸 db.insert(schema.claim) 把 status 直接写 active(晋升门旁路的形态)。
+    expect(pilotSrc).not.toMatch(/db\.insert\(schema\.claim\)/)
+  })
+
+  it('成熟度覆写命名诚实:有显式命名的 synthetic 成熟度 fixture,且文案标注它是 fixture 注入', () => {
+    // 方案 1b 的诚实点:成熟度是一个显式命名的 test-only 步骤,而非藏在 seed 里。
+    expect(pilotSrc).toContain('applySyntheticMaturity')
+    // corpus 文档承认"成熟度"那一步是 fixture 注入、发生在过门之后(主张与证据对齐)。
+    expect(corpusSrc).toMatch(/fixture/)
   })
 })

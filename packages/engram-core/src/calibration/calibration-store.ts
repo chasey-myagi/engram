@@ -12,9 +12,9 @@
  * 读侧（recall / inbox）按候选 claim **各自钉的版本**解析 g'（loadCalibrationMaps）——老快照冻结在它当年的 g。
  * 本模块只认 calibration_map 表 + confidence 的纯类型/校验；零 LLM、零随机、零 A3 信号入口（领域无关、命门红线在拟合输入边界，不在此）。
  */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
-import { desc, inArray, sql } from 'drizzle-orm'
+import { desc, eq, inArray, sql } from 'drizzle-orm'
 
 import {
   CALIBRATION_IDENTITY,
@@ -41,6 +41,21 @@ export class StaleActiveCalibrationError extends Error {
         `but current active row is ${actualActiveId ?? '<empty>'} (concurrent swap won the CAS)`,
     )
     this.name = 'StaleActiveCalibrationError'
+  }
+}
+
+/**
+ * 同名重定义被拒（EGR-CR-009）：某 version 已有定义行，且其 knots 与本次写入的 knots **不一致**。
+ * version→knots 是不可变函数（claim 钉 version 来复现当年的 g），同名只能复用同内容；同名异内容是
+ * 「静默回溯改写历史概率」的入口，故 fail-loud 拒写（携带 version 供上层定位/裁决）。
+ */
+export class CalibrationVersionRedefineError extends Error {
+  constructor(readonly version: string) {
+    super(
+      `calibration: refuse to redefine version "${version}" with different knots ` +
+        `(same version must map to immutable knots — version→knots is a frozen function, EGR-CR-009)`,
+    )
+    this.name = 'CalibrationVersionRedefineError'
   }
 }
 
@@ -91,6 +106,18 @@ function rowToMap(r: CalibrationMapRow): CalibrationMap {
 }
 
 /**
+ * knots 的稳定内容指纹（EGR-CR-009）：把有序结点逐元素规范化为 `x:y` 逗号分隔序列再 md5，
+ * 不依赖 JSON 字段顺序/空白。同 knots ⇒ 同 hash（应用层幂等门的比对锚 + DB 触发器的比对列）。
+ * 用 md5（非 sha256）是为了让 migration 0021 的回填能用 Postgres 内核自带的 `md5(text)` 复算出**逐字节相同**
+ * 的指纹（无需 pgcrypto 扩展）——回填行与此后 store 新写行的同名同内容指纹一致，触发器才不会误拒合法再激活。
+ * identity（空 knots）→ canonical 为空串 → 固定指纹。这是内容相等指纹（非安全 hash），md5 足矣。
+ */
+function knotsHash(knots: CalibrationKnot[]): string {
+  const canonical = knots.map((k) => `${k.x}:${k.y}`).join(',')
+  return createHash('md5').update(canonical).digest('hex')
+}
+
+/**
  * 校准换图 CAS 的事务级 advisory lock key（EGR-CR-044）。任意稳定常量即可——
  * 所有带 expectedActiveId 的提交都在同一 tx 内先取此锁，把「重读活动行 + 比对 + append」整段串行化，
  * 故连「起始表空（无行可 FOR UPDATE）」的并发也能正确分出唯一赢家，而非 FOR UPDATE 锁不到行各自写一行。
@@ -123,6 +150,7 @@ export async function appendCalibrationMapTx(
   input: CommitCalibrationInput,
 ): Promise<CalibrationMapRow> {
   assertCalibrationMap(input.map)
+  const hash = knotsHash(input.map.knots)
   if (input.expectedActiveId !== undefined) {
     // 取事务级 advisory lock：把「重读活动行 + 比对 + append」整段对所有带锚提交串行化。
     // 这一步串行化即便在「起始表空（无行可锁）」时也成立——故并发起拍仍能分出唯一 CAS 赢家。
@@ -132,6 +160,19 @@ export async function appendCalibrationMapTx(
       throw new StaleActiveCalibrationError(input.expectedActiveId, actualActiveId)
     }
   }
+  // version→knots 不可变门（EGR-CR-009，首要防线）：同 version 若已有定义行且其 knots 与本次**不一致**，
+  // 拒写（fail-loud）。同名同内容 ⇒ 允许（活动指针 / 回退行复用同名定义再 append 即激活，幂等合法）。
+  // 取同一 tx 级 advisory lock 串行化「查同名 hash + 比对 + insert」，与并发同名写者互斥（应用层防 TOCTOU；
+  // migration 0021 的 BEFORE INSERT 触发器再兜底「绕过本 store 的直写」）。
+  await exec.execute(sql`SELECT pg_advisory_xact_lock(${CALIBRATION_ACTIVE_LOCK_KEY})`)
+  const existing = await exec
+    .select({ knotsHash: calibrationMap.knotsHash })
+    .from(calibrationMap)
+    .where(eq(calibrationMap.version, input.map.version))
+    .limit(1)
+  if (existing.length > 0 && existing[0]!.knotsHash !== hash) {
+    throw new CalibrationVersionRedefineError(input.map.version)
+  }
   const id = randomUUID()
   const rows = await exec
     .insert(calibrationMap)
@@ -139,6 +180,7 @@ export async function appendCalibrationMapTx(
       id,
       version: input.map.version,
       knots: input.map.knots,
+      knotsHash: hash,
       evidence: input.evidence ?? {},
       reason: input.reason,
       createdBy: input.createdBy ?? 'gate:advisor-accept',
