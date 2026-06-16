@@ -149,7 +149,7 @@ describe('S4 report_usage — append-only usage_truth events (A.2)', () => {
     expect(e!.byRole).toBe('consumer:unknown')
   })
 
-  it('verdict JSONB carries exactly {outcome, taskId, note, predictedConfidence, calibrationVersion, query, kbLacksAnswer} — by_role stays a column', async () => {
+  it('verdict JSONB carries exactly {outcome, taskId, note, predictedConfidence, calibrationVersion, query, kbLacksAnswer, evalRunId} — by_role stays a column', async () => {
     const id = await seedActiveClaim('verdict keys')
     const { verificationId } = await reportUsage(db, id, 'adopted', {
       byRole: 'agent:x',
@@ -162,6 +162,7 @@ describe('S4 report_usage — append-only usage_truth events (A.2)', () => {
       .where(eq(claimVerification.id, verificationId))
     expect(Object.keys(row!.verdict as object).sort()).toEqual([
       'calibrationVersion',
+      'evalRunId',
       'kbLacksAnswer',
       'note',
       'outcome',

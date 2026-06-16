@@ -270,6 +270,7 @@ export async function generateUsage(
   deps: RealWorldDeps,
   facts: { id: string; query: string; isTrue: boolean }[],
   claimsByFact: Map<string, string[]>,
+  evalRunId?: string,
 ): Promise<UsageStats> {
   let recallHits = 0
   let recallMisses = 0
@@ -291,6 +292,8 @@ export async function generateUsage(
       taskId: f.id,
       byRole: 'agent:eval-consumer',
       confidenceAtRecall: mine.confidence.value,
+      // EGR-CR-060：给本次 run 写入的 usage_truth 打隔离标签，读端据此只收本次样本。
+      ...(evalRunId !== undefined ? { evalRunId } : {}),
     })
     usageRows += 1
   }
@@ -312,11 +315,21 @@ export async function runRealWorldEce(
   deps: RealWorldDeps,
   opts: RealWorldOptions = {},
 ): Promise<RealWorldResult> {
+  // EGR-CR-060：本次 run 唯一标识。写端给 usage_truth 打标、读端按标过滤 ⇒ 测量集 = 本次 run 产出，
+  // 不依赖「deps.db 是空库」这个未声明的隐含前提，复用进非空库 / 串跑多评测也正确。
+  const evalRunId = randomUUID()
   const facts = buildRealWorldCorpus()
   const ingest = await ingestCorpus(deps, facts, opts)
   const promotion = await promoteEligible(deps, facts, ingest.claimsByFact, opts)
-  const usage = await generateUsage(deps, facts, ingest.claimsByFact)
-  const samples = await collectFactSamples(deps.db)
+  const usage = await generateUsage(deps, facts, ingest.claimsByFact, evalRunId)
+  const samples = await collectFactSamples(deps.db, { evalRunId })
+  // 不变量护栏（fail-loud）：本次读回样本数必须 == 本次写入 usage 行数。不等即污染/漏读 ⇒ 显式失败而非静默坏曲线。
+  if (samples.length !== usage.usageRows) {
+    throw new Error(
+      `runRealWorldEce: sample/usage mismatch — collected ${samples.length} samples but wrote ${usage.usageRows} usage rows (evalRunId=${evalRunId}). ` +
+        `测量集被污染或漏读，拒绝产出可疑校准曲线。`,
+    )
+  }
   const measurement =
     samples.length > 0
       ? measureFromSamples(samples, {
@@ -469,6 +482,8 @@ export async function runCorroboratedEce(
     limit?: number
   } = {},
 ): Promise<CorroboratedResult> {
+  // EGR-CR-060：本次 run 唯一标识(与 runRealWorldEce 同口径)。
+  const evalRunId = randomUUID()
   // facts 可注入(Option C=buildCorroboratedCorpus 公共事实;M3-B=buildPrivateCorpus 私域事实)。缺省公共。
   const allFacts = opts.facts ?? buildCorroboratedCorpus()
   // limit 仅供真 Qwen 微冒烟核对接线(切片会破坏 tier 平衡/真值率,测量无意义、只验「真模型下确实晋升」)。
@@ -524,8 +539,15 @@ export async function runCorroboratedEce(
     promoted = ids.filter((id) => activeSet.has(id)).length
   }
 
-  const usage = await generateUsage(deps, facts, claimsByFact)
-  const samples = await collectFactSamples(deps.db)
+  const usage = await generateUsage(deps, facts, claimsByFact, evalRunId)
+  const samples = await collectFactSamples(deps.db, { evalRunId })
+  // 不变量护栏（fail-loud，与 runRealWorldEce 对称）：本次读回样本数必须 == 本次写入 usage 行数。
+  if (samples.length !== usage.usageRows) {
+    throw new Error(
+      `runCorroboratedEce: sample/usage mismatch — collected ${samples.length} samples but wrote ${usage.usageRows} usage rows (evalRunId=${evalRunId}). ` +
+        `测量集被污染或漏读，拒绝产出可疑校准曲线。`,
+    )
+  }
   const confSorted = samples.map((s) => s.rawPredicted).sort((a, b) => a - b)
   const measurement =
     samples.length > 0
