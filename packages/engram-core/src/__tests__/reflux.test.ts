@@ -13,6 +13,7 @@ import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { claim, claimProvenance } from '../db/schema.js'
 import { addSource } from '../spi/append-claim.js'
 import { reportUsage } from '../spi/report-usage.js'
+import { seedRecallSnapshot } from '../spi/recall-snapshot.js'
 import { getGapEvents } from '../spi/metrics.js'
 import {
   getL5Candidates,
@@ -144,11 +145,16 @@ describe('S11 production-failure reflux → live regression set (A.2/A.9)', () =
   it('a pooled failure carries its query + recall-time confSnapshot and replays through recall_claims to a pass/fail verdict', async () => {
     const q = 'what is the failing answer'
     const c = await seedActiveAnswering('the originally-served wrong answer', q)
+    const recallSnapshotId = await seedRecallSnapshot(db, {
+      claimId: c,
+      value: 0.8,
+      calibrationVersion: CALIBRATION_IDENTITY,
+      byRole: 'agent:x',
+    })
     await reportUsage(db, c, 'refuted', {
       byRole: 'agent:x',
       query: q,
-      confidenceAtRecall: 0.8,
-      calibrationVersion: CALIBRATION_IDENTITY,
+      recallSnapshotId,
     })
 
     await refluxFailures(db)

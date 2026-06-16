@@ -281,17 +281,21 @@ export async function generateUsage(
       recallMisses += 1
       continue
     }
-    const hits = await recallClaims(deps.db, deps.embedder, f.query)
+    // 召回方身份随 recall 落进 recall_snapshot.by_role；下方 report 须以同一 by_role 上报（决策 c）。
+    const hits = await recallClaims(deps.db, deps.embedder, f.query, {
+      byRole: 'agent:eval-consumer',
+    })
     const mine = hits.find((h) => mineIds.has(h.claim.id))
     if (!mine) {
       recallMisses += 1
       continue
     }
     recallHits += 1
+    // EGR-CR-003：预测概率绑定到这次真实 recall 的快照（不再自报 confidenceAtRecall）。
     await reportUsage(deps.db, mine.claim.id, f.isTrue ? 'adopted' : 'refuted', {
       taskId: f.id,
       byRole: 'agent:eval-consumer',
-      confidenceAtRecall: mine.confidence.value,
+      recallSnapshotId: mine.confidence.recallSnapshotId,
       // EGR-CR-060：给本次 run 写入的 usage_truth 打隔离标签，读端据此只收本次样本。
       ...(evalRunId !== undefined ? { evalRunId } : {}),
     })

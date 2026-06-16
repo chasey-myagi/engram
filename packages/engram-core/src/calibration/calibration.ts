@@ -14,9 +14,8 @@
  */
 import { and, eq, inArray, sql } from 'drizzle-orm'
 
-import { CALIBRATION_IDENTITY } from '../confidence/confidence.js'
 import type { DB } from '../db/client.js'
-import { claimVerification } from '../db/schema.js'
+import { claimVerification, recallSnapshot } from '../db/schema.js'
 import { getActiveCalibrationVersion } from './calibration-store.js'
 import { collectGatedUsageSamples } from './usage-samples.js'
 
@@ -167,10 +166,19 @@ export async function computeCalibrationFromUsage(
     return { ...computeReliability(samples, binCount), fromVersions, mixed }
   }
 
-  // raw-events：逐行 raw 计数（诊断模式）。每条 usage_truth 行 = 一个独立可靠性样本（无身份门控）。
+  // raw-events：逐行 raw 计数（诊断模式）。每条**绑定了 recall_snapshot 的** usage_truth 行 = 一个独立可靠性样本
+  // （无身份门控）。EGR-CR-003：预测值/版本取自 INNER JOIN 的 recall_snapshot（裸行硬排除），caller 自报的 verdict
+  // 字段一概不读——与默认门控路径同源（决策 b）。
   const rows = await db
-    .select({ verdict: claimVerification.verdict })
+    .select({ verdict: claimVerification.verdict, value: recallSnapshot.value })
     .from(claimVerification)
+    .innerJoin(
+      recallSnapshot,
+      eq(
+        sql`(${claimVerification.verdict} ->> 'recallSnapshotId')`,
+        sql`${recallSnapshot.id}::text`,
+      ),
+    )
     .where(
       and(
         eq(claimVerification.kind, 'usage_truth'),
@@ -178,23 +186,18 @@ export async function computeCalibrationFromUsage(
           CALIBRATION_OUTCOMES.map((o) => sql`${o}`),
           sql`, `,
         )})`,
-        sql`(${claimVerification.verdict} ->> 'predictedConfidence') is not null`,
-        // 版本门控（与拟合路径 coalesce(...,'identity') 同口径）：缺省 calibrationVersion 视为 identity。
-        inArray(
-          sql`coalesce(${claimVerification.verdict} ->> 'calibrationVersion', ${CALIBRATION_IDENTITY})`,
-          fromVersions,
-        ),
+        // 版本门控读**快照表的** calibration_version（verified 来源），与拟合路径同口径。
+        inArray(recallSnapshot.calibrationVersion, fromVersions),
       ),
     )
 
   const samples: CalibrationSample[] = []
   for (const r of rows) {
-    // 只读 outcome + predictedConfidence 两个字段——verdict 里任何 winRate/elo 等都被结构性忽略（A3）。
-    const v = r.verdict as { outcome?: unknown; predictedConfidence?: unknown }
-    // NaN 守卫纯防御：JSON 存不下 NaN（JSON.stringify(NaN)='null'）、reportUsage 写时也已挡 NaN。
-    if (typeof v.predictedConfidence !== 'number' || Number.isNaN(v.predictedConfidence)) continue
+    // 只读 outcome（verdict）+ value（snapshot）两个字段——verdict 里任何 winRate/elo 等都被结构性忽略（A3）。
+    const v = r.verdict as { outcome?: unknown }
+    if (typeof r.value !== 'number' || Number.isNaN(r.value)) continue
     // SQL 已把 outcome 限定在 {adopted, refuted}；活下来的非 adopted 必是 refuted ⇒ correct=false。
-    samples.push({ predicted: v.predictedConfidence, correct: v.outcome === CORRECT_OUTCOME })
+    samples.push({ predicted: r.value, correct: v.outcome === CORRECT_OUTCOME })
   }
   return { ...computeReliability(samples, binCount), fromVersions, mixed }
 }

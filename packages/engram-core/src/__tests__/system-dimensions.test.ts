@@ -242,15 +242,13 @@ describe('S30 L3 system dimensions (substrate-ready 7) — append-only events th
 
   it('ECE dimension draws from the S5/S28 calibration substrate (usage truths), not ad-hoc logic', async () => {
     const claimId = await selfAuthor(L3_GOLDEN[0]!.expectedClaimTexts[0]!)
-    // recall to get a real snapshot value, then report usage truths carrying predictedConfidence (S5 fuel).
-    const [hit] = await recallClaims(db, embedder, L3_GOLDEN[0]!.query)
+    // recall to get a real snapshot, then report usage truths bound to it (S5/EGR-CR-003 fuel).
+    const [hit] = await recallClaims(db, embedder, L3_GOLDEN[0]!.query, { byRole: 'consumer:test' })
     expect(hit).toBeTruthy()
-    const predicted = hit!.confidence.value
     // a deliberately mis-calibrated pair: high predicted but the consumption was refuted ⇒ non-zero ECE.
     await reportUsage(db, claimId, 'refuted', {
       byRole: 'consumer:test',
-      confidenceAtRecall: predicted,
-      calibrationVersion: hit!.confidence.calibrationVersion,
+      recallSnapshotId: hit!.confidence.recallSnapshotId,
     })
     const dims = await computeSystemDimensions(db, embedder)
     expect(dims.diagnostics.ece.sampleCount).toBe(1) // the usage truth flowed into ECE
@@ -448,10 +446,10 @@ describe('S30 L3 system dimensions (substrate-ready 7) — append-only events th
       detected: 5,
     })
     const claimId = await selfAuthor(L3_GOLDEN[0]!.expectedClaimTexts[0]!)
-    const [hit] = await recallClaims(db, embedder, L3_GOLDEN[0]!.query)
+    const [hit] = await recallClaims(db, embedder, L3_GOLDEN[0]!.query, { byRole: 'consumer:test' })
     await reportUsage(db, claimId, 'refuted', {
       byRole: 'consumer:test',
-      confidenceAtRecall: hit!.confidence.value,
+      recallSnapshotId: hit!.confidence.recallSnapshotId,
     })
     const dims = await computeSystemDimensions(db, embedder)
     expect(dims.immunity).toBe(1) // perfect detection

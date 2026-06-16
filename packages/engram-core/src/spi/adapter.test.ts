@@ -39,6 +39,7 @@ function makeResult(id: string, value: number, sourceId = `src-${id}`): RecallRe
       },
       calibrationVersion: 'identity',
       takenAt: new Date('2025-01-01T00:00:00Z'),
+      recallSnapshotId: `snap-${id}`,
     },
     provenances: [{ sourceId, locator: 'p1', relevance: 'exact', sourceMeta: {} }],
     mustVerify: value < 0.6,

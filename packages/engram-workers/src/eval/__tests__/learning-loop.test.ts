@@ -25,6 +25,7 @@ import {
   recordDecisionEval,
   reportUsage,
   schema,
+  seedRecallSnapshot,
   type DB,
 } from '@engram/core'
 
@@ -130,10 +131,15 @@ async function seedOneUsage(db: DB, taskId: string): Promise<void> {
     locator: `loc:${taskId}`,
     relevance: 'exact',
   })
+  const recallSnapshotId = await seedRecallSnapshot(db, {
+    claimId,
+    value: 0.8,
+    byRole: 'agent:eval-consumer',
+  })
   await reportUsage(db, claimId, 'adopted', {
     taskId,
     byRole: 'agent:eval-consumer',
-    confidenceAtRecall: 0.8,
+    recallSnapshotId,
   })
 }
 

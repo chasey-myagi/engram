@@ -208,17 +208,19 @@ export async function generateUsage(
   for (const f of facts) {
     const claimId = claimIdByFact.get(f.id)
     if (!claimId) continue
-    const hits = await recallClaims(db, embedder, f.query)
+    // 召回方身份随 recall 落进 recall_snapshot.by_role；下方 report 必须以同一 by_role 上报（决策 c）。
+    const hits = await recallClaims(db, embedder, f.query, { byRole: 'agent:eval-consumer' })
     const mine = hits.find((h) => h.claim.id === claimId)
     if (!mine) {
       recallMisses += 1
       continue
     }
     recallHits += 1
+    // EGR-CR-003：预测概率绑定到这次真实 recall 的快照（不再自报 confidenceAtRecall）。
     await reportUsage(db, claimId, f.isTrue ? 'adopted' : 'refuted', {
       taskId: f.id,
       byRole: 'agent:eval-consumer',
-      confidenceAtRecall: mine.confidence.value, // identity g 下 = raw 快照
+      recallSnapshotId: mine.confidence.recallSnapshotId,
     })
     usageRows += 1
   }

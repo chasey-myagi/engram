@@ -42,7 +42,34 @@ import { claim, claimProvenance, type ClaimStatus } from '../db/schema.js'
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { addSource, appendClaim } from '../spi/append-claim.js'
 import { reportUsage } from '../spi/report-usage.js'
+import { seedRecallSnapshot } from '../spi/recall-snapshot.js'
 import { recallClaims } from '../spi/recall-claims.js'
+
+/**
+ * EGR-CR-003 test-seed helper：先 seed 一条**真 recall_snapshot**（合成预测值 = predicted），
+ * 再按其 snapshotId 上报 usage_truth。by_role 须与快照一致（决策 c）⇒ 快照 by_role = 上报 by_role。
+ * 合成校准测试用任意 raw 分布（真 recall 产不出），故经 seedRecallSnapshot 落真快照拍下、不留旧自报口子。
+ */
+async function reportSeeded(
+  db: DB,
+  claimId: string,
+  outcome: 'adopted' | 'refuted' | 'corrected' | 'partial',
+  opts: { predicted: number; byRole: string; taskId?: string; calibrationVersion?: string },
+): Promise<void> {
+  const recallSnapshotId = await seedRecallSnapshot(db, {
+    claimId,
+    value: opts.predicted,
+    byRole: opts.byRole,
+    ...(opts.calibrationVersion !== undefined
+      ? { calibrationVersion: opts.calibrationVersion }
+      : {}),
+  })
+  await reportUsage(db, claimId, outcome, {
+    byRole: opts.byRole,
+    recallSnapshotId,
+    ...(opts.taskId !== undefined ? { taskId: opts.taskId } : {}),
+  })
+}
 import { transitionClaim } from '../spi/transition.js'
 import { agentActor, trustedHumanActor } from '../spi/actor.js'
 import { setStandards } from '../config/standards.js'
@@ -143,10 +170,10 @@ async function seedMiscalibratedUsage(claimId: string, count: number): Promise<v
     // 目标 observed 随 raw 单调上升但偏离 raw（错校准）：低段被低估、高段被高估。
     const target = 0.3 + 0.36 * (raw - 0.05) // raw 0.05→0.3, raw 0.95→0.624
     const correct = (i * 7919) % 1000 < Math.round(target * 1000) // 确定性伪随机阈值
-    await reportUsage(db, claimId, correct ? 'adopted' : 'refuted', {
+    await reportSeeded(db, claimId, correct ? 'adopted' : 'refuted', {
       byRole: `consumer:${i}`, // 每条独立身份 ⇒ 独立门控不折叠
       taskId: `task-${i}`,
-      confidenceAtRecall: raw,
+      predicted: raw,
       calibrationVersion: CALIBRATION_IDENTITY,
     })
   }
@@ -159,10 +186,10 @@ async function seedMiscalibratedUsage(claimId: string, count: number): Promise<v
 async function seedFlatUsage(claimId: string, count: number): Promise<void> {
   for (let i = 0; i < count; i++) {
     const raw = ((i % 10) + 0.5) / 10 // raw 仍铺开 0.05..0.95，但 outcome 恒为 adopted
-    await reportUsage(db, claimId, 'adopted', {
+    await reportSeeded(db, claimId, 'adopted', {
       byRole: `flat:${i}`,
       taskId: `flat-task-${i}`,
-      confidenceAtRecall: raw,
+      predicted: raw,
       calibrationVersion: CALIBRATION_IDENTITY,
     })
   }
@@ -203,10 +230,10 @@ describe('S28 ≥200 门 + usage_truth 取样（独立门控）', () => {
     const cid = await seedClaim('spam claim')
     for (let i = 0; i < 1000; i++) {
       // 同一 (by_role, taskId) 身份反复上报 ⇒ 折叠成一票。
-      await reportUsage(db, cid, i % 2 === 0 ? 'adopted' : 'refuted', {
+      await reportSeeded(db, cid, i % 2 === 0 ? 'adopted' : 'refuted', {
         byRole: 'consumer:spammer',
         taskId: 'task-spam',
-        confidenceAtRecall: 0.5,
+        predicted: 0.5,
         calibrationVersion: CALIBRATION_IDENTITY,
       })
     }
@@ -221,16 +248,16 @@ describe('S28 latest-by-identity 取样：最新 corrected/partial 覆盖旧 ado
   it('同一身份先 adopted 后 corrected → corrected 覆盖旧 adopted，该身份不进校准样本（与 f4 同口径）', async () => {
     const cid = await seedClaim('correct-overrides claim')
     // 同一 (by_role, taskId)：先 adopted（旧票），后 corrected（最新表态）。
-    await reportUsage(db, cid, 'adopted', {
+    await reportSeeded(db, cid, 'adopted', {
       byRole: 'consumer:c1',
       taskId: 'task-c1',
-      confidenceAtRecall: 0.9,
+      predicted: 0.9,
       calibrationVersion: CALIBRATION_IDENTITY,
     })
-    await reportUsage(db, cid, 'corrected', {
+    await reportSeeded(db, cid, 'corrected', {
       byRole: 'consumer:c1',
       taskId: 'task-c1',
-      confidenceAtRecall: 0.9,
+      predicted: 0.9,
       calibrationVersion: CALIBRATION_IDENTITY,
     })
     const samples = await collectUsageCalibrationSamples(db)
@@ -239,16 +266,16 @@ describe('S28 latest-by-identity 取样：最新 corrected/partial 覆盖旧 ado
 
   it('同一身份先 adopted 后 partial → partial 同样覆盖旧 adopted，该身份不进校准样本', async () => {
     const cid = await seedClaim('partial-overrides claim')
-    await reportUsage(db, cid, 'adopted', {
+    await reportSeeded(db, cid, 'adopted', {
       byRole: 'consumer:p1',
       taskId: 'task-p1',
-      confidenceAtRecall: 0.9,
+      predicted: 0.9,
       calibrationVersion: CALIBRATION_IDENTITY,
     })
-    await reportUsage(db, cid, 'partial', {
+    await reportSeeded(db, cid, 'partial', {
       byRole: 'consumer:p1',
       taskId: 'task-p1',
-      confidenceAtRecall: 0.9,
+      predicted: 0.9,
       calibrationVersion: CALIBRATION_IDENTITY,
     })
     const samples = await collectUsageCalibrationSamples(db)
@@ -259,16 +286,16 @@ describe('S28 latest-by-identity 取样：最新 corrected/partial 覆盖旧 ado
     const cid = await seedClaim('threshold-with-corrected claim')
     await seedMiscalibratedUsage(cid, MIN_FIT_SAMPLES - 1) // 199 个各自独立身份的 adopted/refuted
     // 第 200 个身份：先 adopted（看似凑满 200），后 corrected（最新表态 ⇒ 应作废）。
-    await reportUsage(db, cid, 'adopted', {
+    await reportSeeded(db, cid, 'adopted', {
       byRole: 'consumer:edge',
       taskId: 'task-edge',
-      confidenceAtRecall: 0.9,
+      predicted: 0.9,
       calibrationVersion: CALIBRATION_IDENTITY,
     })
-    await reportUsage(db, cid, 'corrected', {
+    await reportSeeded(db, cid, 'corrected', {
       byRole: 'consumer:edge',
       taskId: 'task-edge',
-      confidenceAtRecall: 0.9,
+      predicted: 0.9,
       calibrationVersion: CALIBRATION_IDENTITY,
     })
     const samples = await collectUsageCalibrationSamples(db)
@@ -286,16 +313,16 @@ describe('S28 latest-by-identity 取样：最新 corrected/partial 覆盖旧 ado
 
   it('同一身份先 corrected 后 adopted → 最新 adopted 重新计为有效样本（覆盖是双向的，不是单调屏蔽）', async () => {
     const cid = await seedClaim('reinstate claim')
-    await reportUsage(db, cid, 'corrected', {
+    await reportSeeded(db, cid, 'corrected', {
       byRole: 'consumer:c2',
       taskId: 'task-c2',
-      confidenceAtRecall: 0.7,
+      predicted: 0.7,
       calibrationVersion: CALIBRATION_IDENTITY,
     })
-    await reportUsage(db, cid, 'adopted', {
+    await reportSeeded(db, cid, 'adopted', {
       byRole: 'consumer:c2',
       taskId: 'task-c2',
-      confidenceAtRecall: 0.7,
+      predicted: 0.7,
       calibrationVersion: CALIBRATION_IDENTITY,
     })
     const samples = await collectUsageCalibrationSamples(db)

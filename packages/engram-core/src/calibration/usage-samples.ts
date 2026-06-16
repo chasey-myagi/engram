@@ -19,7 +19,7 @@ import { and, asc, eq, inArray, sql } from 'drizzle-orm'
 
 import { CALIBRATION_IDENTITY } from '../confidence/confidence.js'
 import type { DB } from '../db/client.js'
-import { claimVerification } from '../db/schema.js'
+import { claimVerification, recallSnapshot } from '../db/schema.js'
 
 /** 校准只认这两类干净结局：adopted=正确(1)、refuted=错误(0)（与 S5/S19 一致；corrected/partial 不入）。 */
 const CORRECT_OUTCOME = 'adopted'
@@ -96,27 +96,36 @@ export async function collectGatedUsageSamples(
   db: DB,
   fromVersions: readonly string[] | null = [CALIBRATION_IDENTITY],
 ): Promise<GatedUsageSample[]> {
+  // EGR-CR-003：预测值/版本**只信** recall_snapshot 表——INNER JOIN usage_truth.verdict→recallSnapshotId 到
+  // recall_snapshot.id。INNER JOIN 即「未绑 snapshot 的裸行硬排除（决策 b）」的结构性实现：verdict 无 recallSnapshotId、
+  // 或 id 指向不存在的快照（伪造 / 历史裸行），JOIN 不命中 ⇒ 该行根本不进 sampleRows。predicted=snapshot.value、
+  // version=snapshot.calibration_version 全取自表，caller 自报的 verdict.predictedConfidence/calibrationVersion 一概不读。
   const rows = await db
     .select({
       byRole: claimVerification.byRole,
       verdict: claimVerification.verdict,
+      value: recallSnapshot.value,
+      snapshotVersion: recallSnapshot.calibrationVersion,
     })
     .from(claimVerification)
+    .innerJoin(
+      recallSnapshot,
+      // verdict->>'recallSnapshotId' = recall_snapshot.id（裸行该路径为 null，JOIN 天然不命中 ⇒ 硬排除）。
+      eq(
+        sql`(${claimVerification.verdict} ->> 'recallSnapshotId')`,
+        sql`${recallSnapshot.id}::text`,
+      ),
+    )
     .where(
       and(
         eq(claimVerification.kind, 'usage_truth'),
         // EGR-CR-030：**不**在 SQL 层按 outcome 预过滤——读全量结局（含 corrected/partial），让最新非计数结局能在
         // latest-by-identity 折叠时覆盖同身份旧 adopted/refuted（与 f4 usage-correct 同口径）。是否成样本在折叠后判。
-        // predictedConfidence 同理下放：缺预测值的最新 corrected 仍须能顶掉旧票（折叠后该身份因无有效预测值跳过）。
-        // fromVersions=null → 不按版本过滤（ECE 读数评测所有活动快照）；否则只取 calibrationVersion ∈ fromVersions。
+        // EGR-CR-003：版本过滤改读**快照表的** calibration_version（verified 来源），非 caller 自报的 verdict 字段。
+        // fromVersions=null → 不按版本过滤（ECE 读数评测所有活动快照）；否则只取 snapshot.calibrationVersion ∈ fromVersions。
         ...(fromVersions === null
           ? []
-          : [
-              inArray(
-                sql`coalesce(${claimVerification.verdict} ->> 'calibrationVersion', ${CALIBRATION_IDENTITY})`,
-                [...fromVersions],
-              ),
-            ]),
+          : [inArray(recallSnapshot.calibrationVersion, [...fromVersions])]),
       ),
     )
     // 升序：同身份后到覆盖先到（与 S19 反刷单口径一致）。
@@ -124,16 +133,13 @@ export async function collectGatedUsageSamples(
 
   const sampleRows: UsageSampleRow[] = []
   for (const r of rows) {
-    const v = r.verdict as { outcome?: unknown; taskId?: unknown; predictedConfidence?: unknown }
-    // 保留原始 outcome + 预测值（可能为 null）；是否成样本推迟到 foldByIdentity 去重之后判（latest-by-identity）。
+    const v = r.verdict as { outcome?: unknown; taskId?: unknown }
+    // 保留原始 outcome + **快照表的**预测值；是否成样本推迟到 foldByIdentity 去重之后判（latest-by-identity）。
     sampleRows.push({
       byRole: r.byRole,
       taskId: typeof v.taskId === 'string' ? v.taskId : null,
       outcome: v.outcome,
-      predicted:
-        typeof v.predictedConfidence === 'number' && !Number.isNaN(v.predictedConfidence)
-          ? v.predictedConfidence
-          : null,
+      predicted: typeof r.value === 'number' && !Number.isNaN(r.value) ? r.value : null,
     })
   }
   return foldByIdentity(sampleRows)

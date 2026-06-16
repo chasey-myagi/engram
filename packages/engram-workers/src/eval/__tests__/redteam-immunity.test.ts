@@ -25,6 +25,7 @@ import {
   addSource,
   appendClaim,
   collectUsageCalibrationSamples,
+  seedRecallSnapshot,
   computeSystemDimensions,
   agentActor,
   trustedHumanActor,
@@ -588,14 +589,20 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
         { claimText: 'calibration sample claim' },
         [{ sourceId: src.sourceId, locator: 'x', relevance: 'exact' }],
       )
+      // EGR-CR-003：校准样本只认绑定 recall_snapshot 的 usage_truth 行（裸行硬排除）。先 seed 一条真快照再上报。
+      const recallSnapshotId = await seedRecallSnapshot(db, {
+        claimId,
+        value: 0.7,
+        calibrationVersion: 'identity',
+        byRole: 'human:user-1',
+      })
       await db.insert(schema.claimVerification).values({
         id: randomUUID(),
         claimId,
         kind: 'usage_truth',
         verdict: {
           outcome: 'adopted',
-          predictedConfidence: 0.7,
-          calibrationVersion: 'identity',
+          recallSnapshotId,
           taskId: 't1',
         },
         byRole: 'human:user-1',

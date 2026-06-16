@@ -176,6 +176,13 @@
       "when": 1781596427981,
       "tag": "0024_lethal_serpent_society",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1781602027748,
+      "tag": "0025_mean_multiple_man",
+      "breakpoints": true
     }
   ]
 }
