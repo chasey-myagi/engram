@@ -52,6 +52,7 @@ adapter 经 **Consumer SPI** 消费内核，**绝不反向依赖内核内部**�
 | `appendClaim(db, DraftClaim, ProvenanceInput[])` | 乐观写入，默认 draft，**强制 ≥1 出处**，单事务 | ✅ 已实现 | 同上 |
 | `supersedeClaim(...)` | append-only 取代（同 lineageId + supersedes 边，旧标 superseded 不删） | ✅ 已实现 | 同上 |
 | `recallClaims(db, embedder, query, ctx?) → RecallResult[]` | 检索：候选近邻 → 七因子聚合 → g → 消费门过滤 → 拍 `ConfidenceSnapshot` | ✅ 已实现 | `packages/engram-core/src/spi/recall-claims.ts` |
+| `RecallResult.provenances[].sourceMeta`（受控 metadata 缝） | 顺出处扇出带回**只读、白名单过滤**的 source 业务身份摘要（如 `source_type`）。adapter 据此收紧，**不穿透 schema**；白名单 `RECALL_SOURCE_META_KEYS` 由内核控制对外暴露面（EGR-CR-043） | ✅ 已实现 | `packages/engram-core/src/spi/recall-claims.ts` |
 | `reportUsage(db, claimId, outcome, ctx?) → { verificationId }` | append-only 写 `usage_truth`，喂校准 + 失败池；**不动 `claim.confidence`（解耦）** | ✅ 已实现 | `packages/engram-core/src/spi/report-usage.ts` |
 
 > ✅/⏳ 状态以内核公共 export 面 `packages/engram-core/src/index.ts` 为准（上表「位置」列指向真实现文件）。
@@ -88,13 +89,16 @@ confidence 从"来源计数器"变成"可校准概率"靠 `report_usage` 喂的 
 
 ### 2.3 用 `source.meta` 注入业务身份（不污染内核）
 
-业务身份走 `SourceInput.meta`（JSONB），内核**原样存、不解释**。adapter 在 recall 回调里读 meta 来收紧。
+业务身份走 `SourceInput.meta`（JSONB），内核**原样存、不解释**。adapter 不直接查 `source` 表——业务身份经**受控 metadata 缝**（`RecallResult.provenances[].sourceMeta`，白名单过滤、只读）随召回结果带回，adapter 据此收紧。
 
 ```jsonc
 // addSource 时注入，内核不感知任何 key 的语义
 { "domain": "bidding", "source_type": "official_datasheet", "product_id": "SKU-123" }
-// adapter 在 recall 回调读 meta.source_type，抬该 claim 的 authority 因子 —— 内核全程不懂"datasheet"是什么
+// adapter 在 recall 回调读 r.provenances[].sourceMeta.source_type（白名单内的 key 才外泄）来收紧 —— 内核全程不懂"datasheet"是什么，
+// adapter 也无需 import core schema / DB（EGR-CR-043：穿透 schema 旁路查 source.meta 已被边界护栏禁止）
 ```
+
+> 哪些 meta key 允许经缝外泄由内核 `RECALL_SOURCE_META_KEYS` 白名单控制（当前 `['source_type']`）。要新增可暴露 key = 内核改动，走内核评审（决定「内核对 consumer 暴露多大面」）。
 
 ---
 
@@ -104,8 +108,8 @@ confidence 从"来源计数器"变成"可校准概率"靠 `report_usage` 喂的 
 - [ ] 过 §0 四条预设：P1 原子事实 / P2 有出处 / P3 可判真假 / P4 有真值源。缺哪条、后果是否可接受，写下来。
 
 **adapter 实现**
-- [ ] 新建 `packages/<domain>-adapter` 包，依赖方向 `adapter → @engram/core`，**不反向依赖**内核内部。
-- [ ] 定义该领域的 `source.meta` schema（业务身份 key），并在 `addSource` 时注入。
+- [ ] 新建 `packages/<domain>-adapter` 包，依赖方向 `adapter → @engram/core`，**不反向依赖**内核内部（CI `check:adapter-boundary` 护栏会拦：生产代码禁 import core `schema` / `DB` / `drizzle-orm`，EGR-CR-043）。
+- [ ] 定义该领域的 `source.meta` schema（业务身份 key），并在 `addSource` 时注入；业务身份经受控 metadata 缝（`RecallResult.sourceMeta`）读回，**不直接查 `source` 表**。
 - [ ] 实现配置态：该领域的 `factor_weights` / 门限 / 半衰期（落 Standards，不硬编码进内核）。
 - [ ] 实现请求态收紧回调，并写**单调收紧断言测试**（`adaptedConf ≤ gConf + ε`、不增召回、不改 provenance、provenance 权重 ≠ 0、Σw ≤ 1）。
 - [ ] 选好 `source.kind`（见 §4 耦合点）：能落进现有 7 枚举就用现有；若必须新增 = **内核改动**，走内核评审。
@@ -172,4 +176,4 @@ confidence 从"来源计数器"变成"可校准概率"靠 `report_usage` 喂的 
 - `docs/PRD.md` 附录 A.2（SPI 契约）· A.3（七因子 + g）· A.6（派生算法 + `source.meta` 注入示例）· A.9（评测隔离）。
 - `docs/design/agentic-knowledge-core.html` FIG 5b（adapter 单调收紧分层）· FIG 8b（SPI 边界以下全部领域无关可复用）。
 - `packages/engram-core/src/spi/append-claim.ts`（写半边 SPI 实现）· `packages/engram-core/src/db/schema.ts`（五 primitive + 枚举）。
-- `packages/bidding-adapter/`（首个 adapter：已经 Consumer SPI 单调收紧消费内核 —— `src/index.test.ts` 真实 `recallClaims` 并断言收紧；仍缺 server / UI / real-bidding 端到端集成）。
+- `packages/bidding-adapter/`（首个 adapter：**纯 Consumer SPI** 单调收紧消费内核，业务身份经 `RecallResult.sourceMeta` 受控缝读回、零 schema 穿透（EGR-CR-043）—— `src/index.test.ts` 真实 `recallClaims` 并断言收紧；仍缺 server / UI / real-bidding 端到端集成）。

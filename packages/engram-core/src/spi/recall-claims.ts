@@ -32,7 +32,13 @@ import {
 import { liveContradictsByClaim, recomputeLiveConfidence } from '../confidence/live-recompute.js'
 import { loadCalibrationMaps } from '../calibration/calibration-store.js'
 import type { DB } from '../db/client.js'
-import { claim, claimProvenance, type ClaimStatus, type ProvRelevance } from '../db/schema.js'
+import {
+  claim,
+  claimProvenance,
+  source,
+  type ClaimStatus,
+  type ProvRelevance,
+} from '../db/schema.js'
 import { latestEntailmentFactors } from '../verifier/patrol-verdict.js'
 import { latestUsageCorrectFactors } from '../harvest/usage-correct.js'
 import { latestHumanReviewFactors } from '../editor/human-review.js'
@@ -57,10 +63,24 @@ export interface ConfidenceSnapshot {
   takenAt: Date
 }
 
+/**
+ * 受控 source metadata 缝（EGR-CR-043）：core 把 `source.meta` 当不透明 jsonb，但消费侧（adapter / 评测）需要
+ * 自己注入的业务身份来收紧。开一个**只读、受白名单约束**的缝顺 provenance 扇出带回，consumer 不再穿透 schema。
+ * 白名单是「core 控制对外暴露面」的语义——只有列在此处的 key 才会进 `RecalledProvenance.sourceMeta`，
+ * 其余 key（如 vendor / product_id）即便存在 `source.meta` 也不外泄。core 仍不解释这些 key 的业务含义。
+ */
+export const RECALL_SOURCE_META_KEYS = ['source_type'] as const
+
 export interface RecalledProvenance {
   sourceId: string
   locator: string
   relevance: ProvRelevance
+  /**
+   * consumer 可消费的受控 source metadata 摘要（只读、白名单过滤、`Object.freeze`）。
+   * core 把它当不透明键值对，不解释语义；adapter 据此（如 `sourceMeta.source_type`）收紧。
+   * 无对应 meta key → 该 key 不出现；source 无任何白名单 key → `{}`（frozen）。
+   */
+  sourceMeta: Readonly<Record<string, unknown>>
 }
 
 export interface RecallResult {
@@ -99,6 +119,32 @@ export interface RecallContext {
   topK?: number
   /** 候选 cosine 相似度下界（默认见 DEFAULT_RECALL_MIN_SIMILARITY）；低于此的近邻视为不相关。 */
   minSimilarity?: number
+}
+
+/**
+ * 批量查回各 source 的受控 metadata 摘要（EGR-CR-043 受控缝的实现）。
+ * 只投影 `RECALL_SOURCE_META_KEYS` 白名单内、且实际存在于 `source.meta` 的 key；`Object.freeze` 保证只读。
+ * core 不解释 key 语义——白名单只决定「哪些 key 允许外泄」，不决定它们的业务含义。
+ */
+async function readSourceMetaSummaries(
+  db: DB,
+  sourceIds: string[],
+): Promise<Map<string, Readonly<Record<string, unknown>>>> {
+  const map = new Map<string, Readonly<Record<string, unknown>>>()
+  if (sourceIds.length === 0) return map
+  const rows = await db
+    .select({ id: source.id, meta: source.meta })
+    .from(source)
+    .where(inArray(source.id, sourceIds))
+  for (const r of rows) {
+    const meta = (r.meta ?? {}) as Record<string, unknown>
+    const summary: Record<string, unknown> = {}
+    for (const key of RECALL_SOURCE_META_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(meta, key)) summary[key] = meta[key]
+    }
+    map.set(r.id, Object.freeze(summary))
+  }
+  return map
 }
 
 /** 解析消费门下界：consumer 只能抬高。无效/未给 → 内核 floor；低于内核 floor → 夹到内核 floor。 */
@@ -238,6 +284,12 @@ export async function recallClaims(
         .where(inArray(claimProvenance.claimId, ids))
     : []
 
+  // 受控 metadata 缝（EGR-CR-043）：一次批量查回涉及 source 的 meta，按白名单投影成只读摘要，
+  // 顺 provenance 扇出带回。consumer 据 sourceMeta 收紧，不再穿透 schema 旁路查 source.meta。
+  const sourceIds = [...new Set(provRows.map((p) => p.sourceId))]
+  const metaBySource = await readSourceMetaSummaries(db, sourceIds)
+  const emptyMeta = Object.freeze({}) as Readonly<Record<string, unknown>>
+
   const byClaim = new Map<string, RecalledProvenance[]>()
   for (const p of provRows) {
     const list = byClaim.get(p.claimId)
@@ -245,6 +297,7 @@ export async function recallClaims(
       sourceId: p.sourceId,
       locator: p.locator,
       relevance: p.relevance,
+      sourceMeta: metaBySource.get(p.sourceId) ?? emptyMeta,
     }
     if (list) list.push(prov)
     else byClaim.set(p.claimId, [prov])

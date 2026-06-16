@@ -17,9 +17,6 @@ importers:
       '@engram/core':
         specifier: workspace:*
         version: link:../engram-core
-      drizzle-orm:
-        specifier: ^0.45.2
-        version: 0.45.2(@types/pg@8.20.0)(pg@8.21.0)
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -27,6 +24,9 @@ importers:
       '@types/pg':
         specifier: ^8.20.0
         version: 8.20.0
+      drizzle-orm:
+        specifier: ^0.45.2
+        version: 0.45.2(@types/pg@8.20.0)(pg@8.21.0)
       pg:
         specifier: ^8.21.0
         version: 8.21.0
