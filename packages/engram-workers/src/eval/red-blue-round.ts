@@ -31,6 +31,7 @@ import {
   attributeFailure,
   freezeRedTeamGeneration,
   getRedTeamGeneration,
+  getRoundCohort,
   promoteCandidate,
   schema,
   transitionClaim,
@@ -38,6 +39,7 @@ import {
   type Attribution,
   type DB,
   type Embedder,
+  type ImmunityResult,
   type ProvenanceInput,
   type RedTeamClass,
   type RedTeamItem,
@@ -142,6 +144,14 @@ async function appendActiveSourceClaim(
   return claimId
 }
 
+/** A1 一条裁决 + 落 round_cohort 所需的晋升证据快照（goldenId/poisonClaimId/basis）。 */
+interface A1Decision {
+  admission: ItemAdmission
+  goldenId: string | null
+  poisonClaimId: string | null
+  basis: ImmunityResult
+}
+
 /**
  * 一条红队 item 过 A1 免疫门（**真** S12 promoteCandidate）：
  *   把 item 当一道「KB 缺口考题」（query = item.claimText），seed 一条**无关**来源 claim（candidate 溯源到它的出处），
@@ -158,7 +168,7 @@ async function admitViaA1(
   deps: RedBlueRoundDeps,
   item: RedTeamItem,
   confirmedBy: string,
-): Promise<ItemAdmission> {
+): Promise<A1Decision> {
   const { db, embedder } = deps
   // 来源 claim：一条**无关**背景事实（不与 item.claimText 同义 ⇒ 不会让 recall(item.claimText) 命中）。
   // candidate 溯源到它的出处（locatorsTraceable）；A1 在它上面验「库真没这道题的答案」。
@@ -192,10 +202,17 @@ async function admitViaA1(
     ...(Object.keys(poison).length > 0 ? { poison } : {}),
   })
   return {
-    itemId: item.id,
-    redteamClass: item.redteamClass,
-    admitted: res.promoted,
-    reasons: res.result.reasons,
+    admission: {
+      itemId: item.id,
+      redteamClass: item.redteamClass,
+      admitted: res.promoted,
+      reasons: res.result.reasons,
+    },
+    // EGR-CR-017：把 promoteCandidate 回填的 golden/毒株 id + 四检判据快照一并带回，供 admission 循环在「下一次
+    // reset 之前」落进 append-only 的 round_cohort（证据从此持久、per-item TRUNCATE 物理上够不着它）。
+    goldenId: res.goldenId ?? null,
+    poisonClaimId: res.poisonClaimId ?? null,
+    basis: res.result,
   }
 }
 
@@ -343,14 +360,30 @@ export async function runRedBlueRound(
 
   // ── ② 题免疫 A1（铁律）：每条 item 先过真 promoteCandidate；只 admitted 者进被计分 cohort。 ──
   // 每条 item 在 clean KB 上验真（与蓝队注入同款 per-item 隔离），故 A1 与注入共用 resetWorkTables。
+  // EGR-CR-017：每条裁决在「下一次 reset 之前」落进 append-only 的 round_cohort（与会被 TRUNCATE 的工作表零 FK 牵连），
+  // 证据从此持久、可跨整回合审计；scored cohort 改从该持久表读（admitted=true），不再只靠内存 Set。
   const admissions: ItemAdmission[] = []
   for (const item of opts.items) {
     await opts.resetWorkTables()
-    admissions.push(await admitViaA1(deps, item, confirmedBy))
+    const decision = await admitViaA1(deps, item, confirmedBy)
+    admissions.push(decision.admission)
+    await db.insert(schema.roundCohort).values({
+      id: randomUUID(),
+      generationVersion: opts.generationVersion,
+      itemId: decision.admission.itemId,
+      redteamClass: decision.admission.redteamClass,
+      admitted: decision.admission.admitted,
+      goldenId: decision.goldenId,
+      poisonClaimId: decision.poisonClaimId,
+      basis: decision.basis,
+      decidedBy: confirmedBy,
+    })
   }
-  const admittedSet = new Set(admissions.filter((a) => a.admitted).map((a) => a.itemId))
+  // scored cohort 的来源 = 持久 round_cohort（admitted=true），而非内存 admissions Set —— 证据与计分由同一持久事实驱动。
+  const cohort = await getRoundCohort(db, opts.generationVersion)
+  const admittedSet = new Set(cohort.filter((c) => c.admitted).map((c) => c.itemId))
   const scoredItems = opts.items.filter((i) => admittedSet.has(i.id))
-  const blockedItemIds = admissions.filter((a) => !a.admitted).map((a) => a.itemId)
+  const blockedItemIds = cohort.filter((c) => !c.admitted).map((c) => c.itemId)
 
   // ── ③ 蓝队答题（= 内核+工种）：对**被计分 cohort** 经 S29 真注入器驱动真工种免疫反应。 ──
   // 蓝队「答案」= 系统是否正确处置毒株（detected/contained）。空 cohort（全被 A1 BLOCK）⇒ 无分可判。

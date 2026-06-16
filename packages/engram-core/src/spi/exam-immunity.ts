@@ -30,10 +30,12 @@ import {
   l5Candidates,
   promotionAudit,
   relation,
+  roundCohort,
   type PromotionDecision,
 } from '../db/schema.js'
 import { appendClaim } from './append-claim.js'
 import { recallClaims } from './recall-claims.js'
+import { type RedTeamClass } from './redteam-generation.js'
 import { isHumanRole } from './reflux.js'
 
 /** 四项免疫检查 + 总判 + 失败原因（落进 basis 快照，可审计）。 */
@@ -288,6 +290,49 @@ export async function getPromotionAudit(
     decision: r.decision,
     decidedBy: r.decidedBy,
     basis: r.basis as ImmunityResult,
+    createdAt: r.createdAt,
+  }))
+}
+
+/** round_cohort 一行的读出形状（EGR-CR-017：回合 A1 逐条裁决的 append-only 快照）。 */
+export interface RoundCohortRow {
+  id: string
+  generationVersion: string
+  itemId: string
+  redteamClass: RedTeamClass
+  /** 过了 A1（promoteCandidate.promoted）⇒ 进被计分 cohort。 */
+  admitted: boolean
+  /** admitted 时回填的 golden id（值快照，无 FK）；blocked 时 null。 */
+  goldenId: string | null
+  /** admitted 时回填的毒株 claim id（值快照，无 FK）；blocked 时 null。 */
+  poisonClaimId: string | null
+  /** A1 四检判据快照（= PromoteResult.result）。 */
+  basis: ImmunityResult
+  decidedBy: string
+  createdAt: Date
+}
+
+/**
+ * 读一回合的 A1 裁决 cohort（EGR-CR-017），按裁决时间升序。
+ * 证据落在不参与 per-item reset 的 round_cohort，故回合结束后仍可跨整回合审计「谁/何时/凭何过的 A1」。
+ * scorer 据此（admitted=true 的子集）构 cohort——cohort 来源由持久事实而非内存 Set 驱动。
+ */
+export async function getRoundCohort(db: DB, generationVersion: string): Promise<RoundCohortRow[]> {
+  const rows = await db
+    .select()
+    .from(roundCohort)
+    .where(eq(roundCohort.generationVersion, generationVersion))
+    .orderBy(asc(roundCohort.createdAt), asc(roundCohort.id))
+  return rows.map((r) => ({
+    id: r.id,
+    generationVersion: r.generationVersion,
+    itemId: r.itemId,
+    redteamClass: r.redteamClass as RedTeamClass,
+    admitted: r.admitted,
+    goldenId: r.goldenId,
+    poisonClaimId: r.poisonClaimId,
+    basis: r.basis as ImmunityResult,
+    decidedBy: r.decidedBy,
     createdAt: r.createdAt,
   }))
 }

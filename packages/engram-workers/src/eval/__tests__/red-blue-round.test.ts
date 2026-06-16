@@ -27,9 +27,12 @@ import {
   collectUsageCalibrationSamples,
   createDb,
   freezeRedTeamGeneration,
+  getGoldenQuestions,
   getImmunityScores,
+  getPromotionAudit,
   getRecompeteEvents,
   getRedTeamGeneration,
+  getRoundCohort,
   loopForRedTeamClass,
   makeFakeEmbedder,
   recordImmunityScore,
@@ -412,6 +415,108 @@ describe('P4a · 红蓝对抗回合（runRedBlueRound：真 DB 驱动真工种�
       // 永不进 golden（带 unique token 的 query 一条都不该落 golden）。
       const goldens = await db.select().from(schema.goldenQuestions)
       expect(goldens.filter((g) => g.query.includes('zqxwvk-uniq-7')).length).toBe(0)
+    })
+  })
+
+  // EGR-CR-017 回归：A1 晋升证据被 per-item reset（admission 循环 + scorer 的 resetDb）双重 TRUNCATE CASCADE 清空，
+  // 回合结束后 golden/audit 一行不剩、scored cohort 只剩内存 Set ⇒ 无法跨整回合在持久层审计「谁/何时/凭何过的 A1」。
+  // 根治：admission 把每条裁决（admitted/basis/goldenId/poisonClaimId）落进与工作表零 FK 牵连、不参与 reset 的
+  // append-only round_cohort；scorer 从该持久表读 cohort。bug 仍在（无 round_cohort）时下列断言全失败。
+  describe('EGR-CR-017 · A1 晋升证据回合后仍可审计（scored cohort 由持久 round_cohort 驱动）', () => {
+    it('测试 1（核心红→绿）：clean false item admitted，回合后其晋升证据（basis/goldenId）在 round_cohort 仍可查；golden/audit 工作表被 reset 清空恰证明耦合点已绕开', async () => {
+      await resetRedTeamTables()
+      const cleanFalse = REDTEAM_GENERATION_ITEMS.find((i) => i.redteamClass === 'false')!
+      const res = await runRedBlueRound(
+        { db, embedder },
+        { generationVersion: 'rb-cr017-audit', items: [cleanFalse], resetWorkTables },
+      )
+
+      // ① 确实 admitted、进了被计分 cohort。
+      expect(res.scoredItemIds).toContain(cleanFalse.id)
+
+      // ② round_cohort 持有该回合该 item 的 append-only 晋升证据快照（回合**全部跑完后**仍可查）。
+      const cohort = await getRoundCohort(db, 'rb-cr017-audit')
+      const row = cohort.find((c) => c.itemId === cleanFalse.id)!
+      expect(row).toBeDefined()
+      expect(row.admitted).toBe(true)
+      expect(row.basis.passed).toBe(true) // 四检判据快照（凭何过的 A1）
+      expect(row.goldenId).not.toBeNull() // promoteCandidate 回填的 golden id（值快照）
+      expect(row.poisonClaimId).not.toBeNull()
+      expect(row.decidedBy).toBe('human:red-blue-curator') // 谁裁决的
+
+      // ③ 跨整回合审计的杀手锏：golden_questions / promotion_audit 是会被 per-item TRUNCATE CASCADE 清的工作表，
+      // 回合后它们本就空——而**正因为** round_cohort 与它们物理解耦（无 FK、不进 reset），证据才在 ② 里活了下来。
+      // （bug 仍在时根本没有 round_cohort 表，② 直接落空 ⇒ 红。）
+      expect(await getGoldenQuestions(db)).toEqual([])
+      expect(await getPromotionAudit(db)).toEqual([])
+    })
+
+    it('测试 2（负向）：库本能答的带毒 item BLOCK ⇒ round_cohort 里 admitted=false、无 goldenId；clean item admitted 有 goldenId', async () => {
+      await resetRedTeamTables()
+      // 带毒 item：seedingReset 每次 reset 后 seed 一条与其 claimText 同义的 active claim ⇒ recall 命中 ⇒ BLOCK。
+      // claimText 用独特 token（与 clean item 的 claimText 无 trigram 交集），免得 fake 三元组嵌入器把 seed 的
+      // 同义 claim 也召回到 clean item 上、误把 clean item 一并 BLOCK（与 redteam-immunity.test 的 unique-token 同款做法）。
+      const poisoned: RedTeamItem = {
+        id: 'cr017-poisoned',
+        redteamClass: 'false',
+        claimText: 'wuxzq-poison-token already-answered exam question',
+        evidence: 'irrelevant',
+        sourceKind: 'formal_document',
+      }
+      // clean item：claimText 用与 poison seed 完全不同的词汇（库本无答案 ⇒ admitted）。
+      const cleanFalse: RedTeamItem = {
+        id: 'cr017-clean',
+        redteamClass: 'false',
+        claimText: 'Phobos orbital radius is at least 9377 kilometers',
+        object: 'at least 9377',
+        evidence: 'Phobos orbital radius is at least 6000 kilometers.',
+        sourceKind: 'formal_document',
+      }
+      const seedingReset = async () => {
+        await resetWorkTables()
+        await appendActiveClaim({ claimText: poisoned.claimText })
+      }
+      const res = await runRedBlueRound(
+        { db, embedder },
+        {
+          generationVersion: 'rb-cr017-block',
+          items: [cleanFalse, poisoned],
+          resetWorkTables: seedingReset,
+        },
+      )
+      expect(res.blockedItemIds).toContain('cr017-poisoned')
+      expect(res.scoredItemIds).not.toContain('cr017-poisoned')
+      expect(res.scoredItemIds).toContain('cr017-clean')
+
+      const cohort = await getRoundCohort(db, 'rb-cr017-block')
+      const blockedRow = cohort.find((c) => c.itemId === 'cr017-poisoned')!
+      expect(blockedRow.admitted).toBe(false) // 持久证据：BLOCK
+      expect(blockedRow.goldenId).toBeNull() // blocked 绝无 golden 回填
+      expect(blockedRow.basis.kbTrulyLacks).toBe(false) // 凭何 BLOCK：库本能答
+      const admittedRow = cohort.find((c) => c.itemId === 'cr017-clean')!
+      expect(admittedRow.admitted).toBe(true)
+      expect(admittedRow.goldenId).not.toBeNull() // admitted 有 golden 回填
+    })
+
+    it('测试 3（隔离不回归）：同类 ≥2 条 item 仍逐条独立隔离（证据搬出 reset 半径未削弱毒株隔离）', async () => {
+      await resetRedTeamTables()
+      // 两条语料里的干净 false（perfect-round 已证它们各自过 A1、各自被真 Verifier 逮到）。把证据搬出 per-item reset 后，
+      // per-item TRUNCATE 仍清 claim/source/l5_candidates ⇒ 两条互不串扰、各自独立过 A1、各自独立被蓝队判分。
+      const falses = REDTEAM_GENERATION_ITEMS.filter((i) => i.redteamClass === 'false').slice(0, 2)
+      expect(falses.length).toBe(2) // 语料确有 ≥2 条 false（隔离测试需要同类多条）
+      const res = await runRedBlueRound(
+        { db, embedder },
+        { generationVersion: 'rb-cr017-iso', items: falses, resetWorkTables },
+      )
+      // 两条都过 A1、都进被计分 cohort（per-item 隔离没被破坏——若串扰，第二条的 recall 会命中第一条残留 ⇒ BLOCK）。
+      const cohort = await getRoundCohort(db, 'rb-cr017-iso')
+      expect(cohort.length).toBe(2)
+      expect(cohort.every((c) => c.admitted)).toBe(true)
+      expect(res.scoredItemIds.sort()).toEqual(falses.map((i) => i.id).sort())
+      // 蓝队逐条判分：两条都该被真 Verifier 逮到（detection=injected）——若串扰污染真值，检出会塌。
+      const falseScore = res.classScores.find((s) => s.redteamClass === 'false')!
+      expect(falseScore.injected).toBe(2)
+      expect(falseScore.detected).toBe(2) // 逐条独立检出，无串扰污染
     })
   })
 
