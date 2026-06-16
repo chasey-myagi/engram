@@ -169,11 +169,13 @@ export {
   promoteCandidate,
   getGoldenQuestions,
   getPromotionAudit,
+  getRoundCohort,
   type ImmunityResult,
   type PromoteOptions,
   type PromoteResult,
   type GoldenQuestion,
   type PromotionAuditRow,
+  type RoundCohortRow,
 } from './spi/exam-immunity.js'
 // S29 · 冻结红队世代（版本化 append-only，纵向比较的固定敌手）+ 免疫力维度（detection rate，离线报告、不进计分）。
 export {

@@ -6,6 +6,7 @@
 import { sql } from 'drizzle-orm'
 import {
   type AnyPgColumn,
+  boolean,
   check,
   doublePrecision,
   index,
@@ -16,6 +17,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  unique,
   uuid,
   vector,
 } from 'drizzle-orm/pg-core'
@@ -473,6 +475,56 @@ export const redteamImmunityScores = pgTable(
     // （字面与 REDTEAM_CLASSES 白名单同步；内核不解释 class 语义，故用轻量 check 而非 lookup FK）。
     check(
       'redteam_immunity_scores_redteam_class_check',
+      sql`${t.redteamClass} IN ('false', 'contradiction', 'stale', 'near_dup_poison')`,
+    ),
+  ],
+)
+
+/**
+ * round_cohort：红蓝对抗回合（runRedBlueRound）A1 题免疫逐条裁决的 **append-only 可审计快照**（EGR-CR-017）。
+ *
+ * 为何独立新表、且**故意不对工作表建 FK**：A1 晋升证据（golden_questions / promotion_audit）通过 FK 挂在
+ * l5_candidates / claim 上，而毒株 per-item 隔离**必须**对这批工作表 TRUNCATE ... CASCADE（否则上一条毒株泄漏进
+ * 下一条、污染真值）。CASCADE 会把挂在其上的审计行一并级联删空 ⇒ 回合结束后晋升证据一行不剩，scored cohort 只剩内存
+ * 证据、无法跨整回合在持久层审计。本表把每条 item 的裁决（admitted / basis 四检快照 / goldenId / poisonClaimId）以
+ * **值快照**形式落进一张**不参与 per-item reset、与工作表零 FG 牵连**的表，使 per-item TRUNCATE 物理上够不着它。
+ *
+ * 沿 redteam_immunity_scores / redteam_generations 的「回合事实」族式样：generation_version 同锚（FK 到
+ * redteam_generations.version），unique(generation_version, item_id) ⇒ 一回合一 item 一行、append-only、撞名抛。
+ * scorer 不再从内存 Set 构 cohort，而从本表（generation_version=本回合 ∧ admitted=true）读，二者由同一持久事实驱动。
+ */
+export const roundCohort = pgTable(
+  'round_cohort',
+  {
+    id: uuid('id').primaryKey(),
+    // 本回合世代（与 redteam_immunity_scores 同锚）。FK 到 redteam_generations.version。
+    generationVersion: text('generation_version')
+      .notNull()
+      .references(() => redteamGenerations.version),
+    // 红队 item id（= RedTeamItem.id；冻结世代内的稳定标识）。
+    itemId: text('item_id').notNull(),
+    // 对抗类别（与四注入器对齐；纯文本标签、check 守白名单，与 redteam_immunity_scores 同款）。
+    redteamClass: text('redteam_class').notNull(),
+    // 是否过了 A1（promoteCandidate.promoted）⇒ 是否进被计分 cohort。
+    admitted: boolean('admitted').notNull(),
+    // admitted 时 promoteCandidate 回填的 golden / 毒株 claim id（**值快照**，故意无 FK：解耦于会被 TRUNCATE 的
+    // golden_questions / claim，证据不随工作表蒸发）。blocked 时为 null。
+    goldenId: uuid('golden_id'),
+    poisonClaimId: uuid('poison_claim_id'),
+    // A1 四检判据快照（= PromoteResult.result）。回合后审计「凭何过/未过的 A1」的权威载体。
+    basis: jsonb('basis').notNull(),
+    // 谁裁决的（A1 晋升人，'human…' 前缀）。
+    decidedBy: text('decided_by').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // 一回合一 item 一行（append-only、撞名抛）。
+    unique('round_cohort_generation_item_unique').on(t.generationVersion, t.itemId),
+    // 按世代取本回合 cohort（scorer 读 admitted=true 的子集 / 回合后审计）。
+    index('idx_round_cohort_generation').on(t.generationVersion),
+    // 四类语义不变量（与 redteam_immunity_scores 同款轻量 check）。
+    check(
+      'round_cohort_redteam_class_check',
       sql`${t.redteamClass} IN ('false', 'contradiction', 'stale', 'near_dup_poison')`,
     ),
   ],
