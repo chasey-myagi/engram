@@ -77,7 +77,6 @@ const EDITOR = 'human:editor'
 async function aSource(authorityScore = 0.9) {
   return addSource(db, {
     content: `body-${randomUUID()}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore,
   })

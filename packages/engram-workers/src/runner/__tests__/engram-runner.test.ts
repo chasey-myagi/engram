@@ -176,7 +176,6 @@ async function seedPoisonClaim(opts: {
     (
       await addSource(db, {
         content: `src-${randomUUID()}`,
-        contentHash: randomUUID(),
         kind: 'structured_spec',
         authorityScore: 0.5,
       })
@@ -220,7 +219,6 @@ async function contradictsEdgeCount(): Promise<number> {
 async function aSource(content?: string): Promise<string> {
   const { sourceId } = await addSource(db, {
     content: content ?? `body-${randomUUID()}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.9,
   })
@@ -281,7 +279,6 @@ async function seedActiveClaim(opts: {
 }): Promise<string> {
   const { sourceId } = await addSource(db, {
     content: `src-${randomUUID()}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.5,
   })

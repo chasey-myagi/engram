@@ -64,7 +64,6 @@ beforeEach(async () => {
 async function selfAuthor(claimText: string): Promise<string> {
   const src = await addSource(db, {
     content: 'body',
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.95,
   })

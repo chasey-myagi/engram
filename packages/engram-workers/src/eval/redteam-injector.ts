@@ -143,7 +143,11 @@ export interface RedTeamRunDeps {
  */
 const INDEPENDENT_SOURCES_PER_CLAIM = 4
 
-/** 入一条源，返回 sourceId。每条都用独立 contentHash（随机），不去重——红队样本各自成源。 */
+/**
+ * 入一条源，返回 sourceId。每条都各自成源、不去重——红队样本各自独立印证。
+ * EGR-CR-012：content_hash 由内核据 content 自算，故独立性靠**真实 content 差异**——给 content 拼一段
+ * 唯一标记（不改 evidence 语义），让 n 条「独立」源真的字节级不同（旧版靠不同随机 hash 抄近路）。
+ */
 async function injectSource(
   db: DB,
   content: string,
@@ -151,8 +155,7 @@ async function injectSource(
   authorityScore: number,
 ): Promise<string> {
   const { sourceId } = await addSource(db, {
-    content,
-    contentHash: randomUUID(),
+    content: `${content}\n[redteam-source:${randomUUID()}]`,
     kind,
     authorityScore,
   })

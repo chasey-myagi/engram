@@ -75,7 +75,6 @@ async function mkClaim(opts?: {
   const claimText = opts?.claimText ?? `claim-${randomUUID()}`
   const { sourceId } = await addSource(db, {
     content: `src for ${claimText}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.9,
   })

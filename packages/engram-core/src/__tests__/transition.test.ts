@@ -60,7 +60,6 @@ const MID = { authority: 0.6, humanReview: 0.6, entailment: 0.5, indepSupport: 0
 async function aSource() {
   return addSource(db, {
     content: 'body',
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.5,
   })

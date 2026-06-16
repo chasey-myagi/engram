@@ -53,9 +53,12 @@ export interface IndepGoldenItem {
   predicate: string
   object: string
   claimText: string
-  /** 额外 supports 源（默认 exact 主源外的副本）。 */
-  extraSources: { contentHash?: string; derivedFromSourceId?: string; kind?: SourceKind }[]
-  /** 人工真值：这批源里是否存在不独立对（同 hash / 直接 derived_from）。 */
+  /**
+   * 额外 supports 源（默认 exact 主源外的副本）。EGR-CR-012：独立性靠**真实 content** —— 给同一个 `content`
+   * 的两条源即为「同内容副本（非独立对）」；不给 content（各自默认 distinct）即独立。
+   */
+  extraSources: { content?: string; derivedFromSourceId?: string; kind?: SourceKind }[]
+  /** 人工真值：这批源里是否存在不独立对（同 content / 直接 derived_from）。 */
   expectNonIndependent: boolean
 }
 
@@ -145,14 +148,15 @@ export const RECONCILER_PAIR_GOLDEN: readonly ReconcilerPairItem[] = Object.free
 export const RECONCILER_INDEP_GOLDEN: readonly IndepGoldenItem[] = Object.freeze(
   [
     (() => {
-      const sharedHash = 'l1-shared-hash-aaaa'
+      // EGR-CR-012：两条**字节级相同 content** 的副本 ⇒ 内核自算同 hash ⇒ countIndependentSupports 折成 1（非独立对）。
+      const sharedContent = 'l1-shared-source-content-aaaa'
       return {
-        id: 'recon-indep-samehash',
+        id: 'recon-indep-samecontent',
         subject: 'widget-a',
         predicate: 'weight',
         object: '250g',
         claimText: 'widget-a weight is 250 g',
-        extraSources: [{ contentHash: sharedHash }, { contentHash: sharedHash }],
+        extraSources: [{ content: sharedContent }, { content: sharedContent }],
         expectNonIndependent: true,
       }
     })(),
@@ -162,7 +166,7 @@ export const RECONCILER_INDEP_GOLDEN: readonly IndepGoldenItem[] = Object.freeze
       predicate: 'weight',
       object: '300g',
       claimText: 'widget-b weight is 300 g',
-      extraSources: [{}, {}], // 两条 contentHash 各异、无血缘 → 独立
+      extraSources: [{}, {}], // 两条 content 各异（默认 distinct）、无血缘 → 独立
       expectNonIndependent: false,
     },
   ].map((it) => Object.freeze(it)),

@@ -126,7 +126,6 @@ const commitThenErrorRuntime: AgentRuntime = {
 async function aSource(opts: { kind?: SourceKind; content?: string } = {}) {
   return addSource(db, {
     content: opts.content ?? `body-${randomUUID()}`,
-    contentHash: randomUUID(),
     kind: opts.kind ?? 'structured_spec',
     authorityScore: 0.9, // strong ⇒ a 2-source merge clears the recall floor
   })

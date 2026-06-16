@@ -238,19 +238,16 @@ describe('bidding-adapter DB integration — business identity via source.meta (
   it('readSourceTypes pulls source_type out of source.meta (kernel stores meta opaque)', async () => {
     const off = await addSource(db, {
       content: 'datasheet',
-      contentHash: randomUUID(),
       kind: 'formal_document',
       meta: { source_type: OFFICIAL_DATASHEET, vendor: 'acme' },
     })
     const forum = await addSource(db, {
       content: 'thread',
-      contentHash: randomUUID(),
       kind: 'conversation_log',
       meta: { source_type: 'community_forum' },
     })
     const bare = await addSource(db, {
       content: 'x',
-      contentHash: randomUUID(),
       kind: 'external_feed',
     }) // no source_type in meta
 
@@ -264,7 +261,6 @@ describe('bidding-adapter DB integration — business identity via source.meta (
     expect(await readSourceTypes(db, [])).toEqual(new Map())
     const off = await addSource(db, {
       content: 'd',
-      contentHash: randomUUID(),
       kind: 'formal_document',
       meta: { source_type: OFFICIAL_DATASHEET },
     })
@@ -276,13 +272,11 @@ describe('bidding-adapter DB integration — business identity via source.meta (
   it('end-to-end: recall → biddingTighten holds an official_datasheet-backed claim at g, discounts a forum-backed one, all ≤ kernel g', async () => {
     const off = await addSource(db, {
       content: 'datasheet',
-      contentHash: randomUUID(),
       kind: 'formal_document',
       meta: { source_type: OFFICIAL_DATASHEET },
     })
     const forum = await addSource(db, {
       content: 'thread',
-      contentHash: randomUUID(),
       kind: 'conversation_log',
       meta: { source_type: 'community_forum' },
     })

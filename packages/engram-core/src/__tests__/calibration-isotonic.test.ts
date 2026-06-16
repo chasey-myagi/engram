@@ -123,7 +123,6 @@ async function seedClaim(text: string): Promise<string> {
   })
   const { sourceId } = await addSource(db, {
     content: `body-${id}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.9,
   })
@@ -429,7 +428,6 @@ describe('S28 FIX 1 承重：活动 g 非 identity 下 draft→active promote �
     for (let i = 0; i < 3; i++) {
       const { sourceId } = await addSource(db, {
         content: `promote-${randomUUID()}`,
-        contentHash: randomUUID(),
         kind: 'structured_spec',
         authorityScore: 1,
       })
@@ -556,7 +554,6 @@ async function mkRecallableClaim(text: string): Promise<string> {
   for (let i = 0; i < 3; i++) {
     const { sourceId } = await addSource(db, {
       content: `recallable-${randomUUID()}`,
-      contentHash: randomUUID(),
       kind: 'structured_spec',
       authorityScore: 1,
     })

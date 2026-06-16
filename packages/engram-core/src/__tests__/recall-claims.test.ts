@@ -56,7 +56,6 @@ beforeEach(async () => {
 async function seedSource(authorityScore = 0.5) {
   return addSource(db, {
     content: 'body',
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore,
   })

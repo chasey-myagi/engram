@@ -68,7 +68,6 @@ const ABOVE_FLOOR = {
 async function aSource() {
   return addSource(db, {
     content: 'body',
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.5,
   })

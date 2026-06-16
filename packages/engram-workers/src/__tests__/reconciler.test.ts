@@ -102,15 +102,18 @@ interface MkOpts {
   object: string | null
   status?: schema.ClaimStatus
   createdBy?: string
-  /** extra supports sources beyond the default one (for the indep-inflation audit). */
-  extraSources?: { contentHash?: string; derivedFromSourceId?: string; kind?: schema.SourceKind }[]
+  /**
+   * extra supports sources beyond the default one (for the indep-inflation audit).
+   * EGR-CR-012: independence rides real `content` — pass the SAME `content` to two extras to make a
+   * non-independent (same-content copy) pair; omit it and each extra is byte-distinct (independent).
+   */
+  extraSources?: { content?: string; derivedFromSourceId?: string; kind?: schema.SourceKind }[]
 }
 
 /** Seed a claim with a real (fake-embedder) embedding + ≥1 exact provenance; precise subject/object/status. */
 async function mkClaim(opts: MkOpts): Promise<{ claimId: string; sourceId: string }> {
   const { sourceId } = await addSource(db, {
     content: `src for ${opts.claimText}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.9,
   })
@@ -140,8 +143,8 @@ async function mkClaim(opts: MkOpts): Promise<{ claimId: string; sourceId: strin
   })
   for (const ex of opts.extraSources ?? []) {
     const extra = await addSource(db, {
-      content: `extra for ${opts.claimText} ${randomUUID()}`,
-      contentHash: ex.contentHash ?? randomUUID(),
+      // EGR-CR-012: same `content` ⇒ same kernel-computed hash ⇒ non-independent copy; omit ⇒ distinct.
+      content: ex.content ?? `extra for ${opts.claimText} ${randomUUID()}`,
       kind: ex.kind ?? 'formal_document',
       authorityScore: 0.7,
       ...(ex.derivedFromSourceId != null ? { derivedFromSourceId: ex.derivedFromSourceId } : {}),
@@ -241,14 +244,14 @@ describe('S18 Reconciler worker (batch_appended: 函数 + 灰区一次 LLM) — 
   })
 
   it('anti same-source inflation: a claim whose supports include a same-hash / derived-from copy is surfaced (indepSupport must not grow by source count)', async () => {
-    const sharedHash = `dup-${randomUUID()}`
-    // claim with two same-contentHash sources (same-source copy) → non-independent pair
+    const sharedContent = `dup-source-${randomUUID()}`
+    // claim with two same-content sources (same-source copy) → non-independent pair (EGR-CR-012)
     const dup = await mkClaim({
       claimText: 'skuB weight is 250 g',
       subject: 'skuB',
       predicate: 'weight',
       object: '250g',
-      extraSources: [{ contentHash: sharedHash }, { contentHash: sharedHash }],
+      extraSources: [{ content: sharedContent }, { content: sharedContent }],
     })
     // a clean claim with two genuinely distinct sources
     const clean = await mkClaim({

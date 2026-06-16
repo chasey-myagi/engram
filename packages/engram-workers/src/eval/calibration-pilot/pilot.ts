@@ -71,7 +71,6 @@ export async function seedCorpus(
     const v = f.rawTarget
     const src = await addSource(db, {
       content: `source attesting: ${f.statement}`,
-      contentHash: randomUUID(),
       kind: 'formal_document',
       authorityScore: v,
     })

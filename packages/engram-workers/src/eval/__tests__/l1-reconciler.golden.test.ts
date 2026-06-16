@@ -86,7 +86,6 @@ async function mkClaim(opts: {
 }): Promise<string> {
   const { sourceId } = await addSource(db, {
     content: `src for ${opts.claimText}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.9,
   })
@@ -143,8 +142,8 @@ async function seedIndep(item: IndepGoldenItem): Promise<string> {
   })
   for (const ex of item.extraSources) {
     const extra = await addSource(db, {
-      content: `extra for ${item.claimText} ${randomUUID()}`,
-      contentHash: ex.contentHash ?? randomUUID(),
+      // EGR-CR-012：独立性靠真实 content —— golden 给定 content（同值 ⇒ 非独立副本）则用之，否则默认 distinct（独立）。
+      content: ex.content ?? `extra for ${item.claimText} ${randomUUID()}`,
       kind: ex.kind ?? 'formal_document',
       authorityScore: 0.7,
       ...(ex.derivedFromSourceId != null ? { derivedFromSourceId: ex.derivedFromSourceId } : {}),

@@ -85,7 +85,6 @@ afterAll(async () => {
 async function seedSide(query: string, object: string, side: ArbiterSide): Promise<string> {
   const { sourceId } = await addSource(db, {
     content: `src-${randomUUID()}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: side.authority,
   })
@@ -117,7 +116,6 @@ async function seedSide(query: string, object: string, side: ArbiterSide): Promi
   for (let i = 0; i < (side.extraIndepSources ?? 0); i += 1) {
     const extra = await addSource(db, {
       content: `indep-${randomUUID()}`,
-      contentHash: randomUUID(),
       kind: 'formal_document',
       authorityScore: side.authority,
     })
