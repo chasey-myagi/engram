@@ -202,48 +202,14 @@ async function contradictsEdgeCount(db: DB, claimId: string): Promise<number> {
 }
 
 /**
- * 注入一条 claim（经**真 append_claim**），可选先 seed 一条 active 锚（contradiction / near_dup_poison 用）。
- * 锚要先晋升到 active（既有事实），被审 claim 才能与之产生「活跃」对抗。
- *
- * 被审 claim 与锚都挂 INDEPENDENT_SOURCES_PER_CLAIM 条 authority=1.0 的独立 supports 源 ⇒ base≥0.5 过 D2 乐观晋升门
- * （模拟攻击者用足够多来源把对抗 claim 乐观写进 active，事后才被巡查逮到）。asOf 在 append 时不设远古（fresh 入库、
- * 可晋升）；stale 类的「时效」由 runStale 在晋升后**就地老化** as_of 列模拟（时间流逝，非旁路改状态）。
+ * 注入被审/对抗 claim（经**真 append_claim**：D1 强制出处、S8 同事实落 contradicts 边、连续 confidence）。
+ * 挂 INDEPENDENT_SOURCES_PER_CLAIM 条 authority=1.0 的独立 supports 源 ⇒ base≥0.5 过 D2 乐观晋升门（模拟攻击者
+ * 用足够多来源把对抗 claim 乐观写进 active，事后才被巡查逮到）。源数默认 INDEPENDENT_SOURCES_PER_CLAIM；测试可经
+ * deps.itemSourceCount 调小以复现「独立印证薄→晋升不过门」。asOf 在 append 时不设远古（fresh 入库、可晋升）；
+ * stale 类的「时效」由 runStale 在晋升后**就地老化** as_of 列模拟（时间流逝，非旁路改状态）。
  */
-async function injectClaim(
-  deps: RedTeamRunDeps,
-  item: RedTeamItem,
-): Promise<{ claimId: string; anchorId?: string }> {
+async function injectClaim(deps: RedTeamRunDeps, item: RedTeamItem): Promise<{ claimId: string }> {
   const { db, embedder } = deps
-  let anchorId: string | undefined
-
-  // 1) 先 seed 既有 active 锚（若有）：append → 蓝边 promote 晋升 active（评测=消费，不旁路改状态）。
-  if (item.anchor) {
-    const a = item.anchor
-    const anchorProvs = await buildProvenances(
-      db,
-      a.evidence,
-      a.sourceKind as SourceKind,
-      `redteam:anchor:${item.id}`,
-    )
-    const appended = await appendClaim(
-      db,
-      embedder,
-      {
-        claimText: a.claimText,
-        ...(a.subject !== undefined ? { subject: a.subject } : {}),
-        ...(a.predicate !== undefined ? { predicate: a.predicate } : {}),
-        ...(a.object !== undefined ? { object: a.object } : {}),
-        createdBy: 'agent:distiller',
-      },
-      anchorProvs,
-    )
-    anchorId = appended.claimId
-    // 锚晋升 active（蓝边 promote，需 conf≥0.5 ∧ entailmentPass）——锚 evidence 蕴含锚 claim，pass 合法。
-    await transitionClaim(db, anchorId, 'active', { by: 'agent:distiller', entailmentPass: true })
-  }
-
-  // 2) 注入被审/对抗 claim（经真 append_claim：D1 强制出处、S8 同事实落 contradicts 边、连续 confidence）。
-  //    源数默认 INDEPENDENT_SOURCES_PER_CLAIM；测试可经 deps.itemSourceCount 调小以复现「独立印证薄→晋升不过门」。
   const provs = await buildProvenances(
     db,
     item.evidence,
@@ -263,9 +229,49 @@ async function injectClaim(
     },
     provs,
   )
-  return anchorId !== undefined
-    ? { claimId: appended.claimId, anchorId }
-    : { claimId: appended.claimId }
+  return { claimId: appended.claimId }
+}
+
+/**
+ * Append 既有锚（contradiction / near_dup_poison 用），**不晋升**——挂满 INDEPENDENT_SOURCES_PER_CLAIM 条独立源
+ * （不受 itemSourceCount 调小影响）。append 锚时 S8 据 S/P+object 反向**当场对既有库内 claim 落 contradicts 边**。
+ * 晋升与否由调用方按各自攻击故事决定（contradiction 须 active；near_dup_poison 锚留 draft 即可被 Reconciler 当近锚）。
+ */
+async function appendAnchorClaim(deps: RedTeamRunDeps, item: RedTeamItem): Promise<string> {
+  const { db, embedder } = deps
+  const a = item.anchor!
+  const anchorProvs = await buildProvenances(
+    db,
+    a.evidence,
+    a.sourceKind as SourceKind,
+    `redteam:anchor:${item.id}`,
+  )
+  const appended = await appendClaim(
+    db,
+    embedder,
+    {
+      claimText: a.claimText,
+      ...(a.subject !== undefined ? { subject: a.subject } : {}),
+      ...(a.predicate !== undefined ? { predicate: a.predicate } : {}),
+      ...(a.object !== undefined ? { object: a.object } : {}),
+      createdBy: 'agent:distiller',
+    },
+    anchorProvs,
+  )
+  return appended.claimId
+}
+
+/**
+ * Seed 既有 active 锚（contradiction 用）：append → 蓝边 agent promote 晋升 active（评测=消费，不旁路改状态）。
+ * 锚 evidence 蕴含锚 claim，entailmentPass 合法；先 seed 锚（库内尚无矛盾）才正常过 agent 门。
+ */
+async function seedActiveAnchor(deps: RedTeamRunDeps, item: RedTeamItem): Promise<string> {
+  const anchorId = await appendAnchorClaim(deps, item)
+  await transitionClaim(deps.db, anchorId, 'active', {
+    by: 'agent:distiller',
+    entailmentPass: true,
+  })
+  return anchorId
 }
 
 /** 就地把一条 claim 的 as_of 老化到给定时点（模拟时间流逝，非旁路改状态/置信）。staleDecay 据它现算。 */
@@ -311,19 +317,27 @@ async function runFalse(deps: RedTeamRunDeps, item: RedTeamItem): Promise<Inject
  * contradiction 类免疫：注入与既有 active 锚同 subject+predicate、object 反向的 claim → append 时 S8 落 contradicts 边
  * → 跑**真 Arbiter**（harness-pi fake runtime 编排，胜者确定性）路由这对 → 落 conflict_adjudicated 事件（resolved/escalated）。
  * detected = (append 落了 contradicts 边) ∧ (Arbiter 对这对产出了裁决/升级)。被审 claim 也需先晋升 active（活跃矛盾）。
+ * EGR-CR-025：被审 claim 背一条指向 active 锚的 contradicts 边，晋升门接实时 conflictDecay 后 agent 路径必被压穿门
+ *（上限 0.467<0.5），故被审 claim 经**人 Approve 旁路**（红线#2）晋升 active —— 攻击故事 = 「人误把矛盾 draft 放行」。
  */
 async function runContradiction(
   deps: RedTeamRunDeps,
   item: RedTeamItem,
 ): Promise<InjectionOutcome> {
   const { db } = deps
-  const injected = await injectClaim(deps, item)
-  const { claimId, anchorId } = injected
+  // 先 seed active 锚（既有事实，agent 晋升：库内尚无矛盾 → 正常过门）。
+  const anchorId = item.anchor ? await seedActiveAnchor(deps, item) : undefined
+  // 注入被审/对抗 claim（append 时 S8 据 S/P 对 active 锚落 contradicts 边）。
+  const { claimId } = await injectClaim(deps, item)
   // 被审 claim 晋升 active（活跃矛盾 = 双方 active；Arbiter 只裁 active↔active）。
+  // EGR-CR-025：被审 claim 此刻已背一条指向 active 锚的 contradicts 边，晋升门接实时 conflictDecay 后 agent 路径
+  // 必被压穿 0.5（数学上限 0.70·0.6667=0.467<0.5），无法再走 agent 晋升。攻击故事改用**人 Approve 旁路**（红线#2：
+  // 人可放松 sub-0.5 draft）—— 即「人误把一条与既有 active 事实矛盾的 draft 放行进 active」，这正是红队要验证的下游：
+  // 两端皆 active → Arbiter 真路由该活跃矛盾对。人放松不走 conf 门，故晋升必成、与 itemSourceCount 无关。
   try {
-    await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
+    await transitionClaim(db, claimId, 'active', { by: 'human:curator', entailmentPass: true })
   } catch {
-    /* 留 draft：仍可断言 contradicts 边已落（S8），但 Arbiter 不裁非 active 对 */
+    /* 仍 draft：Arbiter 不裁非 active 对；下方 detected 由 pairTouched 反映（不虚报） */
   }
   const edgeBefore = await contradictsEdgeCount(db, claimId)
   // 真 Arbiter 路由这对（harness-pi fake runtime + 内核确定性阶梯）。
@@ -465,14 +479,17 @@ async function runStale(deps: RedTeamRunDeps, item: RedTeamItem): Promise<Inject
  * detected = 记了带 anchorId 的 escalation ∧ Reconciler 判 poison ∧ **claim 真被收紧到 flagged**（口径与 runFalse 对齐）。
  * 被审 claim 先晋升 active（poison 才能 active→flagged）；晋升失败留 draft 时由 promotionFailed 显式标注、且**不计**检出
  * （EGR-CR-050：停在 draft、从未被 flag 的 poison 只是 escalation-only 诊断，不能虚高计检出）。
+ * EGR-CR-025：被审 poison **先**经真 agent 门晋升 active（此刻库内无锚、无矛盾、conflictDecay=1，门照旧），锚**后**入且
+ * 留 draft——避免锚被同款实时 conflictDecay 压穿门，而 Reconciler 近锚检索不要求对端 active（只需非 superseded）。
  */
 export async function runNearDupPoison(
   deps: RedTeamRunDeps,
   item: RedTeamItem,
 ): Promise<InjectionOutcome> {
   const { db } = deps
-  const injected = await injectClaim(deps, item)
-  const { claimId, anchorId } = injected
+  // EGR-CR-025 时序：先 append 被审 poison（库内尚无矛盾锚 → 不背 contradicts 边）→ 走真 agent 晋升门（conflictDecay=1）
+  // 晋升 active。被审 poison 仍经真 conf 门晋升，itemSourceCount 调小照样能挡（EGR-CR-050 负例口径不变）。
+  const { claimId } = await injectClaim(deps, item)
   // 晋升 active 失败不再静默吞掉：显式记 promotionFailed（晋升回归 / D2 floor 耦合 / entailment 不过门时留 draft）。
   // draft→flagged 非法（A.4），故留 draft；但 escalation 仍会记（信号不丢）——见下方 detected 口径与 reaction.promotionFailed。
   let promotionFailed = false
@@ -481,6 +498,11 @@ export async function runNearDupPoison(
   } catch {
     promotionFailed = true
   }
+  // 锚**留 draft**（不晋升）：append 后即与已 active 的被审 poison 落 S8 contradicts 边——此刻晋升锚也会被同款实时
+  // conflictDecay 压穿门（EGR-CR-025），而 Reconciler 的近锚检索（findAnchors）只要对端**非 superseded**即纳入，
+  // 不要求 active。故锚 draft 足矣：真 Reconciler 仍据 embedding 近 + 同 subject 找到它、实算 A⊄B 判 poison、收紧
+  // 被审 active poison 为 flagged + 记带对端 id 升级。这保留了「被审 poison 经真 agent 门晋升」（EGR-CR-050 负例不变）。
+  const anchorId = item.anchor ? await appendAnchorClaim(deps, item) : undefined
   const judge = makeBoundEntailmentOracle()
   const res = await reconcileBatch({ db, judge }, [claimId])
   const escalations = await getReconcileEscalations(db, claimId)

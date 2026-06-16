@@ -23,7 +23,13 @@ import { randomUUID } from 'node:crypto'
 import { eq } from 'drizzle-orm'
 
 import { getActiveStandards, type Standards } from '../config/standards.js'
-import { applyG, rawFromStoredFactors, type StoredConfidence } from '../confidence/confidence.js'
+import {
+  applyG,
+  conflictDecay,
+  rawFromStoredFactors,
+  type StoredConfidence,
+} from '../confidence/confidence.js'
+import { liveContradictsByClaim } from '../confidence/live-recompute.js'
 import { loadCalibrationMaps } from '../calibration/calibration-store.js'
 import type { DB, Tx } from '../db/client.js'
 import { claim, claimProvenance, type ClaimStatus } from '../db/schema.js'
@@ -116,14 +122,20 @@ export async function transitionClaimInTx(
     // draft→active：人 Approve 旁路门；蓝边须 conf≥0.5 ∧ entailment 通过。
     if (!isHumanRole(opts.by)) {
       const stored = row.factors as StoredConfidence
-      // conf 用存档因子 × 活动权重现算（与 recall 一致）；conflictDecay 取存档快照（draft 通常尚无矛盾，
-      // 活值冲突一致性留作后续与 recall 的 S8 实时口径对齐）。
-      // S17：f2 entailment 按 recall 同款实时口径——接到该 claim 最新 patrol 裁决（Verifier 在调本迁移前刚写入），
-      // 让「entailment pass 抬 f2」真正参与 conf≥0.5 判据（闭合 S13 合成桩；无 patrol 则中性 0.5，与存档一致、行为不变）。
-      // S22：f1 humanReview 同款实时口径——接到该 claim 最新主编人审。蓝边 promote 通常发生在人审之前（f1=中性 0、
-      // 与存档一致、行为不变）；接它只为与 recall 重算口径一致，绝不让 agent 借它放松（红线#2：人审只人能投）。
+      // conf 用存档因子 × 活动权重现算（与 recall 一致）。f1/f2/conflictDecay 三项都按 recall 同款**实时**口径覆盖，
+      // 杜绝 promote 与 recall 之间的 confidence 口径漂移（EGR-CR-025）。
+      // S17：f2 entailment 接该 claim 最新 patrol 裁决（Verifier 在调本迁移前刚写入），让「entailment pass 抬 f2」
+      // 真正参与 conf≥0.5 判据（闭合 S13 合成桩；无 patrol 则中性 0.5，与存档一致、行为不变）。
+      // S22：f1 humanReview 接该 claim 最新主编人审。蓝边 promote 通常发生在人审之前（f1=中性 0、与存档一致、行为不变）；
+      // 接它只为与 recall 重算口径一致，绝不让 agent 借它放松（红线#2：人审只人能投）。
+      // EGR-CR-025：conflictDecay 接实时活跃矛盾——数该 claim 当前的 active contradicts 对端（对端仍 active 才算），
+      // 复用 recall/inbox 的同一口径 helper（liveContradictsByClaim），而非在门里手搓计数（手搓会引入第四处口径再漂移）。
+      // 存档快照（写时 n=0、conflictDecay=1）不反映后来才长出的矛盾边；带活跃矛盾的 draft 由此被同款 conflictDecay
+      // 压低 conf、自然卡在 floor 之下（与 recall gate 一致，杜绝「status=active 却达不到自己 promote 门」的矛盾态）。
       const liveHumanReview = await computeHumanReviewFactor(tx, claimId)
       const liveEntailment = await computeEntailmentFactor(tx, claimId)
+      const contradictsByClaim = await liveContradictsByClaim(tx, [claimId])
+      const liveConflictDecay = conflictDecay(contradictsByClaim.get(claimId)?.size ?? 0)
       const factors = {
         ...stored.factors,
         humanReview: liveHumanReview,
@@ -134,7 +146,7 @@ export async function transitionClaimInTx(
       // 这正是「fit 出 g' 换上后，新写入的 draft 钉非 identity 版本，draft→active 晋升不再因缺 map 而抛」的修复点。
       const maps = await loadCalibrationMaps(tx, [stored.calibrationVersion])
       const conf = applyG(
-        rawFromStoredFactors(factors, std.factorWeights),
+        rawFromStoredFactors(factors, std.factorWeights, { conflictDecay: liveConflictDecay }),
         stored.calibrationVersion,
         maps.get(stored.calibrationVersion),
       )
