@@ -11,6 +11,7 @@ import { eq } from 'drizzle-orm'
 
 import {
   addSource,
+  agentActor,
   appendClaim,
   applyGMap,
   CALIBRATION_IDENTITY,
@@ -171,7 +172,10 @@ export async function seedCorpus(
       },
       provenances,
     )
-    await spi.transitionClaim(db, claimId, 'active', { by: SEED_CREATED_BY, entailmentPass: true })
+    await spi.transitionClaim(db, claimId, 'active', {
+      actor: agentActor(SEED_CREATED_BY),
+      entailmentPass: true,
+    })
     // 显式命名的成熟度构造(覆写发生在过门之后,不冒充真实成熟度计算)。
     await applySyntheticMaturity(db, claimId, v)
     claimIdByFact.set(f.id, claimId)

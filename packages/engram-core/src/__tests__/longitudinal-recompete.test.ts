@@ -12,6 +12,7 @@ import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { addSource, appendClaim } from '../spi/append-claim.js'
 import { writeHumanReview } from '../editor/human-review.js'
 import { transitionClaim } from '../spi/transition.js'
+import { agentActor, trustedHumanActor } from '../spi/actor.js'
 import { reportUsage } from '../spi/report-usage.js'
 import { recallClaims } from '../spi/recall-claims.js'
 import { L3_GOLDEN } from '../eval/system-dimensions.js'
@@ -72,10 +73,13 @@ async function selfAuthor(claimText: string): Promise<string> {
   ])
   await writeHumanReview(db, {
     claimId,
-    byRole: 'human:editor',
+    actor: trustedHumanActor('human:editor'),
     verdict: { humanReview: 1, action: 'approve' },
   })
-  await transitionClaim(db, claimId, 'active', { by: 'human:test', entailmentPass: true })
+  await transitionClaim(db, claimId, 'active', {
+    actor: trustedHumanActor('human:test'),
+    entailmentPass: true,
+  })
   return claimId
 }
 

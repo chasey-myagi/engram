@@ -21,7 +21,7 @@ import { claim, claimProvenance, metricsEvents, relation, type ClaimStatus } fro
 import type { DB, Tx } from '../db/client.js'
 import { countIndependentSupports } from '../same-fact/independent.js'
 import { loadSourcesWithAncestors } from './append-claim.js'
-import { isHumanRole } from './reflux.js'
+import type { ActorContext } from './actor.js'
 import type { Adjudication, ConflictSide, LadderRung } from './conflict-ladder.js'
 
 /** conflict_adjudicated 事件的 metrics_event_kind 值（S20）。 */
@@ -205,8 +205,8 @@ export async function escalateConflict(
  * 主编**人工裁定**一条升级到队列（getEditorConflictQueue）的冲突 —— A.5 优先级表的**第①阶（人工裁定）**，
  * 叠在机判阶梯（②③④⑤，conflict-ladder.ts）**之上**。机判阶梯的顺序**不改**（Arbiter 永不用①）；本函数只在其上
  * 加①这一阶：
- *   - **①是人专属**：caller 必是 `human:<id>`（裸 'human' 亦可，复用 isHumanRole）；agent caller **被代码拒**
- *     （不只是文档约定——红线#2「只人能放松/裁定」由 requireHuman 在任何副作用前硬执行）。
+ *   - **①是人专属**：caller 必是受信的人（actor.isHuman=true，trustedHumanActor）；agent caller（含 role 伪装成
+ *     'human:fake' 的 agentActor）**被代码拒**（不只是文档约定——红线#2「只人能放松/裁定」在任何副作用前硬执行）。
  *   - **①可选任一方**：人可裁 winner = a **或** b，**无视**机判阶梯会怎么判（这正是「①人工裁定」的含义——
  *     人有最终话语权，能推翻机判会得到的结论）。winnerId 必须 ∈ {a, b}，否则抛。
  *
@@ -219,12 +219,13 @@ export async function escalateConflict(
  */
 export async function humanAdjudicateConflict(
   db: DB,
-  opts: { a: string; b: string; winnerId: string; by: string; reason?: string },
+  opts: { a: string; b: string; winnerId: string; actor: ActorContext; reason?: string },
 ): Promise<ConflictPersistResult> {
-  // 红线#2 硬执行：①人工裁定仅人可用，agent caller 在任何副作用（边/事件/采信标记）之前即被拒。
-  if (!isHumanRole(opts.by)) {
+  // 红线#2 硬执行：①人工裁定仅人可用，agent caller（含 role 伪装成 'human:fake'）在任何副作用（边/事件/
+  // 采信标记）之前即被拒。授权读 actor.isHuman（受信边界），不再正则裸 role 串。
+  if (!opts.actor.isHuman) {
     throw new Error(
-      `humanAdjudicateConflict: rung ① (human ruling) is human-exclusive — caller '${opts.by}' is not human (an agent may only use the machine ladder ②③④⑤)`,
+      `humanAdjudicateConflict: rung ① (human ruling) is human-exclusive — caller '${opts.actor.role}' is not human (an agent may only use the machine ladder ②③④⑤)`,
     )
   }
   if (opts.a === opts.b) {
@@ -248,9 +249,9 @@ export async function humanAdjudicateConflict(
     rung: 'human',
     reason:
       opts.reason ??
-      `human ruling (rung ①): editor '${opts.by}' picked ${opts.winnerId} over ${loserId}`,
+      `human ruling (rung ①): editor '${opts.actor.role}' picked ${opts.winnerId} over ${loserId}`,
   }
-  return resolveConflict(db, { a: opts.a, b: opts.b, adjudication, byRole: opts.by })
+  return resolveConflict(db, { a: opts.a, b: opts.b, adjudication, byRole: opts.actor.role })
 }
 
 /** conflict_adjudicated 事件的读出形状（payload 已校验）。 */

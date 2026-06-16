@@ -40,6 +40,7 @@ import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
 import { addSource, appendClaim } from '../spi/append-claim.js'
 import { recallClaims } from '../spi/recall-claims.js'
 import { transitionClaim } from '../spi/transition.js'
+import { agentActor, trustedHumanActor } from '../spi/actor.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
 const migrationsFolder = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'drizzle')
@@ -115,7 +116,7 @@ async function mkRecallableClaim(text: string): Promise<string> {
     provs.push({ sourceId, locator: `p${i}`, relevance: 'exact' as const })
   }
   const { claimId } = await appendClaim(db, embedder, { claimText: text, createdBy: 'test' }, provs)
-  await transitionClaim(db, claimId, 'active', { by: 'human:editor' })
+  await transitionClaim(db, claimId, 'active', { actor: trustedHumanActor('human:editor') })
   return claimId
 }
 

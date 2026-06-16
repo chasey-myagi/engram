@@ -26,6 +26,8 @@ import {
   appendClaim,
   collectUsageCalibrationSamples,
   computeSystemDimensions,
+  agentActor,
+  trustedHumanActor,
   createDb,
   freezeRedTeamGeneration,
   getImmunityScores,
@@ -118,7 +120,10 @@ async function appendActiveClaim(draft: {
     { ...draft, createdBy: 'agent:distiller' },
     provs,
   )
-  await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
+  await transitionClaim(db, claimId, 'active', {
+    actor: agentActor('agent:distiller'),
+    entailmentPass: true,
+  })
   return claimId
 }
 
@@ -211,7 +216,10 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
         provs,
       )
       // 晋升到 active（桩 entailmentPass）——一条**活跃**幻觉，本可被 Verifier 收紧到 flagged。
-      await transitionClaim(db, claimId, 'active', { by: 'agent:distiller', entailmentPass: true })
+      await transitionClaim(db, claimId, 'active', {
+        actor: agentActor('agent:distiller'),
+        entailmentPass: true,
+      })
       const promoted = (
         await db
           .select({ s: schema.claim.status })
@@ -464,7 +472,7 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
         false,
       )
       const res = await promoteCandidate(db, embedder, candidateId, {
-        confirmedBy: 'human:curator',
+        actor: trustedHumanActor('human:curator'),
       })
       expect(res.promoted).toBe(true)
       expect(res.result.passed).toBe(true)
@@ -479,7 +487,7 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
       // 带毒：query 与一条 active 库内 claim 同义 → recall 命中 → kbTrulyLacks=false → 这是污染真值的考题。
       const { candidateId } = await seedCandidate('an unrelated background fact', true)
       const res = await promoteCandidate(db, embedder, candidateId, {
-        confirmedBy: 'human:curator',
+        actor: trustedHumanActor('human:curator'),
       })
       expect(res.promoted).toBe(false) // BLOCK：免疫流水线拒绝带毒考题
       const goldens = await db
@@ -516,7 +524,7 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
       })
       // 毒株框架：同 subject+predicate、object 反向 → 造毒株时 S8 落 contradicts 边 → noSelfContradiction=false → BLOCK。
       const res = await promoteCandidate(db, embedder, candidateId, {
-        confirmedBy: 'human:curator',
+        actor: trustedHumanActor('human:curator'),
         poison: { subject: 'vessel', predicate: 'cargoTons', object: '9999' },
       })
       expect(res.result.kbTrulyLacks).toBe(true) // gap query 召不回 → 进到造毒株步

@@ -641,8 +641,9 @@ export const recompeteEvents = pgTable(
  * 「迁出」是逻辑标注（此表存在该行 = 该题已不再算盲点、已进归因脊柱），不物理改 L5_GAP_QUESTIONS。
  *
  * 沿 metrics_events / dimension_events 的「只记事件 + 离线读」式样，独立**新表**、零触碰冻结枚举（红线#4）。
- * **只人能确认**（confirmedBy 须 'human…'，复用 isHumanRole）—— 与 L5 候选晋升同款 HITL 权威门：knowledge-grew
- * 是「知识真长出来了」的人类架构裁断，不让 agent 自报「我会了」冒充成长（防 Goodhart）。
+ * **只人能确认**（授权读 migrateL5IfGrew 的 actor.isHuman 受信边界；confirmedBy 落 actor.role 仅审计）—— 与 L5
+ * 候选晋升同款 HITL 权威门：knowledge-grew 是「知识真长出来了」的人类架构裁断，不让 agent 自报「我会了」冒充成长
+ * （防 Goodhart；agentActor 即便 role 伪装成 'human:fake' 也 isHuman:false 被拒）。
  */
 export const knowledgeGrewEvents = pgTable(
   'knowledge_grew_events',

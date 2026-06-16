@@ -25,6 +25,7 @@
  * 下一次 batch_appended 再来。整轮非预期异常也不外抛（返回部分结果）。
  */
 import {
+  agentActor,
   hasNonIndependentPair,
   recordReconcileEscalation,
   reconcilePair,
@@ -344,7 +345,7 @@ async function handleVerdict(
     let transition: { from: schema.ClaimStatus; to: schema.ClaimStatus } | null = null
     if (a.status === 'active') {
       try {
-        transition = await transitionClaim(deps.db, a.id, 'flagged', { by: byRole })
+        transition = await transitionClaim(deps.db, a.id, 'flagged', { actor: agentActor(byRole) })
         result.flagged += 1
       } catch {
         // 并发已改动 / 门校验失败 → 信号已记，留待 Arbiter/下次；不崩。

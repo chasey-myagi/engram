@@ -30,6 +30,7 @@ import {
   getResolvedConflicts,
   getClaimStatus,
 } from '../spi/conflict-arbiter.js'
+import { agentActor, trustedHumanActor } from '../spi/actor.js'
 import { adjudicateConflict } from '../spi/conflict-ladder.js'
 import { readConflictQueueDepth } from '../governance/metric-readers.js'
 
@@ -183,14 +184,14 @@ describe('S23 getEditorInbox — review queue sorted by LIVE-recomputed confiden
     })
     const b = await seedClaim({ query: 'b-plain', status: 'active', factors: { authority: 0.7 } })
     // endorse A (f1→1) so it sits clearly ABOVE B
-    await approveClaim(db, a, { by: EDITOR })
+    await approveClaim(db, a, { actor: trustedHumanActor(EDITOR) })
     const before = (await getEditorInbox(db)).map((r) => r.claimId)
     expect(before).toEqual([b, a]) // ascending: b first (0.285), a last (0.555)
 
     // now the editor Rejects A (f1→0, status active→quarantined). A leaves the active band but
     // is STILL in the inbox (quarantined is reviewable) and its live confidence collapsed → it bubbles up.
     // base(A,f1=0) = 0.3·0.6 + 0.15·0.5 = 0.255 < base(B) 0.285 → A re-sorts BEFORE B.
-    await rejectClaim(db, a, { by: EDITOR })
+    await rejectClaim(db, a, { actor: trustedHumanActor(EDITOR) })
     const after = await getEditorInbox(db)
     const aRow = after.find((r) => r.claimId === a)!
     expect(aRow.status).toBe('quarantined')
@@ -474,13 +475,25 @@ describe('S23 humanAdjudicateConflict — rung ① human ruling ON TOP of the ma
   it('ENFORCED human-exclusivity: an agent caller is REJECTED by code before any side effect', async () => {
     const { a, b } = await aConflictPair()
     await expect(
-      humanAdjudicateConflict(db, { a, b, winnerId: a, by: 'agent:arbiter' }),
+      humanAdjudicateConflict(db, { a, b, winnerId: a, actor: agentActor('agent:arbiter') }),
     ).rejects.toThrow(/human-exclusive|not human/)
     // not just documented: nothing was written (no contradicts edge, no resolved marker)
     expect(await getResolvedConflicts(db)).toHaveLength(0)
     const edges = await db.select().from(relation).where(eq(relation.type, 'contradicts'))
     // the append-time S8 detector already records ONE contradicts edge for the pair; assert no NEW one was added
     expect(edges.length).toBe(1)
+  })
+
+  // EGR-CR-002 对抗回归（gate conflict-arbiter.ts:225 humanAdjudicateConflict）：授权读 actor.isHuman，伪装 role 越不过。
+  // agentActor('human:fake') ⇒ isHuman:false ⇒ 在任何副作用前即被拒；旧门 isHumanRole('human:fake') 会误判成人、放行裁定。
+  it('EGR-CR-002: agentActor("human:fake") is REJECTED — a forged human role cannot rule rung ① (authz reads isHuman, not the role string)', async () => {
+    const { a, b } = await aConflictPair()
+    await expect(
+      humanAdjudicateConflict(db, { a, b, winnerId: a, actor: agentActor('human:fake') }),
+    ).rejects.toThrow(/human-exclusive|not human/)
+    expect(await getResolvedConflicts(db)).toHaveLength(0) // no resolved marker
+    const edges = await db.select().from(relation).where(eq(relation.type, 'contradicts'))
+    expect(edges.length).toBe(1) // no NEW contradicts edge from the forged ruling
   })
 
   it('rung ① can pick EITHER side regardless of the machine ladder (human overrides the machine result)', async () => {
@@ -499,7 +512,7 @@ describe('S23 humanAdjudicateConflict — rung ① human ruling ON TOP of the ma
       a,
       b,
       winnerId: a,
-      by: EDITOR,
+      actor: trustedHumanActor(EDITOR),
       reason: 'A is the authoritative spec',
     })
     expect(res.outcome).toBe('resolved')
@@ -537,7 +550,12 @@ describe('S23 humanAdjudicateConflict — rung ① human ruling ON TOP of the ma
     expect(queue).toHaveLength(1)
 
     // editor takes it from the queue and rules with rung ①
-    const res = await humanAdjudicateConflict(db, { a, b, winnerId: b, by: EDITOR })
+    const res = await humanAdjudicateConflict(db, {
+      a,
+      b,
+      winnerId: b,
+      actor: trustedHumanActor(EDITOR),
+    })
     expect(res.winnerId).toBe(b)
     expect(res.rung).toBe('human')
     expect(await getResolvedConflicts(db)).toHaveLength(1)
@@ -567,7 +585,7 @@ describe('S23 humanAdjudicateConflict — rung ① human ruling ON TOP of the ma
     })
     expect((await readConflictQueueDepth(db)).value).toBe(1) // 升级后压力 = 1
 
-    await humanAdjudicateConflict(db, { a, b, winnerId: a, by: EDITOR })
+    await humanAdjudicateConflict(db, { a, b, winnerId: a, actor: trustedHumanActor(EDITOR) })
     expect((await readConflictQueueDepth(db)).value).toBe(0) // 人裁后压力归零，治理信号不再虚高
   })
 
@@ -590,7 +608,12 @@ describe('S23 humanAdjudicateConflict — rung ① human ruling ON TOP of the ma
     }
     expect(await getEditorConflictQueue(db)).toHaveLength(2)
 
-    await humanAdjudicateConflict(db, { a: p1.a, b: p1.b, winnerId: p1.a, by: EDITOR })
+    await humanAdjudicateConflict(db, {
+      a: p1.a,
+      b: p1.b,
+      winnerId: p1.a,
+      actor: trustedHumanActor(EDITOR),
+    })
     const queue = await getEditorConflictQueue(db)
     expect(queue).toHaveLength(1) // 只关 p1，p2 仍在
     const remaining = queue[0]!.payload
@@ -624,8 +647,8 @@ describe('S23 humanAdjudicateConflict — rung ① human ruling ON TOP of the ma
       [{ sourceId: sb.sourceId, locator: 'lb', relevance: 'exact' }],
     )
     // promote both to active so they are recallable
-    await approveClaim(db, a, { by: EDITOR })
-    await approveClaim(db, b, { by: EDITOR })
+    await approveClaim(db, a, { actor: trustedHumanActor(EDITOR) })
+    await approveClaim(db, b, { actor: trustedHumanActor(EDITOR) })
 
     const before = await recallClaims(db, embedder, q)
     const bothBefore = before.filter((r) => r.claim.id === a || r.claim.id === b)
@@ -637,7 +660,7 @@ describe('S23 humanAdjudicateConflict — rung ① human ruling ON TOP of the ma
     }
 
     // human rules A the winner. resolveConflict records the believed marker; status of neither claim changes (red line #2)
-    await humanAdjudicateConflict(db, { a, b, winnerId: a, by: EDITOR })
+    await humanAdjudicateConflict(db, { a, b, winnerId: a, actor: trustedHumanActor(EDITOR) })
     expect(await getClaimStatus(db, a)).toBe('active') // ruling does not relax/quarantine
     expect(await getClaimStatus(db, b)).toBe('active')
 
@@ -652,17 +675,27 @@ describe('S23 humanAdjudicateConflict — rung ① human ruling ON TOP of the ma
   it('rejects winnerId not in the pair, and self-conflict', async () => {
     const { a, b } = await aConflictPair()
     await expect(
-      humanAdjudicateConflict(db, { a, b, winnerId: randomUUID(), by: EDITOR }),
+      humanAdjudicateConflict(db, {
+        a,
+        b,
+        winnerId: randomUUID(),
+        actor: trustedHumanActor(EDITOR),
+      }),
     ).rejects.toThrow(/must be one of the conflicting pair/)
-    await expect(humanAdjudicateConflict(db, { a, b: a, winnerId: a, by: EDITOR })).rejects.toThrow(
-      /cannot conflict with itself/,
-    )
+    await expect(
+      humanAdjudicateConflict(db, { a, b: a, winnerId: a, actor: trustedHumanActor(EDITOR) }),
+    ).rejects.toThrow(/cannot conflict with itself/)
   })
 
   it('rejects a missing claim (both ends must exist)', async () => {
     const { a } = await aConflictPair()
     await expect(
-      humanAdjudicateConflict(db, { a, b: randomUUID(), winnerId: a, by: EDITOR }),
+      humanAdjudicateConflict(db, {
+        a,
+        b: randomUUID(),
+        winnerId: a,
+        actor: trustedHumanActor(EDITOR),
+      }),
     ).rejects.toThrow(/not found/)
   })
 
@@ -676,7 +709,7 @@ describe('S23 humanAdjudicateConflict — rung ① human ruling ON TOP of the ma
     const edgesBefore = (await db.select().from(relation).where(eq(relation.type, 'contradicts')))
       .length
     // human re-rules: no duplicate contradicts edge (ensureContradictsEdge is idempotent)
-    await humanAdjudicateConflict(db, { a, b, winnerId: a, by: EDITOR })
+    await humanAdjudicateConflict(db, { a, b, winnerId: a, actor: trustedHumanActor(EDITOR) })
     const edgesAfter = (await db.select().from(relation).where(eq(relation.type, 'contradicts')))
       .length
     expect(edgesAfter).toBe(edgesBefore)

@@ -20,6 +20,7 @@ import { addSource } from '../spi/append-claim.js'
 import { commitClaim } from '../spi/commit-claim.js'
 import { recallClaims } from '../spi/recall-claims.js'
 import { transitionClaim } from '../spi/transition.js'
+import { agentActor, trustedHumanActor } from '../spi/actor.js'
 import {
   adjudicate,
   deterministicVerdict,
@@ -377,7 +378,7 @@ describe('S14 commitClaim — same-fact dedup + un-inflatable f3 (A.6)', () => {
 
     // the deterministic path spent no LLM call, and recall surfaces exactly ONE claim after promotion
     expect(unrelatedJudge.callCount()).toBe(0)
-    await transitionClaim(db, first.claimId, 'active', { by: 'human:editor' })
+    await transitionClaim(db, first.claimId, 'active', { actor: trustedHumanActor('human:editor') })
     const hits = await recallClaims(db, embedder, 'sku-7 maxThroughput 500mbps')
     expect(hits).toHaveLength(1)
     expect(hits[0]!.confidence.factors.indepSupport).toBeCloseTo(0.5) // confSnapshot reflects the merged f3

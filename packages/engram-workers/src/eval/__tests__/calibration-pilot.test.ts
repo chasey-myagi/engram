@@ -205,8 +205,8 @@ describe('M2 · 校准 pilot(g 拟合闭环:接地语料 → 真 recall+usage �
       const [, , toStatus, opts] = call
       expect(toStatus).toBe('active')
       expect(opts.entailmentPass).toBe(true)
-      expect(typeof opts.by).toBe('string')
-      expect(opts.by.startsWith('human')).toBe(false) // 蓝边晋升,绝非人 Approve 旁路门
+      expect(typeof opts.actor.role).toBe('string')
+      expect(opts.actor.isHuman).toBe(false) // 蓝边晋升,绝非人 Approve 旁路门（授权认 isHuman 布尔）
     }
 
     // 不再冒用 distiller 身份:seed 出的 claim 一律 createdBy=SEED_CREATED_BY、无一为 'agent:distiller'。
