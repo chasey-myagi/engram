@@ -281,6 +281,7 @@ export {
   getKnowledgeGrewEvents,
   isMigratedOutOfL5,
   liveL5Questions,
+  runLiveL5Suite,
   type KnowledgeGrewEvent,
   type MigrateL5Options,
   type MigrateL5Result,

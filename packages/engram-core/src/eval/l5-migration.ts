@@ -18,9 +18,9 @@ import { eq } from 'drizzle-orm'
 import type { DB } from '../db/client.js'
 import type { Embedder } from '../embedding/embedder.js'
 import { knowledgeGrewEvents } from '../db/schema.js'
-import { recallClaims } from '../spi/recall-claims.js'
+import { recallClaims, type RecallContext } from '../spi/recall-claims.js'
 import { isHumanRole } from '../spi/reflux.js'
-import { L5_GAP_QUESTIONS, type L5Question } from './l5-gap.js'
+import { L5_GAP_QUESTIONS, runL5Suite, type L5Question, type L5SuiteReport } from './l5-gap.js'
 import { randomUUID } from 'node:crypto'
 
 /** knowledge_grew_events 一行的读出形状。 */
@@ -166,4 +166,20 @@ export async function liveL5Questions(
 ): Promise<L5Question[]> {
   const migrated = new Set((await getKnowledgeGrewEvents(db)).map((e) => e.l5QuestionId))
   return questions.filter((q) => !migrated.has(q.id))
+}
+
+/**
+ * **默认生产 L5 评分入口**（DB-aware）：先取**活 L5 卷**（剔除已迁出/已长出知识的题），再交给 runL5Suite 打分。
+ * 这是 runL5Suite 的默认/生产包装——把「迁出投影」接进评分分母，兑现 liveL5Questions 的 docstring 不变量
+ * 「L5 计分应跳过已迁出的题」。已迁出题不进分母 ⇒ 不会被库的正确召回误判成一次盲点失败（防指标反相关）。
+ *
+ * 显式题集入口仍走 runL5Suite(db, embedder, questions, ctx)（晋升管线/夹具测试用静态全集，不受影响）。
+ */
+export async function runLiveL5Suite(
+  db: DB,
+  embedder: Embedder,
+  ctx: RecallContext = {},
+): Promise<L5SuiteReport> {
+  const questions = await liveL5Questions(db)
+  return runL5Suite(db, embedder, questions, ctx)
 }
