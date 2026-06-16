@@ -360,7 +360,11 @@ export interface RunReport {
 /**
  * 跑一次 run：计算七维 + **append-only 落库**（每维一行 dimension_events，确定性顺序）。
  * immunity 为 null（未度量）时**不落 immunity 行**（不拿 0 冒充「免疫力为零」——区别于真有分但检出率 0）。
- * 同一 runId 重跑会再落一批新行（append-only，不覆盖）——纵向是跨 run 的多批；本函数不做去重。
+ *
+ * EGR-CR-056：runId = **一轮评测的唯一身份**（纵向 = 跨 run）。同一 runId 重跑在**落第一条之前**整体 fail-loud
+ * （查 getDimensionEvents 已有事件即抛、零半批副作用），重跑请用新 runId。这把「一个 runId 至多被本函数写一次」
+ * 焊成硬不变量——否则 CI retry / worker 重放复用 runId 会落两批互相矛盾的读数，series 出幽灵重复点、aggregate 静默
+ * last-wins。DB 层另有 (run_id, dimension) UNIQUE 作并发兜底（schema uq_dimension_events_run_dim）。
  */
 export async function runSystemDimensions(
   db: DB,
@@ -368,6 +372,15 @@ export async function runSystemDimensions(
   runId: string,
   opts: ComputeOptions = {},
 ): Promise<RunReport> {
+  // EGR-CR-056 run-identity 守门：同一 runId 重跑在**落第一条之前**整体 fail-loud（零半批副作用）。
+  // 不依赖 DB UNIQUE 触发到第 N 条才炸（那会留下半批）——写前查已有事件、非空即拒；DB 约束仅作并发兜底。
+  const existing = await getDimensionEvents(db, { runId })
+  if (existing.length > 0) {
+    throw new Error(
+      `runSystemDimensions: runId ${JSON.stringify(runId)} 已存在 ${existing.length} 条 dimension 事件——` +
+        `runId 是一轮评测的唯一身份，重跑请用新 runId（runId already has events; use a fresh runId to rerun）`,
+    )
+  }
   const dimensions = await computeSystemDimensions(db, embedder, opts)
   const createdBy = `${L3_GOLDEN_NAMESPACE}:run`
   // 维度→标量的确定性列表（immunity 仅在已度量时入列）。

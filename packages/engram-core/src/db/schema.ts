@@ -18,6 +18,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
   vector,
 } from 'drizzle-orm/pg-core'
@@ -575,7 +576,10 @@ export const dimensionEvents = pgTable(
   // 时间序列按 (dimension, created_at) 升序扫（画 ΔECE↓ / Δcoverage↑ 曲线）；按 run 取一次 run 的全维。
   (t) => [
     index('idx_dimension_events_dim_created').on(t.dimension, t.createdAt),
-    index('idx_dimension_events_run').on(t.runId),
+    // EGR-CR-056：runId = 一轮评测的唯一身份。一次 run 合法落 6/7 个**不同** dimension 行，故复合唯一
+    //（run_id, dimension）= 「同一 run 同一维度至多一行」；CI retry / worker 重放复用 runId 在 DB 层被兜底挡住，
+    // 不再静默追加第二批互相矛盾的读数（series 出幽灵重复点、aggregate 静默 last-wins）。亦兼作按 run 取全维的索引。
+    uniqueIndex('uq_dimension_events_run_dim').on(t.runId, t.dimension),
   ],
 )
 
