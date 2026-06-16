@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { eq } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -22,6 +23,7 @@ import { createDb, type DB } from '../db/client.js'
 import {
   claim,
   claimProvenance,
+  claimVerification,
   governanceState,
   standards,
   type ClaimStatus,
@@ -46,6 +48,7 @@ import {
   readFalseQuarantineRate,
   gateThresholdsFor,
   BASELINE_POLICY,
+  DEFAULT_CONTROL_CONFIG,
   type MetricReaders,
   type MetricRead,
 } from '../governance/index.js'
@@ -163,6 +166,88 @@ describe('S26 governance — metric readers fed by real SPIs', () => {
       verdict: { entailment: 'pass' },
     })
     expect((await readEntailRejectRate(db)).value).toBeCloseTo(0.5, 9) // 2 of 4 reject
+  })
+
+  // EGR-CR-047 / 维度 A：已退出治理链路的 superseded/quarantined claim 的旧 fail 裁决，
+  // 不该再计入「当前晋升压力」。修前实现只按 kind='patrol' 拉全历史、不 join claim.status，
+  // 故 2 个旧 fail 仍被算进分母分子 → 0.5（red）；修后按状态过滤排除 → 只剩 2 个 fresh pass → 0（green）。
+  it('readEntailRejectRate excludes superseded/quarantined historical bad debt (EGR-CR-047)', async () => {
+    const old1 = await seedClaim({})
+    const old2 = await seedClaim({})
+    await writePatrolVerdict(db, {
+      claimId: old1,
+      byRole: 'agent:verifier',
+      verdict: { entailment: 'fail' },
+    })
+    await writePatrolVerdict(db, {
+      claimId: old2,
+      byRole: 'agent:verifier',
+      verdict: { entailment: 'fail' },
+    })
+    // 把两条旧 fail 的 claim 下线（退出可治理/可消费链路）。对齐 readFalseQuarantineRate 测试直接置 status 的做法。
+    await db.update(claim).set({ status: 'superseded' }).where(eq(claim.id, old1))
+    await db.update(claim).set({ status: 'quarantined' }).where(eq(claim.id, old2))
+
+    const fresh1 = await seedClaim({})
+    const fresh2 = await seedClaim({})
+    await writePatrolVerdict(db, {
+      claimId: fresh1,
+      byRole: 'agent:verifier',
+      verdict: { entailment: 'pass' },
+    })
+    await writePatrolVerdict(db, {
+      claimId: fresh2,
+      byRole: 'agent:verifier',
+      verdict: { entailment: 'pass' },
+    })
+
+    // red：修前 2 旧 fail 计入 → 2/4 = 0.5；green：状态过滤后只剩 2 fresh pass → 0。
+    expect((await readEntailRejectRate(db)).value).toBe(0)
+  })
+
+  // EGR-CR-047 / 维度 B：仍 active 的 claim，其窗口外的陈年裁决应随时间窗滚出统计。
+  // 这里构造该 active claim 唯一一条裁决是「窗口之前」的 fail：修前按全历史计入 → 拒绝率 1.0（red）；
+  // 修后被时间窗过滤排除 → 无窗口内裁决 → 中性 0（green）。
+  it('readEntailRejectRate ages out a stale verdict that falls outside the time window (EGR-CR-047)', async () => {
+    const c = await seedClaim({ status: 'active' })
+    // 显式落一条窗口外（窗口长度 + 1 天之前）的旧 fail，绕过 defaultNow()。
+    const windowMs = DEFAULT_CONTROL_CONFIG.entailWindowSeconds * 1000
+    const wellOutside = new Date(Date.now() - windowMs - 24 * 3600 * 1000)
+    await db.insert(claimVerification).values({
+      id: randomUUID(),
+      claimId: c,
+      kind: 'patrol',
+      verdict: { entailment: 'fail' },
+      byRole: 'agent:verifier',
+      createdAt: wellOutside,
+    })
+
+    // red：修前按全历史 → c 唯一裁决是 fail → 1/1 = 1.0；green：窗口外被过滤 → 无近期裁决 → 0。
+    expect((await readEntailRejectRate(db)).value).toBe(0)
+  })
+
+  // EGR-CR-047 / 降级语义：窗口/状态过滤后无任何近期可治理 patrol → 中性 0（silent-safe，不凭空收紧）。
+  it('readEntailRejectRate returns neutral 0 when no in-window governable patrol remains (EGR-CR-047)', async () => {
+    // 仅 seed「窗口外」与「已 superseded」的 fail——可治理 + 窗口内集合为空。
+    const aged = await seedClaim({ status: 'active' })
+    const windowMs = DEFAULT_CONTROL_CONFIG.entailWindowSeconds * 1000
+    await db.insert(claimVerification).values({
+      id: randomUUID(),
+      claimId: aged,
+      kind: 'patrol',
+      verdict: { entailment: 'fail' },
+      byRole: 'agent:verifier',
+      createdAt: new Date(Date.now() - windowMs - 24 * 3600 * 1000),
+    })
+    const gone = await seedClaim({})
+    await writePatrolVerdict(db, {
+      claimId: gone,
+      byRole: 'agent:verifier',
+      verdict: { entailment: 'fail' },
+    })
+    await db.update(claim).set({ status: 'superseded' }).where(eq(claim.id, gone))
+
+    expect((await readEntailRejectRate(db)).value).toBe(0)
   })
 
   it('readConflictQueueDepth counts escalated conflicts in the editor queue', async () => {
