@@ -64,6 +64,13 @@ export const L3_GOLDEN_NAMESPACE = 'eval:l3-golden' as const
 /**
  * 冻结的 L3 系统 golden 题集（领域无关）。每题给出期望命中的 claim 文本——被测库须靠自养 claim 答对。
  * 冻结（Object.freeze）防运行期被改：golden 一旦立即固定（同卷复考的锚）。
+ *
+ * **口径裁定（EGR-CR-016 / Part B-1）**：这是一个**行为 fixture（behavior fixture）**，**不是 A1 golden question**。
+ * 它**不经过、也不要求** A1 晋升审计（`golden_questions` / `promotion_audit`），更不接 L5 的迁移/晋升投影
+ * （`liveL5Questions` / `knowledge_grew_events`）。它的角色是「跨 release 同题、同维定义、可比」的纵向锚（S30/S31），
+ * 不承担 A1「人确认 + append-only 授权」那套反 Goodhart 语义。`computeSystemDimensions` / `runRecompeteSnapshot`
+ * 默认消费它是**有意的**：它们衡量的是系统维度（ECE/coverage）的纵向曲线，而非 A1 盲点诚实率。
+ * 如将来需要让 L3 默认卷可追溯到 A1 audit，那是 Part B-2 的独立改动（DB-aware 默认卷），需另行裁决，不在本常量语义内。
  */
 export const L3_GOLDEN: readonly SystemGoldenItem[] = Object.freeze(
   [

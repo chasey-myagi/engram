@@ -18,6 +18,7 @@ import {
   isMigratedOutOfL5,
   liveL5Questions,
   migrateL5IfGrew,
+  runLiveL5Suite,
 } from '../eval/l5-migration.js'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
@@ -162,5 +163,47 @@ describe('S31 L5 → spine migration ("knowledge grew")', () => {
         releaseSnapshot: 'r',
       }),
     ).rejects.toThrow(/not a frozen L5 gap question/)
+  })
+})
+
+describe('EGR-CR-016 · runLiveL5Suite (default L5 scoring consumes the migration projection)', () => {
+  // Test 1 (core, EGR ledger Regression Test Map 1427): a migrated-out L5 question must NOT be
+  // counted in the default production scoring denominator — it is no longer a blind spot.
+  it('a migrated-out L5 question is dropped from the default suite denominator (not scored as a blind-spot failure)', async () => {
+    // setup: Q0 starts as a real blind spot (empty KB ⇒ zero recall)
+    expect(await recallClaims(db, embedder, Q0.query)).toHaveLength(0)
+    // KB grows its own answer ⇒ Q0 becomes answerable (recall ≥ 1)
+    await answerL5(Q0.query)
+    expect((await recallClaims(db, embedder, Q0.query)).length).toBeGreaterThanOrEqual(1)
+    // migrate Q0 out of L5 (recall ≥ 1 + human-confirmed)
+    const mig = await migrateL5IfGrew(db, embedder, Q0.id, {
+      confirmedBy: 'human:editor',
+      releaseSnapshot: 'r',
+    })
+    expect(mig.migrated).toBe(true)
+
+    // run the DEFAULT production entry — it must consume the migration projection.
+    const report = await runLiveL5Suite(db, embedder)
+
+    // CORE regression guard: the migrated-out question is no longer in the live set ⇒ the
+    // denominator shrinks by exactly one, and Q0 never appears in the results — so it CANNOT be
+    // counted as a blind-spot failure. Pre-fix (old runL5Suite default) total would be the full
+    // length and Q0 would land with correct=false in the denominator → these two assertions fail.
+    expect(report.total).toBe(L5_GAP_QUESTIONS.length - 1)
+    expect(report.results.every((r) => r.question.id !== Q0.id)).toBe(true)
+
+    // guard against the wrong "physically delete the fixture" fix: the frozen fixture is untouched
+    // (migration is a logical projection, not destructive — aligns with the liveL5Questions test).
+    expect(L5_GAP_QUESTIONS.some((q) => q.id === Q0.id)).toBe(true)
+  })
+
+  // Test 2: with no migrations, the default live entry is equivalent to the full frozen suite
+  // (baseline preserved — guards Part A against breaking the "no migration ⇒ live == full" invariant).
+  it('with no migrations, the default suite runs the full frozen set (live == full, blind-spot score = 1)', async () => {
+    // beforeEach TRUNCATEs knowledge_grew_events ⇒ no migrations
+    const report = await runLiveL5Suite(db, embedder)
+    expect(report.total).toBe(L5_GAP_QUESTIONS.length)
+    expect(report.correct).toBe(report.total)
+    expect(report.blindSpotScore).toBe(1)
   })
 })
