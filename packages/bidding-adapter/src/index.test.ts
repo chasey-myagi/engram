@@ -11,6 +11,8 @@ import {
   createDb,
   recallClaims,
   schema,
+  trustedHumanActor,
+  updateSourceMetadata,
   type DB,
   makeFakeEmbedder,
   type RecallResult,
@@ -285,5 +287,42 @@ describe('bidding-adapter DB integration — business identity via recall-result
     for (const r of tightened) {
       expect(r.confidence.value).toBeLessThanOrEqual(gConf.get(r.claim.id)! + 1e-9) // tightening upheld
     }
+  })
+
+  // EGR-CR-011 (T3) 端到端业务影响：一条 claim 的唯一出处是「本应官方、但首写为裸 source（缺 source_type）」，
+  //   其 g-conf 落在 [0.4, 0.5)（0.8 折后跌破 floor 0.4 被丢弃）。富集前该 claim 在 biddingTighten 结果里消失（复现危害）；
+  //   经 updateSourceMetadata 补上 official_datasheet 后，再跑 biddingTighten 该 claim 回到结果集、且 conf 不打折（factor=1）。
+  it('a bare source locks the wrong identity and drops the claim; enrichment via updateSourceMetadata restores it to recall', async () => {
+    // 首写为裸 source：无 source_type（official 业务身份缺失）。
+    const bare = await addSource(db, {
+      content: 'official datasheet, bare ingest',
+      kind: 'formal_document',
+    })
+    expect(bare.metadataConflict).toBe(false) // 新建，无冲突
+    const RAW = 0.45 // ∈ [0.4, 0.5)：official(factor 1) → 0.45 留；非官方(0.8 折) → 0.36 < 0.4 floor → 丢。
+    const claimId = await seedActiveClaim('bidding spec near floor', bare.sourceId, RAW)
+
+    // 富集前：recall 带回的 sourceMeta 无 source_type → adapter 当非官方 0.8 折 → 0.36 < 0.4 → 被 filter 丢弃。
+    const kernelBefore = await recallClaims(db, embedder, 'bidding spec')
+    expect(
+      new Map(kernelBefore.map((r) => [r.claim.id, r.confidence.value])).get(claimId),
+    ).toBeCloseTo(RAW)
+    const tightenedBefore = biddingTighten(kernelBefore)
+    expect(tightenedBefore.some((r) => r.claim.id === claimId)).toBe(false) // 危害复现：claim 在召回里消失
+
+    // 富集：人显式补上 official_datasheet（updateSourceMetadata 写 live source.meta + 审计）。
+    await updateSourceMetadata(db, {
+      sourceId: bare.sourceId,
+      meta: { source_type: OFFICIAL_DATASHEET },
+      actor: trustedHumanActor('human:ops'),
+      reason: 'enrich bare official source',
+    })
+
+    // 富集后：recall 此刻带回 source_type=official → adapter 不打折(factor 1) → 0.45 ≥ 0.4 → claim 回到结果集。
+    const kernelAfter = await recallClaims(db, embedder, 'bidding spec')
+    const tightenedAfter = biddingTighten(kernelAfter)
+    const restored = tightenedAfter.find((r) => r.claim.id === claimId)
+    expect(restored).toBeDefined() // claim 恢复
+    expect(restored!.confidence.value).toBeCloseTo(RAW) // official 不打折 → 等于原 g-conf
   })
 })

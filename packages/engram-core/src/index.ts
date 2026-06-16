@@ -16,10 +16,17 @@ export {
   supersedeClaim,
   computeConfidenceFromProvenances,
   type SourceInput,
+  type AddSourceResult,
   type DraftClaim,
   type ProvenanceInput,
   type ProvenanceRef,
 } from './spi/append-claim.js'
+export {
+  updateSourceMetadata,
+  annotateSourceAuthority,
+  getSourceMetadataEvents,
+  type SourceMetadataEvent,
+} from './spi/source-metadata.js'
 export {
   recallClaims,
   KERNEL_CONFIDENCE_FLOOR,

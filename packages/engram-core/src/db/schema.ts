@@ -773,6 +773,49 @@ export const workerFailure = pgTable(
   (t) => [index('idx_worker_failure_worker_created').on(t.workerName, t.createdAt)],
 )
 
+/**
+ * source_metadata_events：source **业务身份/权威治理**的 append-only 审计脊柱（EGR-CR-011）。
+ *
+ * 背景：`source.content`/`content_hash` 是**不可变原文**（去重锚点，addSource 撞号 first-writer-wins 永不覆盖）；
+ * 但 `source.meta`（领域身份注入口）/`authority_score`（消费方可覆盖）是与 content **正交、可后续演进**的维度。
+ * 「先裸 ingest 原文、后富集业务身份」是常规接入顺序——撞 hash 时第二次带的官方 meta 若被静默丢弃，下游 adapter
+ * 会把真实官方源永久当非官方打折、折后跌破消费下界丢弃其 claim。故业务身份/权威**不**借 content-hash 去重路径
+ * 偷偷改（任意写者借同 content 改别人官方身份 = 绕授权），而走**显式、留痕、人授权**的富集 SPI（source-metadata.ts）。
+ *
+ * 一行 = 一次对某 source 的业务身份/权威的治理改动：field('meta'|'authority_score') + before/after 值快照 +
+ * by_role（人审计身份）+ reason + 落库时刻。**绝不删改历史行**（append-only，再 update 只追新行）。
+ *
+ * 为何独立新表而非往 metrics_events 加 kind：metrics_event_kind 是**冻结枚举**（红线#4），加值即违红线；
+ * 沿 dimension_events / knowledge_grew_events 的「独立 append-only 事件表 + text 标签」式样，零触碰冻结枚举。
+ * **只人能富集**（富集 SPI 的 actor.isHuman 受信门，EGR-CR-002 同款）—— by_role 落 actor.role 仅审计。
+ */
+export const sourceMetadataEvents = pgTable(
+  'source_metadata_events',
+  {
+    id: uuid('id').primaryKey(),
+    // 被治理的 source（FK；源不存在则富集 SPI 直接拒，不留空审计）。
+    sourceId: uuid('source_id')
+      .notNull()
+      .references(() => source.id),
+    // 改的哪个治理字段：'meta' | 'authority_score'（纯文本标签 + check 守白名单；内核不解释语义）。
+    field: text('field').notNull(),
+    // 改前 / 改后的值快照（jsonb，meta 整体或 authority_score 数字都能装；before 首次富集为该字段旧值）。
+    before: jsonb('before'),
+    after: jsonb('after').notNull(),
+    // 富集者（须 'human…'：业务身份补标是人的治理裁断，与 markSourceHumanPending 同款 by_role 审计）。
+    byRole: text('by_role').notNull(),
+    // 富集理由（运维事后回溯「为什么这条源的身份被改」的可读证据）。
+    reason: text('reason').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // 按 source + 时间升序读出一条源的治理史（before/after 链）。
+    index('idx_source_metadata_events_source_created').on(t.sourceId, t.createdAt),
+    // 两个治理字段是语义不变量，DB 层挡绕过 SPI 的 plain SQL 写未知 field（与 redteam_class check 同款轻量守白名单）。
+    check('source_metadata_events_field_check', sql`${t.field} IN ('meta', 'authority_score')`),
+  ],
+)
+
 export type SourceKind = (typeof sourceKind.enumValues)[number]
 export type ClaimStatus = (typeof claimStatus.enumValues)[number]
 export type RelationType = (typeof relationType.enumValues)[number]

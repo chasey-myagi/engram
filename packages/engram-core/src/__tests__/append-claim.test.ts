@@ -172,20 +172,14 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
     expect(await db.select().from(source)).toHaveLength(2) // 仍只有 2 行：c 折叠到 a。
   })
 
-  // EGR-CR-012 防过度修正：真正同 content 的重复摄入仍幂等（first-writer-wins，撞号不覆盖既有 meta/kind/authority）。
-  //   修复堵的是「不同 content 静默复用」，而非把幂等去重一并打死。
-  it('EGR-CR-012: re-ingesting byte-identical content is idempotent and first-writer-wins (does not overwrite the existing row)', async () => {
-    const meta = {
-      domain: 'bidding',
-      source_type: 'official_datasheet',
-      product_id: 'SKU-123',
-      nested: { axes: [1, 2, 3], ok: true },
-    }
+  // EGR-CR-012 防过度修正 / EGR-CR-011 (T4a)：真正同 content 的重复摄入仍幂等去重，**原文锚点（content）不可变**
+  //   —— 撞号既有行的 content 永不被第二次写入覆盖（first-writer-wins 对 immutable raw 仍成立），且仍只 1 行。
+  it('EGR-CR-012/011: re-ingesting byte-identical content is idempotent — the immutable raw row is never overwritten', async () => {
     const a = await addSource(db, {
       content: 'identical body',
       kind: 'formal_document',
       authorityScore: 0.9,
-      meta,
+      meta: { source_type: 'official_datasheet' },
     })
     const b = await addSource(db, {
       content: 'identical body', // 同 content ⇒ 内核自算同 hash ⇒ 撞号幂等。
@@ -196,11 +190,63 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
     expect(b.sourceId).toBe(a.sourceId) // second insert deduped to the same row
     const rows = await db.select().from(source).where(eq(source.id, a.sourceId))
     expect(rows).toHaveLength(1)
-    // the conflicting second write must NOT overwrite the existing row's fields
+    // 不可变原文：既有行的 content 永不被覆盖（去重正确性锚点）。kind/authority/meta 也不覆盖——
+    //   但**不再**靠静默吞掉来「保护」：业务身份/权威的撞号语义由 EGR-CR-011 fail-loud（见下条）显式暴露。
     expect(rows[0]!.content).toBe('identical body')
-    expect(rows[0]!.kind).toBe('formal_document')
-    expect(rows[0]!.authorityScore).toBe(0.9)
-    expect(rows[0]!.meta).toEqual(meta)
+  })
+
+  // EGR-CR-011 (T1/T4b) 根治断言：撞 content_hash 且本次带的 meta/authority/kind 与既有不一致时，addSource
+  //   **fail-loud** 返回 metadataConflict===true（不再静默吞掉第二次的官方 meta），同时 deduped===true、复用既有 id、
+  //   原文行不被覆盖、仍 1 行。这条断言**替换**掉旧版「静默复用旧 bare row 且无任何信号」的危险背书。
+  it('EGR-CR-011: addSource on a content_hash collision with diverging meta/authority/kind is fail-loud (metadataConflict)', async () => {
+    // 先裸写：无 source_type、authorityScore 取默认 0.5。
+    const bare = await addSource(db, {
+      content: 'raw datasheet body',
+      kind: 'external_feed',
+    })
+    expect(bare.deduped).toBe(false)
+    expect(bare.metadataConflict).toBe(false) // 新建无冲突
+
+    // 同 content 二次写：带官方 meta + 更高权威 + 不同 kind ⇒ 业务身份/权威与既有不一致。
+    const enriched = await addSource(db, {
+      content: 'raw datasheet body',
+      kind: 'formal_document',
+      authorityScore: 0.9,
+      meta: { source_type: 'official_datasheet' },
+    })
+    expect(enriched.sourceId).toBe(bare.sourceId) // 复用同一行
+    expect(enriched.deduped).toBe(true)
+    expect(enriched.metadataConflict).toBe(true) // ★ 不再静默丢弃——显式回告调用方「你这次带的业务身份被丢了」
+
+    // DB 中该 hash 仍仅 1 行，content 仍是原文（原文不可变正确性保留），且既有 meta/authority/kind 未被第二次覆盖。
+    const rows = await db.select().from(source).where(eq(source.id, bare.sourceId))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.content).toBe('raw datasheet body')
+    expect(rows[0]!.meta).toEqual({}) // 首写未带 meta；第二次的官方 meta 未偷偷写进来（走富集 SPI 才行）
+    expect(rows[0]!.authorityScore).toBe(0.5)
+    expect(rows[0]!.kind).toBe('external_feed')
+  })
+
+  // EGR-CR-011：撞号但本次带的 meta/authority/kind 与既有**完全一致**时，不算冲突（纯幂等重摄入，metadataConflict===false）。
+  //   证明 fail-loud 只对「真冲突」响，不把无害的重复摄入也误报成冲突（防过度修正）。
+  it('EGR-CR-011: idempotent re-ingest with identical meta/authority/kind reports no metadataConflict', async () => {
+    const meta = { source_type: 'official_datasheet', nested: { axes: [1, 2, 3], ok: true } }
+    const a = await addSource(db, {
+      content: 'same body',
+      kind: 'formal_document',
+      authorityScore: 0.9,
+      meta,
+    })
+    // 同 content + 同 kind + 同 authority + key 序不同但语义相同的 meta ⇒ 无冲突。
+    const b = await addSource(db, {
+      content: 'same body',
+      kind: 'formal_document',
+      authorityScore: 0.9,
+      meta: { nested: { ok: true, axes: [1, 2, 3] }, source_type: 'official_datasheet' },
+    })
+    expect(b.sourceId).toBe(a.sourceId)
+    expect(b.deduped).toBe(true)
+    expect(b.metadataConflict).toBe(false) // 语义一致 ⇒ 非冲突
   })
 
   // EGR-CR-012 独立性判定被顺带修正（方案 A）：两条 content 不同但同述一事实的 supports 源算「独立印证」（indepSupport=2 → 0.5）；
