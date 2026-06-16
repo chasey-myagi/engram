@@ -293,8 +293,137 @@ describe('S30 L3 system dimensions (substrate-ready 7) — append-only events th
       detected: 9,
     })
     const dims = await computeSystemDimensions(db, embedder)
+    // false and contradiction are DISTINCT (generation, class) keys, each with a single row, so
+    // latest-per-key leaves both in the pool: (7+9)/(10+10). Result unchanged under the new caliber.
     expect(dims.immunity).toBeCloseTo(16 / 20, 10) // (7+9)/(10+10) — aggregated detection rate from the substrate
-    expect(dims.diagnostics.immunity).toEqual({ scoreRows: 2, injected: 20, detected: 16 })
+    // scoreRows = number of (generation, class) keys that fed the aggregate (= 2 here); no stale rows discarded.
+    expect(dims.diagnostics.immunity).toEqual({
+      scoreRows: 2,
+      injected: 20,
+      detected: 16,
+      discardedStaleRows: 0,
+    })
+  })
+
+  it('EGR-CR-052: rescoring the SAME (generation, class) takes ONLY the latest row — stale rows do not dilute immunity', async () => {
+    await freezeRedTeamGeneration(db, {
+      version: 'rt-rescore',
+      items: [
+        {
+          id: 'i1',
+          redteamClass: 'false',
+          claimText: 'x',
+          evidence: 'y',
+          sourceKind: 'external_feed',
+        },
+      ],
+      reason: 'rescore test',
+    })
+    // same (generation, class): first 10/10, then a fix-regression re-score back to 0/10 (latest = current state)
+    await recordImmunityScore(db, {
+      generationVersion: 'rt-rescore',
+      redteamClass: 'false',
+      injected: 10,
+      detected: 10,
+    })
+    await recordImmunityScore(db, {
+      generationVersion: 'rt-rescore',
+      redteamClass: 'false',
+      injected: 10,
+      detected: 0,
+    })
+    const dims = await computeSystemDimensions(db, embedder, { immunityGeneration: 'rt-rescore' })
+    // reflects the LATEST 0/10, NOT the historical mean (10+0)/(10+10) = 0.5
+    expect(dims.immunity).toBeCloseTo(0, 10)
+    // diagnostics count ONLY the latest row (injected:10, not 20), and report the discarded stale row.
+    expect(dims.diagnostics.immunity).toMatchObject({ injected: 10, detected: 0 })
+    expect(dims.diagnostics.immunity!.scoreRows).toBe(1) // one participating (generation, class) key
+    expect(dims.diagnostics.immunity!.discardedStaleRows).toBe(1) // one older re-score row dropped
+  })
+
+  it('EGR-CR-052: the reverse case (bad → good) is not under-counted — latest 10/10 reads as 1, not the 0.5 mean', async () => {
+    await freezeRedTeamGeneration(db, {
+      version: 'rt-fixed',
+      items: [
+        {
+          id: 'i1',
+          redteamClass: 'false',
+          claimText: 'x',
+          evidence: 'y',
+          sourceKind: 'external_feed',
+        },
+      ],
+      reason: 'fix-then-rescore test',
+    })
+    // same (generation, class): first 0/10 (broken), then a fix re-score to 10/10 (latest = current state)
+    await recordImmunityScore(db, {
+      generationVersion: 'rt-fixed',
+      redteamClass: 'false',
+      injected: 10,
+      detected: 0,
+    })
+    await recordImmunityScore(db, {
+      generationVersion: 'rt-fixed',
+      redteamClass: 'false',
+      injected: 10,
+      detected: 10,
+    })
+    const dims = await computeSystemDimensions(db, embedder, { immunityGeneration: 'rt-fixed' })
+    // reflects the LATEST 10/10 = 1, NOT the historical mean (0+10)/(10+10) = 0.5
+    expect(dims.immunity).toBeCloseTo(1, 10)
+    expect(dims.diagnostics.immunity).toMatchObject({
+      injected: 10,
+      detected: 10,
+      discardedStaleRows: 1,
+    })
+  })
+
+  it('EGR-CR-052: latest is taken PER (generation, class) key, not one-row-for-the-whole-table', async () => {
+    // The frozen items list is FK'd only by generationVersion — immunity scores reference the generation,
+    // not individual item classes (cf. the existing test at :270 records a contradiction score against a
+    // generation that only froze a single `false` item). So a single valid `false` item suffices here.
+    await freezeRedTeamGeneration(db, {
+      version: 'rt-multi',
+      items: [
+        {
+          id: 'i1',
+          redteamClass: 'false',
+          claimText: 'x',
+          evidence: 'y',
+          sourceKind: 'external_feed',
+        },
+      ],
+      reason: 'multi-class latest-per-key test',
+    })
+    // false rescored twice (10/10 then 0/10); contradiction scored once (9/10)
+    await recordImmunityScore(db, {
+      generationVersion: 'rt-multi',
+      redteamClass: 'false',
+      injected: 10,
+      detected: 10,
+    })
+    await recordImmunityScore(db, {
+      generationVersion: 'rt-multi',
+      redteamClass: 'false',
+      injected: 10,
+      detected: 0,
+    })
+    await recordImmunityScore(db, {
+      generationVersion: 'rt-multi',
+      redteamClass: 'contradiction',
+      injected: 10,
+      detected: 9,
+    })
+    const dims = await computeSystemDimensions(db, embedder, { immunityGeneration: 'rt-multi' })
+    // per-key latest sum: (latest false 0 + contradiction 9) / (10 + 10) = 9/20.
+    // NOT whole-table-last-row (would drop contradiction), NOT full-history-sum (would be (10+0+9)/30 = 19/30).
+    expect(dims.immunity).toBeCloseTo(9 / 20, 10)
+    expect(dims.diagnostics.immunity).toMatchObject({
+      scoreRows: 2, // two participating keys: false + contradiction
+      injected: 20,
+      detected: 9,
+      discardedStaleRows: 1, // the older false 10/10 row
+    })
   })
 
   it('A3: the immunity dimension is reported only — its value never enters ECE/calibration', async () => {
