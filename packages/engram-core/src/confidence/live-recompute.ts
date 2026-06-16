@@ -22,7 +22,7 @@ import {
   type StoredConfidence,
 } from './confidence.js'
 import { loadCalibrationMaps } from '../calibration/calibration-store.js'
-import type { DB } from '../db/client.js'
+import type { DB, Tx } from '../db/client.js'
 import { claim, relation } from '../db/schema.js'
 import { latestEntailmentFactors } from '../verifier/patrol-verdict.js'
 import { latestUsageCorrectFactors } from '../harvest/usage-correct.js'
@@ -60,7 +60,7 @@ export interface LiveConfidence {
  * 返回 Map<claimId, Set<对端id>>。自指边（from===to）跳过（写路径已挡，直插库兜底）；relation.to_claim 为空的半边跳过。
  */
 export async function liveContradictsByClaim(
-  db: DB,
+  db: DB | Tx,
   candidateIds: string[],
 ): Promise<Map<string, Set<string>>> {
   const byClaim = new Map<string, Set<string>>()

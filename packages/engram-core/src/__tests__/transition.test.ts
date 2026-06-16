@@ -10,7 +10,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { CALIBRATION_IDENTITY, DEFAULT_WEIGHTS } from '../confidence/confidence.js'
 import { createDb, type DB } from '../db/client.js'
 import { makeFakeEmbedder } from '../embedding/fake-embedder.js'
-import { claim, claimProvenance, relation, type ClaimStatus } from '../db/schema.js'
+import {
+  claim,
+  claimProvenance,
+  claimVerification,
+  relation,
+  type ClaimStatus,
+} from '../db/schema.js'
 import { addSource, supersedeClaim } from '../spi/append-claim.js'
 import { recallClaims } from '../spi/recall-claims.js'
 import { transitionClaim } from '../spi/transition.js'
@@ -392,5 +398,91 @@ describe('S13 claim state machine (A.4): blue tightens only, red relaxes, lineag
     await expect(transitionClaim(db, randomUUID(), 'active', { by: 'human:j' })).rejects.toThrow(
       /not found/,
     )
+  })
+
+  // EGR-CR-025: draft→active (agent promote) must recompute conf with the LIVE active-conflictDecay (same gauge as
+  // recall), not the archival snapshot (new drafts seed conflictDecay=1). A draft whose bare base ≥0.5 but whose
+  // live conf drops <0.5 once an active contradicts edge exists must stay draft. Human Approve still bypasses.
+  describe('EGR-CR-025 — promote gate honours the live active-conflictDecay (parity with recall)', () => {
+    // base under DEFAULT_WEIGHTS with the gate's live overrides (humanReview→0 no review, entailment→1 patrol pass):
+    //   0.3·1(auth) + 0.3·0(hr) + 0.15·1(entail) + 0.15·0.75(indep) + 0.1·0(usage) = 0.5625  (≥0.5 with NO conflict)
+    // one active contradicts edge ⇒ conflictDecay = 1/(1+0.5·1) = 0.6667 ⇒ conf = 0.5625·0.6667 ≈ 0.375 (<0.5)
+    const CONFLICT_BASE = {
+      authority: 1,
+      humanReview: 0,
+      entailment: 1,
+      indepSupport: 0.75,
+      usageCorrect: 0,
+    }
+
+    // The gate reads f2 from the latest patrol verdict (no patrol row ⇒ neutral 0.5 would overwrite seed entailment).
+    // Seed a {entailment:'pass'} patrol row so live-f2=1, matching the production path (Verifier writes patrol then promotes).
+    async function seedPatrolPass(claimId: string) {
+      await db.insert(claimVerification).values({
+        id: randomUUID(),
+        claimId,
+        kind: 'patrol',
+        verdict: { entailment: 'pass' },
+        byRole: 'agent:verifier',
+      })
+    }
+
+    it('agent promote of a draft with an ACTIVE contradicts edge is blocked (live conf<0.5) — stays draft', async () => {
+      const peer = await seedClaim({ query: 'active peer', status: 'active', profile: HIGH })
+      const draft = await seedClaim({
+        query: 'contradicting draft',
+        status: 'draft',
+        profile: CONFLICT_BASE,
+      })
+      await seedPatrolPass(draft)
+      // a live contradicts edge to an ACTIVE peer ⇒ activeContradicts=1 ⇒ conflictDecay pulls conf below the floor
+      await db
+        .insert(relation)
+        .values({ id: randomUUID(), fromClaim: draft, toClaim: peer, type: 'contradicts' })
+
+      // red (pre-fix): gate used archival conflictDecay=1 ⇒ conf 0.5625≥0.5 ⇒ promoted (assertion fails)
+      // green (post-fix): live conflictDecay 0.6667 ⇒ conf ≈0.375 <0.5 ⇒ thrown, stays draft
+      await expect(
+        transitionClaim(db, draft, 'active', { by: 'agent:verifier', entailmentPass: true }),
+      ).rejects.toThrow(/conf .* < 0\.5/)
+      expect(await statusOf(draft)).toBe('draft')
+    })
+
+    it('control — same factor profile WITHOUT a contradicts edge still promotes (fix does not break clean promotion)', async () => {
+      const draft = await seedClaim({
+        query: 'clean draft',
+        status: 'draft',
+        profile: CONFLICT_BASE,
+      })
+      await seedPatrolPass(draft)
+      // no contradicts edge ⇒ live conflictDecay=1 ⇒ conf 0.5625 ≥ 0.5 ⇒ promotes
+      const res = await transitionClaim(db, draft, 'active', {
+        by: 'agent:verifier',
+        entailmentPass: true,
+      })
+      expect(res).toEqual({ from: 'draft', to: 'active' })
+      expect(await statusOf(draft)).toBe('active')
+    })
+
+    it('human Approve still bypasses the gate for a sub-0.5 (live) contradicting draft (red line #2 intact)', async () => {
+      const peer = await seedClaim({ query: 'active peer 2', status: 'active', profile: HIGH })
+      const draft = await seedClaim({
+        query: 'human-approved contradicting draft',
+        status: 'draft',
+        profile: CONFLICT_BASE,
+      })
+      await seedPatrolPass(draft)
+      await db
+        .insert(relation)
+        .values({ id: randomUUID(), fromClaim: draft, toClaim: peer, type: 'contradicts' })
+
+      // human relaxation does not run the conf/conflictDecay gate — Approve promotes regardless
+      const res = await transitionClaim(db, draft, 'active', {
+        by: 'human:editor',
+        entailmentPass: false,
+      })
+      expect(res.to).toBe('active')
+      expect(await statusOf(draft)).toBe('active')
+    })
   })
 })
