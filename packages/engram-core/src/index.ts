@@ -70,6 +70,7 @@ export {
   loadCalibrationMaps,
   getCalibrationHistory,
   StaleActiveCalibrationError,
+  CalibrationVersionRedefineError,
   type CommitCalibrationInput,
   type CalibrationMapRow,
 } from './calibration/calibration-store.js'
