@@ -449,6 +449,170 @@ async function seedGateTighteningPressure(): Promise<void> {
   }
 }
 
+describe('S26 governance — rollbackTo restores the ACTIVE consume gate, not just the policy row (EGR-CR-021)', () => {
+  it('rollback to a baseline policy synchronously rolls the standards gate back to the target thresholds', async () => {
+    // baseline: 一行 promotionGateLevel:0 的 BASELINE 版本，作为回滚锚点。
+    const baseline = await writeGovernanceState(db, {
+      policy: BASELINE_POLICY,
+      metrics: {
+        distillBacklog: 0,
+        entailRejectRate: 0,
+        conflictQueueDepth: 0,
+        immuneLag: 0,
+        falseQuarantineRate: 0,
+      },
+      reason: 'baseline',
+    })
+    // 抬门前：活动门 = 内核基线（standards 表此刻为空 → DEFAULT_STANDARDS）。
+    const before = await getActiveStandards(db)
+    expect(before.consumeFloor).toBe(KERNEL_CONFIDENCE_FLOOR)
+    expect(before.mustVerifyThreshold).toBe(MUST_VERIFY_THRESHOLD)
+
+    // 一轮治理周期把门真抬上去（同时写 standards 表 + policy 表）。
+    await seedGateTighteningPressure()
+    const cycle = await runGovernanceCycle(db)
+    expect(cycle.ran).toBe(true)
+    expect(cycle.raisedGate).toBe(true)
+    const raised = await getActiveStandards(db)
+    expect(raised.consumeFloor).toBeGreaterThan(KERNEL_CONFIDENCE_FLOOR) // 门确已抬高、已写入 standards 表
+
+    // 回滚到 baseline policy。
+    const rolled = await rollbackTo(db, baseline.id, 'human:editor')
+    // 控制面：policy 回到 baseline（沿用现测式样）。
+    expect(rolled.policy.promotionGateLevel).toBe(0)
+    expect((await getActivePolicy(db)).promotionGateLevel).toBe(0)
+
+    // 关键新断言（修前必失败）：生效门同步回到目标 = 内核基线。
+    const after = await getActiveStandards(db)
+    expect(after.consumeFloor).toBe(KERNEL_CONFIDENCE_FLOOR)
+    expect(after.mustVerifyThreshold).toBe(MUST_VERIFY_THRESHOLD)
+    // 联动回写复用当前活动权重（rollback 只动门、不碰权重）。
+    expect(after.factorWeights).toEqual(raised.factorWeights)
+  })
+
+  it('behavior-level: after rollback, recall re-admits a claim that the raised floor had excluded, with mustVerify recomputed off the rolled-back threshold', async () => {
+    const baseline = await writeGovernanceState(db, {
+      policy: BASELINE_POLICY,
+      metrics: {
+        distillBacklog: 0,
+        entailRejectRate: 0,
+        conflictQueueDepth: 0,
+        immuneLag: 0,
+        falseQuarantineRate: 0,
+      },
+      reason: 'baseline',
+    })
+
+    // 一条 value=0.525 的 active claim（DEFAULT 权重下 authority 1 / entailment .5 / indepSupport 1 → 0.525）。
+    const id = randomUUID()
+    await db.insert(claim).values({
+      id,
+      claimText: 'engram rollback re-admits this claim',
+      status: 'active',
+      confidence: 0,
+      confidenceRaw: 0,
+      confidenceFactors: {
+        factors: {
+          authority: 1,
+          humanReview: 0,
+          entailment: 0.5,
+          indepSupport: 1,
+          usageCorrect: 0,
+          ageDays: 0,
+          activeContradicts: 0,
+          staleDecay: 1,
+          conflictDecay: 1,
+        },
+        weights: DEFAULT_WEIGHTS,
+        calibrationVersion: CALIBRATION_IDENTITY,
+      },
+      embedding: await embedder.embed('engram rollback re-admits this claim'),
+      embeddingVersion: embedder.version,
+      lineageId: randomUUID(),
+      asOf: new Date(),
+      createdBy: 'test',
+    })
+    const { sourceId } = await addSource(db, {
+      content: 'b',
+      contentHash: randomUUID(),
+      kind: 'structured_spec',
+      authorityScore: 0.9,
+    })
+    await db
+      .insert(claimProvenance)
+      .values({ id: randomUUID(), claimId: id, sourceId, locator: 'p1', relevance: 'exact' })
+
+    // 抬门到 0.525 以上 → 召回被生效门挡掉。
+    await seedGateTighteningPressure()
+    await runGovernanceCycle(db)
+    expect((await getActiveStandards(db)).consumeFloor).toBeGreaterThan(0.525)
+    expect(await recallClaims(db, embedder, 'engram rollback re-admits this claim')).toHaveLength(0)
+
+    // 回滚 → 生效门回到 0.4/0.6 → 召回重新放行该 claim，且 mustVerify 依据回退后的 0.6 计算（0.525 < 0.6 → true）。
+    await rollbackTo(db, baseline.id, 'human:editor')
+    const after = await recallClaims(db, embedder, 'engram rollback re-admits this claim')
+    expect(after).toHaveLength(1)
+    expect(after[0]!.confidence.value).toBeCloseTo(0.525, 6)
+    expect(after[0]!.mustVerify).toBe(true) // 0.525 < 回退后的 mustVerifyThreshold 0.6
+  })
+
+  it('append-only preserved: rollback adds new policy AND standards rows, deletes nothing', async () => {
+    const baseline = await writeGovernanceState(db, {
+      policy: BASELINE_POLICY,
+      metrics: {
+        distillBacklog: 0,
+        entailRejectRate: 0,
+        conflictQueueDepth: 0,
+        immuneLag: 0,
+        falseQuarantineRate: 0,
+      },
+      reason: 'baseline',
+    })
+    await seedGateTighteningPressure()
+    await runGovernanceCycle(db) // +1 policy 行, +1 standards 行
+    const policyRowsBefore = await getGovernanceHistory(db)
+    const standardsRowsBefore = await db.select().from(standards)
+
+    await rollbackTo(db, baseline.id, 'human:editor')
+
+    // policy / standards 都是追写新行，无物理删除。
+    expect(await getGovernanceHistory(db)).toHaveLength(policyRowsBefore.length + 1)
+    expect(await db.select().from(standards)).toHaveLength(standardsRowsBefore.length + 1)
+  })
+
+  it('atomic: if the standards write throws inside rollback, the policy row is NOT half-committed (EGR-CR-033)', async () => {
+    const baseline = await writeGovernanceState(db, {
+      policy: BASELINE_POLICY,
+      metrics: {
+        distillBacklog: 0,
+        entailRejectRate: 0,
+        conflictQueueDepth: 0,
+        immuneLag: 0,
+        falseQuarantineRate: 0,
+      },
+      reason: 'baseline',
+    })
+    await seedGateTighteningPressure()
+    await runGovernanceCycle(db) // 抬门，活动门 > 内核基线
+    const raisedStandards = await getActiveStandards(db)
+    const policyCountBefore = (await getGovernanceHistory(db)).length
+
+    // 注入：rollback 事务内对 standards 表的 insert 抛错（governance_state 的 insert 必须放行 → 命中「policy 写成功之后」窗口）。
+    const faultyDb = dbThatThrowsOnInsertInto(
+      db,
+      standards,
+      'injected: standards insert fault during rollback',
+    )
+    await expect(rollbackTo(faultyDb, baseline.id, 'human:editor')).rejects.toThrow(
+      /standards insert fault/,
+    )
+
+    // 整体回滚：policy 行未半提交，活动门保持抬高态（控制面/数据面无裂缝）。
+    expect(await getGovernanceHistory(db)).toHaveLength(policyCountBefore)
+    expect(await getActiveStandards(db)).toEqual(raisedStandards)
+  })
+})
+
 describe('S26 governance — cycle is atomic: write-policy + raise-gate share one transaction (EGR-CR-033)', () => {
   it('state write succeeds but standards write throws → NO half-committed policy row, baseline untouched', async () => {
     await seedGateTighteningPressure()
