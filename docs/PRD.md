@@ -120,7 +120,7 @@ agent 的使用是**嵌在 loop 内的闭环**:检索(claim 即用)→ 悲观核
 
 - **运行时**:Express + ws(Node ≥22 ESM)。
 - **存储**:PostgreSQL + Drizzle ORM;向量检索用 **pgvector + HNSW**。append-only(supersede 不物理删)。
-- **agent 运行时**:`harness-pi`(自研后端 agent runtime,站在 `@mariozechner/pi-ai` 上;pi-coding-agent 的 sibling 而非其 fork/扩展)。5 工种跑在 `@harness-pi/core`(AgentSession + hook/plugin/controller)上,各自独立 session + DB 角色隔离;有界 loop 工种(Distiller/Arbiter)= maxTurns + tokenBudget + LifecycleRestart。与 bidding-agent 复用同一套 hook/plugin 经验。
+- **agent 运行时**:`harness-pi`(自研后端 agent runtime,站在 `@mariozechner/pi-ai` 上;pi-coding-agent 的 sibling 而非其 fork/扩展)。5 工种跑在 `@harness-pi/core`(AgentSession + hook/plugin/controller)上,各自独立 session + 逻辑角色(`by_role` 标记);物理 DB role 隔离(CREATE ROLE / RLS)**待实现**(当前角色边界由应用层守卫强制,见 EGR-CR-006);有界 loop 工种(Distiller/Arbiter)= maxTurns + tokenBudget + LifecycleRestart。与 bidding-agent 复用同一套 hook/plugin 经验。
 - **前端**:React 19(主编 Studio + 评测看板),沿用项目暖色品牌(plum/cream)。
 - **领域适配**:bidding-adapter 作为独立包,通过 Consumer SPI 依赖 Engram 内核,**不反向依赖**。
 
@@ -427,7 +427,7 @@ conf        = g(raw)                                 # 见下;无法计算的因
 | Arbiter | `conflict.detected` | **有界 loop** | 升级主编 |
 | Harvester | report_usage batch + 每日 | 纯统计 | 无 g 更新,维持现状 |
 
-**loop vs one-shot 工程判据**:执行前状态空间是否已收敛 —— `若需多步、且下一步依赖上一步产出(分支因子运行时才知)→ 真 agent loop(Distiller/Arbiter);否则 = 函数/统计 + 点状一次 LLM(内嵌 1×LLM ≠ loop)`。judge≠athlete:各工种独立 DB 角色 + 会话隔离(`by_role` 入 `claim_verification`),巡查者不给自己背书。
+**loop vs one-shot 工程判据**:执行前状态空间是否已收敛 —— `若需多步、且下一步依赖上一步产出(分支因子运行时才知)→ 真 agent loop(Distiller/Arbiter);否则 = 函数/统计 + 点状一次 LLM(内嵌 1×LLM ≠ loop)`。judge≠athlete:各工种带独立逻辑角色(`by_role` 入 `claim_verification`)+ 会话审计,巡查者不给自己背书;物理 DB role 隔离(CREATE ROLE / RLS)**待实现**,当前角色边界由应用层守卫强制(见 EGR-CR-006)。
 
 ## A.8 控制面:恒温器五指标 + Advisor 验收门
 
