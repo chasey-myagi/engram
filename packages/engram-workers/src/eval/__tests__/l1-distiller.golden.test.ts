@@ -101,7 +101,6 @@ describe('S25 · L1 Distiller golden (CI redline, domain-agnostic) — A.9 extra
       seedSource: async (item) => {
         const { sourceId } = await addSource(db, {
           content: item.content,
-          contentHash: randomUUID(),
           kind: item.kind,
           authorityScore: 0.9,
         })
@@ -144,7 +143,6 @@ describe('S25 · L1 Distiller golden (CI redline, domain-agnostic) — A.9 extra
       seedSource: async (item) => {
         const { sourceId } = await addSource(db, {
           content: item.content,
-          contentHash: randomUUID(),
           kind: item.kind,
           authorityScore: 0.9,
         })

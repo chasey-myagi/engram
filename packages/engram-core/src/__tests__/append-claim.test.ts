@@ -62,8 +62,9 @@ beforeEach(async () => {
 
 async function seedSource(meta: Record<string, unknown> = {}) {
   return addSource(db, {
-    content: 'datasheet body',
-    contentHash: randomUUID(),
+    // EGR-CR-012：hash 由 content 内核自算 → 每条种子源给 distinct content 才是 distinct 源
+    // （独立性靠真实内容差异，而非旧版「同 content + 不同随机 hash」抄近路）。
+    content: `datasheet body ${randomUUID()}`,
     kind: 'structured_spec',
     authorityScore: 0.5, // explicit so confidence-factor assertions don't ride the schema default
     meta,
@@ -145,8 +146,35 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
     expect(await db.select().from(claimProvenance)).toHaveLength(0)
   })
 
-  it('dedupes sources by content_hash (UNIQUE), preserving the first row, round-tripping arbitrary meta JSON', async () => {
-    const hash = randomUUID()
+  // EGR-CR-012 红线核心：内核据 content 自算 content_hash（内容寻址不变量）。不同 content 必生不同源、
+  //   绝不静默复用错误 raw source；真正同 content 才幂等去重。证明伪造 provenance 通道被从源头堵死。
+  it('EGR-CR-012: distinct content yields distinct sources; truly identical content idempotently dedupes (content-addressed)', async () => {
+    const a = await addSource(db, {
+      content: 'first bytes',
+      kind: 'formal_document',
+      authorityScore: 0.9,
+    })
+    // 不同 content：内核自算 hash 必不同 → 必须落成第二行，绝不静默锚到 a 上（旧 bug 在此静默复用 a.sourceId 并丢弃本原文）。
+    const b = await addSource(db, {
+      content: 'SECOND bytes',
+      kind: 'human_qa',
+      authorityScore: 0.1,
+    })
+    expect(b.sourceId).not.toBe(a.sourceId)
+    expect(await db.select().from(source)).toHaveLength(2)
+    // 字节级相同的第三次摄入 → 幂等复用第一行（content-addressed：同 content ⇒ 同 hash ⇒ 同源）。
+    const c = await addSource(db, {
+      content: 'first bytes',
+      kind: 'human_qa', // 即便 caller 给了不同 kind/authority，也复用既有行、不覆盖。
+      authorityScore: 0.1,
+    })
+    expect(c.sourceId).toBe(a.sourceId)
+    expect(await db.select().from(source)).toHaveLength(2) // 仍只有 2 行：c 折叠到 a。
+  })
+
+  // EGR-CR-012 防过度修正：真正同 content 的重复摄入仍幂等（first-writer-wins，撞号不覆盖既有 meta/kind/authority）。
+  //   修复堵的是「不同 content 静默复用」，而非把幂等去重一并打死。
+  it('EGR-CR-012: re-ingesting byte-identical content is idempotent and first-writer-wins (does not overwrite the existing row)', async () => {
     const meta = {
       domain: 'bidding',
       source_type: 'official_datasheet',
@@ -154,34 +182,52 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
       nested: { axes: [1, 2, 3], ok: true },
     }
     const a = await addSource(db, {
-      content: 'first bytes',
-      contentHash: hash,
+      content: 'identical body',
       kind: 'formal_document',
       authorityScore: 0.9,
       meta,
     })
     const b = await addSource(db, {
-      content: 'SECOND bytes',
-      contentHash: hash,
+      content: 'identical body', // 同 content ⇒ 内核自算同 hash ⇒ 撞号幂等。
       kind: 'human_qa',
       authorityScore: 0.1,
       meta: { totally: 'different' },
     })
     expect(b.sourceId).toBe(a.sourceId) // second insert deduped to the same row
-    const rows = await db.select().from(source).where(eq(source.contentHash, hash))
+    const rows = await db.select().from(source).where(eq(source.id, a.sourceId))
     expect(rows).toHaveLength(1)
     // the conflicting second write must NOT overwrite the existing row's fields
-    expect(rows[0]!.content).toBe('first bytes')
+    expect(rows[0]!.content).toBe('identical body')
     expect(rows[0]!.kind).toBe('formal_document')
     expect(rows[0]!.authorityScore).toBe(0.9)
     expect(rows[0]!.meta).toEqual(meta)
   })
 
-  it('two distinct content_hashes create two distinct sources (the negative of dedupe)', async () => {
-    const a = await addSource(db, { content: 'x', contentHash: randomUUID(), kind: 'human_qa' })
-    const b = await addSource(db, { content: 'y', contentHash: randomUUID(), kind: 'human_qa' })
-    expect(b.sourceId).not.toBe(a.sourceId)
-    expect(await db.select().from(source)).toHaveLength(2)
+  // EGR-CR-012 独立性判定被顺带修正（方案 A）：两条 content 不同但同述一事实的 supports 源算「独立印证」（indepSupport=2 → 0.5）；
+  //   两条字节相同的源折叠为 1（indepSupport=0）。证明独立性从「靠 caller 给不同随机 hash 抄近路」转为「靠真实内容差异」。
+  it('EGR-CR-012: independence now rides real content difference — distinct content corroborates, byte-identical collapses to one', async () => {
+    // 两条 content 不同的源同述一事实 → 内核自算 hash 各异 → countIndependentSupports 记为 2 → indepSupport = 1 - 0.5^2 = 0.5。
+    const d1 = await addSource(db, { content: 'distinct A', kind: 'human_qa', authorityScore: 0.5 })
+    const d2 = await addSource(db, { content: 'distinct B', kind: 'human_qa', authorityScore: 0.5 })
+    const distinct = await appendClaim(db, embedder, { claimText: 'fact' }, [
+      { sourceId: d1.sourceId, locator: 'l', relevance: 'exact' },
+      { sourceId: d2.sourceId, locator: 'l', relevance: 'exact' },
+    ])
+    const distinctRow = (await db.select().from(claim).where(eq(claim.id, distinct.claimId)))[0]!
+    const distinctCf = distinctRow.confidenceFactors as { factors: { indepSupport: number } }
+    expect(distinctCf.factors.indepSupport).toBeCloseTo(0.5, 10) // 2 independent sources
+
+    // 两条字节相同 content 的源 → 内核自算同 hash → addSource 折叠为同一行 → 引用同一 sourceId → indepSupport = 0。
+    const e1 = await addSource(db, { content: 'same bytes', kind: 'human_qa', authorityScore: 0.5 })
+    const e2 = await addSource(db, { content: 'same bytes', kind: 'human_qa', authorityScore: 0.5 })
+    expect(e2.sourceId).toBe(e1.sourceId) // collapsed: byte-identical ⇒ one source
+    const collapsed = await appendClaim(db, embedder, { claimText: 'fact2' }, [
+      { sourceId: e1.sourceId, locator: 'l', relevance: 'exact' },
+      { sourceId: e2.sourceId, locator: 'l', relevance: 'exact' },
+    ])
+    const collapsedRow = (await db.select().from(claim).where(eq(claim.id, collapsed.claimId)))[0]!
+    const collapsedCf = collapsedRow.confidenceFactors as { factors: { indepSupport: number } }
+    expect(collapsedCf.factors.indepSupport).toBe(0) // 1 distinct source → no corroboration
   })
 
   it('supersede appends a new claim under the SAME lineage_id, marks old superseded, no physical delete', async () => {
@@ -433,13 +479,11 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
     // strong formal_document (authority 0.9, half-life 730) + weak human_qa (authority 0.2, half-life 90)
     const strong = await addSource(db, {
       content: 's',
-      contentHash: randomUUID(),
       kind: 'formal_document',
       authorityScore: 0.9,
     })
     const weak = await addSource(db, {
       content: 'w',
-      contentHash: randomUUID(),
       kind: 'human_qa',
       authorityScore: 0.2,
     })
@@ -472,20 +516,17 @@ describe('S1 walking skeleton: append_claim + D1 hard gate', () => {
   it('indepSupport collapses sibling derived sources sharing an un-cited ancestor (shared ancestor f3 — EGR-CR-024)', async () => {
     const R = await addSource(db, {
       content: 'datasheet',
-      contentHash: randomUUID(),
       kind: 'structured_spec',
       authorityScore: 0.5,
     })
     const B = await addSource(db, {
       content: 'derivedB',
-      contentHash: randomUUID(),
       kind: 'structured_spec',
       authorityScore: 0.5,
       derivedFromSourceId: R.sourceId,
     })
     const C = await addSource(db, {
       content: 'derivedC',
-      contentHash: randomUUID(),
       kind: 'structured_spec',
       authorityScore: 0.5,
       derivedFromSourceId: R.sourceId,

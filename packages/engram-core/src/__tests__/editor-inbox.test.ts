@@ -72,7 +72,6 @@ beforeEach(async () => {
 async function aSource(authorityScore = 0.9) {
   return addSource(db, {
     content: `body-${randomUUID()}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore,
   })
@@ -437,13 +436,11 @@ describe('S23 humanAdjudicateConflict — rung ① human ruling ON TOP of the ma
   }): Promise<{ a: string; b: string }> {
     const sa = await addSource(db, {
       content: `sa-${randomUUID()}`,
-      contentHash: randomUUID(),
       kind: 'structured_spec',
       authorityScore: opts?.aAuth ?? 0.9,
     })
     const sb = await addSource(db, {
       content: `sb-${randomUUID()}`,
-      contentHash: randomUUID(),
       kind: 'structured_spec',
       authorityScore: opts?.bAuth ?? 0.9,
     })
@@ -605,13 +602,11 @@ describe('S23 humanAdjudicateConflict — rung ① human ruling ON TOP of the ma
     // both claims recallable on the same query; the conflict edge makes them each eat conflictDecay live
     const sa = await addSource(db, {
       content: `sa-${randomUUID()}`,
-      contentHash: randomUUID(),
       kind: 'structured_spec',
       authorityScore: 0.95,
     })
     const sb = await addSource(db, {
       content: `sb-${randomUUID()}`,
-      contentHash: randomUUID(),
       kind: 'structured_spec',
       authorityScore: 0.95,
     })

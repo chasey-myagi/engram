@@ -83,7 +83,6 @@ async function seedOneUsage(db: DB, taskId: string): Promise<void> {
   const embedder = makeFakeEmbedder()
   const src = await addSource(db, {
     content: `source-${taskId}`,
-    contentHash: randomUUID(),
     kind: 'formal_document',
     authorityScore: 0.8,
   })

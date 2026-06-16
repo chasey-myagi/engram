@@ -69,7 +69,6 @@ describe('S5 · Distiller 可观测接线 + claim→runId join-key', () => {
   it('盖 producing_run_id + 落 agent_run_trace + 决策不变', async () => {
     const src = await addSource(db, {
       content: 'The capital of France is Paris',
-      contentHash: randomUUID(),
       kind: 'structured_spec',
       authorityScore: 0.9,
     })

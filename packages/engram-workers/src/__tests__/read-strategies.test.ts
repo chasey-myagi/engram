@@ -92,7 +92,7 @@ const stopTurn: FakeAssistantResponse = {
 }
 
 async function aSource(kind: SourceKind, content: string) {
-  return addSource(db, { content, contentHash: randomUUID(), kind, authorityScore: 0.9 })
+  return addSource(db, { content, kind, authorityScore: 0.9 })
 }
 
 /** 单条 claim 的 provenance 行（locator + excerpt）。 */

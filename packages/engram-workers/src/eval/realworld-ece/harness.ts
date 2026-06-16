@@ -94,10 +94,10 @@ export async function ingestCorpus(
   for (const f of facts) {
     const sourceIds: string[] = []
     for (let k = 0; k < sourcesPerFact; k++) {
-      // 多份「独立」源同述一事实:不同 contentHash(否则 countIndependentSupports 按 hash 去重折成 1)。
+      // 多份「独立」源同述一事实:content 须字节级不同,否则内核自算 hash 相同 → countIndependentSupports
+      // 按 hash 去重折成 1（EGR-CR-012：独立性靠真实 content 差异，不再靠不同随机 hash 抄近路）。
       const src = await addSource(deps.db, {
-        content: f.docText,
-        contentHash: `rw:${f.id}:s${k}`,
+        content: `${f.docText}\n[rw:${f.id}:s${k}]`,
         kind: 'historical_artifact', // 散文陈述,seg:n,无 VLM
         authorityScore: f.sourceAuthority,
       })
@@ -392,8 +392,8 @@ async function addCorroboration(
 ): Promise<void> {
   for (let k = 1; k < count; k++) {
     const src = await addSource(db, {
-      content, // 同一事实由另一独立源复述(contentHash 不同 ⇒ countIndependentSupports 记为独立)
-      contentHash: `co:${factId}:c${k}`,
+      // 同一事实由另一独立源复述：content 须字节级不同（EGR-CR-012 内核自算 hash ⇒ 同 content 会折叠成 1）。
+      content: `${content}\n[co:${factId}:c${k}]`,
       kind: 'historical_artifact',
       authorityScore: authority,
     })
@@ -485,8 +485,7 @@ export async function runCorroboratedEce(
 
   for (const f of facts) {
     const src = await addSource(deps.db, {
-      content: f.docText,
-      contentHash: `co:${f.id}:c0`,
+      content: f.docText, // 主源 c0；corroboration（addCorroboration, k≥1）各加唯一后缀 → 全部字节级不同（EGR-CR-012）
       kind: 'historical_artifact',
       authorityScore: f.sourceAuthority,
     })

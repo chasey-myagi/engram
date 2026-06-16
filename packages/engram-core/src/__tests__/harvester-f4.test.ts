@@ -71,7 +71,6 @@ async function seedClaim(opts: {
   const claimText = opts.claimText ?? `seed-${randomUUID()}`
   const { sourceId } = await addSource(db, {
     content: `src for ${claimText}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.9,
   })

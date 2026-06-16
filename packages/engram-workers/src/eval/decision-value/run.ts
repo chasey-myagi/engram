@@ -107,7 +107,6 @@ async function seedWrongAnswerClaim(
   })
   const src = await addSource(db, {
     content: `s-${fact.factId}`,
-    contentHash: randomUUID(),
     kind: 'formal_document',
     authorityScore: fact.raw,
   })
@@ -222,7 +221,6 @@ async function realQwenDistilledClaimIds(
   for (let i = 0; i < limit; i++) {
     const src = await addSource(db, {
       content: `France's capital is Paris. (fact ${i})`,
-      contentHash: randomUUID(),
       kind: 'formal_document',
       authorityScore: 0.9,
     })

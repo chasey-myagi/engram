@@ -125,8 +125,8 @@ async function appendActiveSourceClaim(
   const provs: ProvenanceInput[] = []
   for (let i = 0; i < 4; i++) {
     const src = await addSource(db, {
-      content: `evidence: ${draft.claimText}`,
-      contentHash: randomUUID(),
+      // 4 条独立 supports 源：content 须字节级不同（EGR-CR-012 内核自算 hash ⇒ 同 content 会折叠成 1 条）。
+      content: `evidence ${i}: ${draft.claimText}`,
       kind: 'formal_document',
       authorityScore: 1.0,
     })

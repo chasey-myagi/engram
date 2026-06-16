@@ -104,8 +104,8 @@ async function appendActiveClaim(draft: {
   const provs: ProvenanceInput[] = []
   for (let i = 0; i < 4; i++) {
     const src = await addSource(db, {
-      content: `evidence: ${draft.claimText}`,
-      contentHash: randomUUID(),
+      // 4 条独立源：content 须字节级不同（EGR-CR-012 内核自算 hash ⇒ 同 content 折成 1）。
+      content: `evidence ${i}: ${draft.claimText}`,
       kind: 'formal_document',
       authorityScore: 1.0,
     })
@@ -192,7 +192,6 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
       for (let i = 0; i < 4; i++) {
         const s = await addSource(db, {
           content: `${item.evidence} #neg-${i}`,
-          contentHash: randomUUID(),
           kind: item.sourceKind as schema.SourceKind,
           authorityScore: 1.0,
         })
@@ -570,7 +569,6 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
       // 即便注入了真 usage_truth 样本，校准只吃 {rawPredicted, correct}，没有任何 detectionRate/胜负率字段。
       const src = await addSource(db, {
         content: 'c',
-        contentHash: randomUUID(),
         kind: 'formal_document',
         authorityScore: 0.6,
       })

@@ -270,7 +270,6 @@ async function aSource(
 ) {
   return addSource(db, {
     content: `body-${randomUUID()}`,
-    contentHash: randomUUID(),
     kind: opts.kind ?? 'structured_spec',
     authorityScore: 0.9, // strong source ⇒ a 2-source merge clears the 0.4 recall floor (f3 assertions are authority-independent)
     ...(opts.derivedFromSourceId ? { derivedFromSourceId: opts.derivedFromSourceId } : {}),
@@ -398,12 +397,10 @@ describe('S14 commitClaim — same-fact dedup + un-inflatable f3 (A.6)', () => {
     // a hash-identical copy resolves (addSource ON CONFLICT) to the SAME source id ⇒ same independent source
     const dup = await addSource(db, {
       content: 'X',
-      contentHash: 'HASH-X',
       kind: 'structured_spec',
     })
     const dup2 = await addSource(db, {
       content: 'X',
-      contentHash: 'HASH-X',
       kind: 'structured_spec',
     })
     expect(dup2.sourceId).toBe(dup.sourceId) // dedup by content hash

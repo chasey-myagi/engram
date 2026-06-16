@@ -79,7 +79,6 @@ async function selfAuthor(
 ): Promise<string> {
   const src = await addSource(db, {
     content: 'body',
-    contentHash: randomUUID(),
     kind: opts.kind ?? 'structured_spec',
     authorityScore: opts.authorityScore ?? 0.95,
   })
@@ -431,7 +430,6 @@ describe('S30 L3 system dimensions (substrate-ready 7) — append-only events th
     })
     const src = await addSource(db, {
       content: 'b',
-      contentHash: randomUUID(),
       kind: 'external_feed',
       authorityScore: 0.9,
     })

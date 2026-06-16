@@ -80,7 +80,6 @@ afterAll(async () => {
 async function seedClaim(item: VerifierGoldenItem): Promise<string> {
   const { sourceId } = await addSource(db, {
     content: item.evidence,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.9,
   })

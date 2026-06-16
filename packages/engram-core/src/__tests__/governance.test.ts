@@ -120,7 +120,6 @@ async function seedClaim(opts: {
   })
   const { sourceId } = await addSource(db, {
     content: `body-${id}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.9,
   })
@@ -371,7 +370,6 @@ describe('S26 governance — gate tightening respects S7 invariants + frozen sna
     })
     const { sourceId } = await addSource(db, {
       content: 'b',
-      contentHash: randomUUID(),
       kind: 'structured_spec',
       authorityScore: 0.9,
     })
@@ -561,7 +559,6 @@ describe('S26 governance — silent degrade (zero orchestration single point)', 
     })
     const { sourceId } = await addSource(db, {
       content: 'b',
-      contentHash: randomUUID(),
       kind: 'structured_spec',
       authorityScore: 0.9,
     })

@@ -158,7 +158,6 @@ async function aSource(content?: string): Promise<string> {
     // 3 lines by default → fake reader yields anchors L1/L2/L3, so scripted commits citing those
     // locators all hit a real read-source segment (EGR-CR-022 locator-from-readsource gate).
     content: content ?? `body-${randomUUID()}\nbody-${randomUUID()}\nbody-${randomUUID()}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.9,
   })
@@ -224,7 +223,6 @@ async function seedActiveClaim(opts: {
 }): Promise<string> {
   const { sourceId } = await addSource(db, {
     content: `src-${randomUUID()}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.5,
   })
@@ -267,7 +265,6 @@ async function seedPoisonPair(opts: {
 }): Promise<string> {
   const { sourceId } = await addSource(db, {
     content: `src-${randomUUID()}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.5,
   })

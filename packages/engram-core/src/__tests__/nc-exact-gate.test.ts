@@ -52,7 +52,6 @@ beforeEach(async () => {
 async function mkClaim(relevance: schema.ProvRelevance): Promise<string> {
   const { sourceId } = await addSource(db, {
     content: `src ${randomUUID()}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.5,
   })
@@ -78,7 +77,6 @@ async function mkClaim(relevance: schema.ProvRelevance): Promise<string> {
 async function addProv(claimId: string, relevance: schema.ProvRelevance): Promise<void> {
   const { sourceId } = await addSource(db, {
     content: `src ${randomUUID()}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.5,
   })

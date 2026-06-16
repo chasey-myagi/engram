@@ -105,7 +105,6 @@ function makeRunner(): EngramRunner {
 async function mkUsageClaim(claimText: string): Promise<string> {
   const { sourceId } = await addSource(db, {
     content: `src for ${claimText}`,
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.9,
   })

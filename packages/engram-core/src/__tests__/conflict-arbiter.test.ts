@@ -60,7 +60,6 @@ beforeEach(async () => {
 async function aSource(opts: { kind?: SourceKind; authority?: number } = {}) {
   return addSource(db, {
     content: `body-${randomUUID()}`,
-    contentHash: randomUUID(),
     kind: opts.kind ?? 'structured_spec',
     authorityScore: opts.authority ?? 0.5,
   })
@@ -199,20 +198,17 @@ describe('S20 conflict-arbiter SPI (A.5): deterministic adjudication, no status 
   it('loadConflictSide collapses sibling derived sources sharing an un-cited ancestor for ladder ⑤ (shared ancestor — EGR-CR-024)', async () => {
     const R = await addSource(db, {
       content: `root-${randomUUID()}`,
-      contentHash: randomUUID(),
       kind: 'structured_spec',
       authorityScore: 0.5,
     })
     const B = await addSource(db, {
       content: `derivedB-${randomUUID()}`,
-      contentHash: randomUUID(),
       kind: 'structured_spec',
       authorityScore: 0.5,
       derivedFromSourceId: R.sourceId,
     })
     const C = await addSource(db, {
       content: `derivedC-${randomUUID()}`,
-      contentHash: randomUUID(),
       kind: 'structured_spec',
       authorityScore: 0.5,
       derivedFromSourceId: R.sourceId,

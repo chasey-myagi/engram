@@ -82,7 +82,6 @@ async function seedClaimWithFactors(factors: AdditiveFactors, text: string): Pro
   })
   const { sourceId } = await addSource(db, {
     content: 'body',
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.5,
   })

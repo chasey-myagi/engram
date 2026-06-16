@@ -187,7 +187,6 @@ describe('S9 · 诊断 join + 只读守卫(真 DB)', () => {
   }): Promise<string> {
     const src = await addSource(db, {
       content: `s-${randomUUID()}`,
-      contentHash: randomUUID(),
       kind: 'formal_document',
       authorityScore: opts.raw,
     })

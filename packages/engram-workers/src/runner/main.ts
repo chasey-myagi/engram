@@ -126,7 +126,6 @@ async function main(): Promise<void> {
       // ── live 闭环一拍：摄入一源 → 级联 → 恒温器 → 校准。 ──
       const { sourceId } = await addSource(db, {
         content: 'spec sheet: widget-7 max load 50kg',
-        contentHash: randomUUID(),
         kind: 'structured_spec',
         authorityScore: 0.9,
       })

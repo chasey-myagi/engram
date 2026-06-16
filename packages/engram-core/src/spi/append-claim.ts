@@ -8,7 +8,7 @@
  * usageCorrect 用中性值、activeContradicts=0、独立性≈不同 source id —— 余下因子来源在后续切片接入
  * （S8 矛盾 / S14 独立判定 / S17 entailment / S19 usage）。g 起步 = identity。
  */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 import { and, eq, ne, sql } from 'drizzle-orm'
 
@@ -40,12 +40,20 @@ const MS_PER_DAY = 86_400_000
 
 export interface SourceInput {
   content: string
-  contentHash: string
   kind: SourceKind
   authorityScore?: number
   meta?: Record<string, unknown>
   /** A.6 独立来源血缘：本源派生自哪个上游源（独立印证沿此链折叠，防同源刷 f3）。 */
   derivedFromSourceId?: string
+}
+
+/**
+ * EGR-CR-012：内容寻址不变量由内核保证 —— content_hash 由内核据 content 自算（裸字节 sha256，不做
+ * trim/换行统一/Unicode 归一化，「字节级相同才算同源」最严格语义）。调用方不再提供 hash，杜绝
+ * 「同 hash 不同 content 静默复用错误 raw source」的伪造 provenance 通道。
+ */
+function sha256Hex(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex')
 }
 
 export interface DraftClaim {
@@ -330,14 +338,19 @@ export async function getSource(
   return row ?? null
 }
 
-/** 幂等入原文：content_hash 撞号则复用既有行（不重复落库），单语句 ON CONFLICT 总返存活 id。meta 原样存。 */
+/**
+ * 幂等入原文：content_hash 由内核据 content 自算（EGR-CR-012 内容寻址不变量），撞号即「字节级同 content」
+ * → 复用既有行（不重复落库），单语句 ON CONFLICT 总返存活 id。meta 原样存。
+ * hash 既由 content 唯一决定，「同 hash 不同 content」物理上不可能发生，no-op 复用此时语义正确（幂等去重）。
+ */
 export async function addSource(db: DB, input: SourceInput): Promise<{ sourceId: string }> {
+  const contentHash = sha256Hex(input.content)
   const rows = await db
     .insert(source)
     .values({
       id: randomUUID(),
       content: input.content,
-      contentHash: input.contentHash,
+      contentHash,
       kind: input.kind,
       authorityScore: input.authorityScore ?? 0.5,
       meta: input.meta ?? {},
@@ -347,7 +360,7 @@ export async function addSource(db: DB, input: SourceInput): Promise<{ sourceId:
     })
     .onConflictDoUpdate({
       target: source.contentHash,
-      set: { contentHash: input.contentHash }, // no-op update：撞号也触发 RETURNING 返回既有行，且不动既有 meta/content
+      set: { contentHash }, // no-op update：撞号（同 content ⇒ 同 hash）也触发 RETURNING 返回既有行，且不动既有 meta/content
     })
     .returning({ id: source.id })
   return { sourceId: rows[0]!.id }

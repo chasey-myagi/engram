@@ -80,7 +80,6 @@ async function seedActiveClaim(text: string, raw = 0.8): Promise<string> {
   })
   const { sourceId } = await addSource(db, {
     content: 'body',
-    contentHash: randomUUID(),
     kind: 'structured_spec',
     authorityScore: 0.5,
   })
