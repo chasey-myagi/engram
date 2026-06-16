@@ -338,32 +338,94 @@ export async function getSource(
   return row ?? null
 }
 
+/** addSource 结果：sourceId + 是否撞号复用既有行 + 撞号时本次带的业务身份/权威是否与既有不一致（被丢弃）。 */
+export interface AddSourceResult {
+  sourceId: string
+  /** false=新建一条 source；true=撞 content_hash、复用既有行（本次原文未重复落库）。 */
+  deduped: boolean
+  /**
+   * 撞号且本次带的 `meta`/`authorityScore`/`kind` 与既有行**语义不一致** → true（EGR-CR-011 fail-loud）。
+   * 「原文不可变」锚点不动（既有行不被覆盖），但「你这次带的业务身份/权威被丢了」显式回给调用方——
+   * 调用方应据此触发富集（updateSourceMetadata / annotateSourceAuthority）或告警，而非靠重复 addSource 补标。
+   * 新建（deduped=false）恒为 false。
+   */
+  metadataConflict: boolean
+}
+
+/** authority_score 比较的容差（doublePrecision 往返；0.5 默认与 caller 显式 0.5 视为相等）。 */
+const AUTHORITY_EPS = 1e-9
+
 /**
  * 幂等入原文：content_hash 由内核据 content 自算（EGR-CR-012 内容寻址不变量），撞号即「字节级同 content」
- * → 复用既有行（不重复落库），单语句 ON CONFLICT 总返存活 id。meta 原样存。
- * hash 既由 content 唯一决定，「同 hash 不同 content」物理上不可能发生，no-op 复用此时语义正确（幂等去重）。
+ * → 复用既有行（不重复落库、原文不可变锚点永不覆盖，first-writer-wins）。meta 原样存。
+ *
+ * EGR-CR-011 fail-loud：撞号时**读出**既有行的 `meta`/`authorityScore`/`kind`，与本次 input 语义比较——不一致则
+ * 返回 `metadataConflict=true`。content-hash 去重路径**只对 content 负责**，绝不顺带改业务身份/权威（那是
+ * source-metadata.ts 的人授权、留痕富集 SPI 的职责；让去重路径静默吞掉第二次的官方 meta 正是 finding 的危害本身）。
+ * 调用方据 `metadataConflict` 触发富集或告警；`deduped` 区分新建 vs 复用。
  */
-export async function addSource(db: DB, input: SourceInput): Promise<{ sourceId: string }> {
+export async function addSource(db: DB, input: SourceInput): Promise<AddSourceResult> {
   const contentHash = sha256Hex(input.content)
-  const rows = await db
+  const meta = input.meta ?? {}
+  const authorityScore = input.authorityScore ?? 0.5
+  // onConflictDoNothing：新建则 RETURNING 拿到新行；撞号则 RETURNING 空（既有行不被任何 no-op 触动 → 原文锚点不动）。
+  const inserted = await db
     .insert(source)
     .values({
       id: randomUUID(),
       content: input.content,
       contentHash,
       kind: input.kind,
-      authorityScore: input.authorityScore ?? 0.5,
-      meta: input.meta ?? {},
+      authorityScore,
+      meta,
       ...(input.derivedFromSourceId !== undefined
         ? { derivedFromSourceId: input.derivedFromSourceId }
         : {}),
     })
-    .onConflictDoUpdate({
-      target: source.contentHash,
-      set: { contentHash }, // no-op update：撞号（同 content ⇒ 同 hash）也触发 RETURNING 返回既有行，且不动既有 meta/content
-    })
+    .onConflictDoNothing({ target: source.contentHash })
     .returning({ id: source.id })
-  return { sourceId: rows[0]!.id }
+  if (inserted.length > 0) {
+    // 新建：无既有行可冲突。
+    return { sourceId: inserted[0]!.id, deduped: false, metadataConflict: false }
+  }
+  // 撞号：读出既有行做语义比较（既有行保持不变 = first-writer-wins）。
+  const [existing] = await db
+    .select({
+      id: source.id,
+      kind: source.kind,
+      authorityScore: source.authorityScore,
+      meta: source.meta,
+    })
+    .from(source)
+    .where(eq(source.contentHash, contentHash))
+    .limit(1)
+  // 同 content ⇒ 同 hash ⇒ 撞号必有既有行；查不到只可能是并发删除等异常，fail-loud 而非静默吞。
+  if (existing === undefined) {
+    throw new Error(
+      `addSource: content_hash conflict but the existing row vanished (hash=${contentHash}) — concurrent delete?`,
+    )
+  }
+  const metadataConflict =
+    existing.kind !== input.kind ||
+    Math.abs(existing.authorityScore - authorityScore) > AUTHORITY_EPS ||
+    !sourceMetaEqual(existing.meta as Record<string, unknown>, meta)
+  return { sourceId: existing.id, deduped: true, metadataConflict }
+}
+
+/** meta 语义相等：JSON 规范化（key 排序）后逐字符比较。jsonb 往返不保证 key 序，故不能直接字符串比 input。 */
+function sourceMetaEqual(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  return canonicalJson(a) === canonicalJson(b)
+}
+
+/** 稳定序列化：递归按 key 排序，让「同内容、不同 key 序」的两个对象产出相同字符串。 */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  const obj = value as Record<string, unknown>
+  const entries = Object.keys(obj)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`)
+  return `{${entries.join(',')}}`
 }
 
 /**

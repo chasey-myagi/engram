@@ -48,7 +48,8 @@ adapter 经 **Consumer SPI** 消费内核，**绝不反向依赖内核内部**�
 
 | 动作 | 语义 | 现状 | 位置 |
 |---|---|---|---|
-| `addSource(db, SourceInput)` | 幂等入原文（content_hash 去重，meta 透传） | ✅ 已实现 | `packages/engram-core/src/spi/append-claim.ts` |
+| `addSource(db, SourceInput) → AddSourceResult` | 幂等入原文（content_hash 去重，meta 透传）；撞号 first-writer-wins 不覆盖既有行，返回 `{ sourceId, deduped, metadataConflict }`——撞号且本次带的 meta/authority/kind 与既有不一致时 `metadataConflict=true`（**fail-loud**，见 §2.3 警告） | ✅ 已实现 | `packages/engram-core/src/spi/append-claim.ts` |
+| `updateSourceMetadata(db, { sourceId, meta, actor, reason })` / `annotateSourceAuthority(db, { sourceId, authorityScore, actor, reason })` | **human-only、append-only、留痕**的业务身份/权威富集 SPI（补标首写未带的 `source_type` / 调权威分），写一条 `source_metadata_events` 审计事件 | ✅ 已实现 | `packages/engram-core/src/spi/source-metadata.ts` |
 | `appendClaim(db, DraftClaim, ProvenanceInput[])` | 乐观写入，默认 draft，**强制 ≥1 出处**，单事务 | ✅ 已实现 | 同上 |
 | `supersedeClaim(...)` | append-only 取代（同 lineageId + supersedes 边，旧标 superseded 不删） | ✅ 已实现 | 同上 |
 | `recallClaims(db, embedder, query, ctx?) → RecallResult[]` | 检索：候选近邻 → 七因子聚合 → g → 消费门过滤 → 拍 `ConfidenceSnapshot` | ✅ 已实现 | `packages/engram-core/src/spi/recall-claims.ts` |
@@ -99,6 +100,12 @@ confidence 从"来源计数器"变成"可校准概率"靠 `report_usage` 喂的 
 ```
 
 > 哪些 meta key 允许经缝外泄由内核 `RECALL_SOURCE_META_KEYS` 白名单控制（当前 `['source_type']`）。要新增可暴露 key = 内核改动，走内核评审（决定「内核对 consumer 暴露多大面」）。
+
+> **⚠️ first-writer-wins 风险（EGR-CR-011）——业务身份首写未带，不能靠重复 `addSource` 补标。**
+> `addSource` 以 `content_hash`（仅 content）幂等去重，撞号时 **first-writer-wins**：既有行的 `meta`/`authority_score`/`kind` 永不被第二次写入覆盖（原文不可变锚点）。所以「先裸 ingest 原文（无 `source_type` / 低 authority）、后同 content 再带官方 `meta` 重写」**补不上业务身份**——第二次带的官方 `source_type` 不会进 `source.meta`，下游 adapter 会把这条真实官方源永久当非官方打折，折后跌破消费下界 `0.4` 时其 claim 被直接丢弃（靠重试无法恢复）。
+> 正确做法：
+> - `addSource` 撞号且本次带的 meta/authority/kind 与既有不一致时返回 `metadataConflict=true`——调用方**必须**据此触发富集或告警，**不能**忽略这个信号当幂等去重处理。
+> - 补标业务身份/调权威走显式的 **human-only** 富集 SPI `updateSourceMetadata` / `annotateSourceAuthority`（`packages/engram-core/src/spi/source-metadata.ts`），它显式改写 `source.meta` / `authority_score` 并写一条 append-only 审计事件（`source_metadata_events`，可回溯「谁、何时、为何改了这条源的业务身份」）。富集授权只认 `actor.isHuman`（agent 即便 role 伪装成 `human:*` 也被拒，EGR-CR-002 同款），杜绝任意写者借同 content 改别人的官方身份绕过授权。
 
 ---
 
