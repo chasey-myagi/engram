@@ -16,7 +16,34 @@ import { collectUsageCalibrationSamples } from '../calibration/fit-from-usage.js
 import { createDb, type DB } from '../db/client.js'
 import { addSource } from '../spi/append-claim.js'
 import { claim, claimProvenance, claimVerification } from '../db/schema.js'
+import { seedRecallSnapshot } from '../spi/recall-snapshot.js'
 import { getUsageEvents, reportUsage } from '../spi/report-usage.js'
+
+/**
+ * EGR-CR-003：报一条 usage_truth，预测概率经一条**真 recall_snapshot** 绑定（决策 b 的 test-seed helper 用法）。
+ * 合成 bin（predicted/version 任意分布）由 seedRecallSnapshot 落一条真快照拍下；reportUsage 按 snapshotId 查表取值，
+ * by_role 须与快照一致（决策 c）—— 故快照 by_role = 上报 by_role。caller 不再自报 confidenceAtRecall/calibrationVersion。
+ */
+async function reportSeeded(
+  claimId: string,
+  outcome: 'adopted' | 'refuted' | 'corrected' | 'partial',
+  opts: { predicted: number; calibrationVersion?: string; byRole?: string; taskId?: string },
+): Promise<void> {
+  const byRole = opts.byRole ?? 'consumer:unknown'
+  const recallSnapshotId = await seedRecallSnapshot(db, {
+    claimId,
+    value: opts.predicted,
+    byRole,
+    ...(opts.calibrationVersion !== undefined
+      ? { calibrationVersion: opts.calibrationVersion }
+      : {}),
+  })
+  await reportUsage(db, claimId, outcome, {
+    byRole,
+    recallSnapshotId,
+    ...(opts.taskId !== undefined ? { taskId: opts.taskId } : {}),
+  })
+}
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://engram:engram@localhost:5433/engram'
 const migrationsFolder = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'drizzle')
@@ -98,31 +125,27 @@ async function seedActiveClaim(text: string, raw = 0.8): Promise<string> {
 async function reportBin(claimId: string, predicted: number, adopted: number, refuted: number) {
   let n = 0
   for (let i = 0; i < adopted; i++)
-    await reportUsage(db, claimId, 'adopted', {
-      confidenceAtRecall: predicted,
-      byRole: `r:${predicted}:${n++}`,
-    })
+    await reportSeeded(claimId, 'adopted', { predicted, byRole: `r:${predicted}:${n++}` })
   for (let i = 0; i < refuted; i++)
-    await reportUsage(db, claimId, 'refuted', {
-      confidenceAtRecall: predicted,
-      byRole: `r:${predicted}:${n++}`,
-    })
+    await reportSeeded(claimId, 'refuted', { predicted, byRole: `r:${predicted}:${n++}` })
 }
 
-describe('S5 report_usage extension — capture predicted probability at consumption', () => {
-  it('stores confidenceAtRecall as predictedConfidence + calibrationVersion on the event', async () => {
+describe('S5/EGR-CR-003 report_usage — predicted probability bound to a real recall snapshot', () => {
+  it('writes predictedConfidence + calibrationVersion from the bound recall_snapshot (not caller-reported)', async () => {
     const id = await seedActiveClaim('captures predicted')
-    await reportUsage(db, id, 'adopted', {
-      confidenceAtRecall: 0.73,
+    const recallSnapshotId = await seedRecallSnapshot(db, {
+      claimId: id,
+      value: 0.73,
       calibrationVersion: 'identity',
       byRole: 'r',
     })
+    await reportUsage(db, id, 'adopted', { byRole: 'r', recallSnapshotId })
     const [e] = await getUsageEvents(db, id)
-    expect(e!.predictedConfidence).toBe(0.73)
+    expect(e!.predictedConfidence).toBe(0.73) // sourced from the snapshot row
     expect(e!.calibrationVersion).toBe('identity')
   })
 
-  it('defaults predictedConfidence/calibrationVersion to null when confidenceAtRecall is omitted', async () => {
+  it('defaults predictedConfidence/calibrationVersion to null when no recall snapshot is bound', async () => {
     const id = await seedActiveClaim('no predicted')
     await reportUsage(db, id, 'adopted', { byRole: 'r' })
     const [e] = await getUsageEvents(db, id)
@@ -130,13 +153,11 @@ describe('S5 report_usage extension — capture predicted probability at consump
     expect(e!.calibrationVersion).toBeNull()
   })
 
-  it('rejects an out-of-range confidenceAtRecall (a probability must be in [0,1])', async () => {
+  it('rejects a forged / un-recalled snapshotId — predicted probability cannot be self-asserted', async () => {
     const id = await seedActiveClaim('bad predicted')
-    for (const bad of [1.5, -0.1, NaN]) {
-      await expect(reportUsage(db, id, 'adopted', { confidenceAtRecall: bad })).rejects.toThrow(
-        /confidenceAtRecall|\[0,1\]/i,
-      )
-    }
+    await expect(
+      reportUsage(db, id, 'adopted', { byRole: 'r', recallSnapshotId: randomUUID() }),
+    ).rejects.toThrow(/recall snapshot .* not found/i)
   })
 })
 
@@ -171,11 +192,11 @@ describe('S5 P0 GATE — ECE from recall snapshots joined to usage_truth (A.3/A.
     const id = await seedActiveClaim('cal filter')
     // distinct identities for the two counted rows so independent-identity gating keeps them as 2 votes
     // (this case asserts the INPUT-filter boundary — which outcomes/kinds enter — not the anti-spam fold).
-    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 0.85, byRole: 'r:a' }) // counted (correct)
-    await reportUsage(db, id, 'refuted', { confidenceAtRecall: 0.85, byRole: 'r:b' }) // counted (incorrect)
-    await reportUsage(db, id, 'corrected', { confidenceAtRecall: 0.85, byRole: 'r:c' }) // excluded: not adopted/refuted
-    await reportUsage(db, id, 'partial', { confidenceAtRecall: 0.85, byRole: 'r:d' }) // excluded: not adopted/refuted
-    await reportUsage(db, id, 'adopted', { byRole: 'r:e' }) // excluded: no predictedConfidence
+    await reportSeeded(id, 'adopted', { predicted: 0.85, byRole: 'r:a' }) // counted (correct)
+    await reportSeeded(id, 'refuted', { predicted: 0.85, byRole: 'r:b' }) // counted (incorrect)
+    await reportSeeded(id, 'corrected', { predicted: 0.85, byRole: 'r:c' }) // excluded: not adopted/refuted
+    await reportSeeded(id, 'partial', { predicted: 0.85, byRole: 'r:d' }) // excluded: not adopted/refuted
+    await reportUsage(db, id, 'adopted', { byRole: 'r:e' }) // excluded: no recall snapshot bound
     // A3: a non-usage_truth verification carrying a win-rate-like field must NOT enter the calibration input
     await db.insert(claimVerification).values({
       id: randomUUID(),
@@ -191,11 +212,11 @@ describe('S5 P0 GATE — ECE from recall snapshots joined to usage_truth (A.3/A.
     expect(rep.bins[8]!.observed).toBeCloseTo(0.5) // 1 adopted of 2
   })
 
-  it('preserves the falsy-but-valid endpoints: confidenceAtRecall 0 and 1 round-trip (not coerced to null) and bin correctly', async () => {
+  it('preserves the falsy-but-valid endpoints: snapshot value 0 and 1 round-trip (not coerced to null) and bin correctly', async () => {
     const id = await seedActiveClaim('endpoints')
     // distinct identities so both endpoints survive independent-identity gating as separate samples.
-    await reportUsage(db, id, 'refuted', { confidenceAtRecall: 0, byRole: 'r:lo' })
-    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 1, byRole: 'r:hi' })
+    await reportSeeded(id, 'refuted', { predicted: 0, byRole: 'r:lo' })
+    await reportSeeded(id, 'adopted', { predicted: 1, byRole: 'r:hi' })
 
     const predicted = (await getUsageEvents(db, id))
       .map((e) => e.predictedConfidence)
@@ -207,8 +228,11 @@ describe('S5 P0 GATE — ECE from recall snapshots joined to usage_truth (A.3/A.
     expect(rep.bins[9]!.count).toBe(1) // predicted 1 → last bin
   })
 
-  it('A3 by field: a usage_truth row whose verdict also carries winRate/elo is calibrated on outcome+predictedConfidence only — the extra fields are structurally ignored', async () => {
+  it('A3 by field: a usage_truth row whose verdict also carries winRate/elo is calibrated on the snapshot value + outcome only — the extra fields are structurally ignored', async () => {
     const id = await seedActiveClaim('a3 by field')
+    // The predicted value comes from a bound recall_snapshot (0.85); winRate/elo injected into the
+    // usage_truth verdict must NOT influence the computation (calibration reads outcome + snapshot.value only).
+    const recallSnapshotId = await seedRecallSnapshot(db, { claimId: id, value: 0.85, byRole: 'r' })
     await db.insert(claimVerification).values({
       id: randomUUID(),
       claimId: id,
@@ -217,8 +241,7 @@ describe('S5 P0 GATE — ECE from recall snapshots joined to usage_truth (A.3/A.
         outcome: 'adopted',
         taskId: null,
         note: null,
-        predictedConfidence: 0.85,
-        calibrationVersion: 'identity',
+        recallSnapshotId,
         winRate: 0.99, // injected ELO/win-rate signal — must NOT influence the computation
         elo: 1800,
       },
@@ -226,7 +249,7 @@ describe('S5 P0 GATE — ECE from recall snapshots joined to usage_truth (A.3/A.
     })
 
     const rep = await computeCalibrationFromUsage(db)
-    expect(rep.sampleCount).toBe(1) // admitted (valid usage_truth adopted + predictedConfidence)
+    expect(rep.sampleCount).toBe(1) // admitted (valid usage_truth adopted + bound snapshot)
     expect(rep.bins[8]!.count).toBe(1) // 0.85 → bin 8
     expect(rep.bins[8]!.observed).toBe(1) // adopted ⇒ 1; winRate/elo had zero effect
   })
@@ -254,11 +277,7 @@ describe('EGR-CR-027 — ECE reader is gated by independent (byRole, taskId) ide
     const id = await seedActiveClaim('spam one identity')
     // Same consumer spams the same claim/task 100× — under the OLD raw reader this was 100 reliability samples.
     for (let i = 0; i < 100; i++) {
-      await reportUsage(db, id, 'adopted', {
-        confidenceAtRecall: 0.85,
-        byRole: 'consumer:spam',
-        taskId: 't-1',
-      })
+      await reportSeeded(id, 'adopted', { predicted: 0.85, byRole: 'consumer:spam', taskId: 't-1' })
     }
     // RED before the fix (default reader counted raw rows ⇒ 100); GREEN after (default = independent-identities ⇒ 1).
     expect((await computeCalibrationFromUsage(db)).sampleCount).toBe(1)
@@ -268,11 +287,7 @@ describe('EGR-CR-027 — ECE reader is gated by independent (byRole, taskId) ide
     ).toBe(100)
 
     // a genuinely DISTINCT identity adds a real second vote (the gate blocks spam, not real signal).
-    await reportUsage(db, id, 'adopted', {
-      confidenceAtRecall: 0.85,
-      byRole: 'consumer:b',
-      taskId: 't-2',
-    })
+    await reportSeeded(id, 'adopted', { predicted: 0.85, byRole: 'consumer:b', taskId: 't-2' })
     expect((await computeCalibrationFromUsage(db)).sampleCount).toBe(2)
     expect(
       (await computeCalibrationFromUsage(db, DEFAULT_BIN_COUNT, 'raw-events')).sampleCount,
@@ -281,17 +296,17 @@ describe('EGR-CR-027 — ECE reader is gated by independent (byRole, taskId) ide
 
   it('T1b: same byRole but DIFFERENT taskId are distinct identities (the gate keys on the (byRole, taskId) pair)', async () => {
     const id = await seedActiveClaim('same role distinct task')
-    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 0.85, byRole: 'c', taskId: 't-1' })
-    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 0.85, byRole: 'c', taskId: 't-2' })
-    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 0.85, byRole: 'c', taskId: 't-1' }) // dup of t-1
+    await reportSeeded(id, 'adopted', { predicted: 0.85, byRole: 'c', taskId: 't-1' })
+    await reportSeeded(id, 'adopted', { predicted: 0.85, byRole: 'c', taskId: 't-2' })
+    await reportSeeded(id, 'adopted', { predicted: 0.85, byRole: 'c', taskId: 't-1' }) // dup of t-1
     expect((await computeCalibrationFromUsage(db)).sampleCount).toBe(2) // {c,t-1}, {c,t-2}
   })
 
   it('T1c: latest vote wins per identity — a later refuted overrides an earlier adopted for the same identity', async () => {
     const id = await seedActiveClaim('latest wins')
     // single identity flip-flops; gated reader keeps only the latest outcome (refuted ⇒ correct=false).
-    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 0.85, byRole: 'c', taskId: 't' })
-    await reportUsage(db, id, 'refuted', { confidenceAtRecall: 0.85, byRole: 'c', taskId: 't' })
+    await reportSeeded(id, 'adopted', { predicted: 0.85, byRole: 'c', taskId: 't' })
+    await reportSeeded(id, 'refuted', { predicted: 0.85, byRole: 'c', taskId: 't' })
     const rep = await computeCalibrationFromUsage(db)
     expect(rep.sampleCount).toBe(1)
     expect(rep.bins[8]!.count).toBe(1) // 0.85 → bin 8
@@ -302,16 +317,16 @@ describe('EGR-CR-027 — ECE reader is gated by independent (byRole, taskId) ide
     const id = await seedActiveClaim('shared gate parity')
     // mix: one spammed identity (×50) + three distinct identities, all under calibrationVersion=identity.
     for (let i = 0; i < 50; i++) {
-      await reportUsage(db, id, 'adopted', {
-        confidenceAtRecall: 0.7,
+      await reportSeeded(id, 'adopted', {
+        predicted: 0.7,
         byRole: 'consumer:spam',
         taskId: 't-1',
         calibrationVersion: CALIBRATION_IDENTITY,
       })
     }
     for (const role of ['consumer:x', 'consumer:y', 'consumer:z']) {
-      await reportUsage(db, id, 'adopted', {
-        confidenceAtRecall: 0.7,
+      await reportSeeded(id, 'adopted', {
+        predicted: 0.7,
         byRole: role,
         taskId: 't-1',
         calibrationVersion: CALIBRATION_IDENTITY,
@@ -354,26 +369,26 @@ describe('EGR-CR-029 — ECE segments by calibrationVersion (no cross-version po
     let n = 0
     // identity batch — same bin (0.95), deliberately miscalibrated (observed 0.5)
     for (let i = 0; i < 10; i++)
-      await reportUsage(db, id, 'adopted', {
-        confidenceAtRecall: 0.95,
+      await reportSeeded(id, 'adopted', {
+        predicted: 0.95,
         calibrationVersion: 'identity',
         byRole: `idn:${n++}`,
       })
     for (let i = 0; i < 10; i++)
-      await reportUsage(db, id, 'refuted', {
-        confidenceAtRecall: 0.95,
+      await reportSeeded(id, 'refuted', {
+        predicted: 0.95,
         calibrationVersion: 'identity',
         byRole: `idn:${n++}`,
       })
     // iso-v1 batch — same bin (0.95), perfectly calibrated (observed 0.95)
     for (let i = 0; i < 19; i++)
-      await reportUsage(db, id, 'adopted', {
-        confidenceAtRecall: 0.95,
+      await reportSeeded(id, 'adopted', {
+        predicted: 0.95,
         calibrationVersion: 'iso-v1',
         byRole: `iso:${n++}`,
       })
-    await reportUsage(db, id, 'refuted', {
-      confidenceAtRecall: 0.95,
+    await reportSeeded(id, 'refuted', {
+      predicted: 0.95,
       calibrationVersion: 'iso-v1',
       byRole: `iso:${n++}`,
     })
@@ -413,11 +428,11 @@ describe('EGR-CR-029 — ECE segments by calibrationVersion (no cross-version po
 
   it('T4: a missing calibrationVersion coalesces to identity (counted under identity, excluded under iso-v1)', async () => {
     const id = await seedActiveClaim('coalesce default')
-    // a usage row WITHOUT calibrationVersion (verdict field null)
-    await reportUsage(db, id, 'adopted', { confidenceAtRecall: 0.85, byRole: 'noversion' })
+    // a recall snapshot seeded WITHOUT an explicit version defaults to 'identity' (the snapshot is the source of truth)
+    await reportSeeded(id, 'adopted', { predicted: 0.85, byRole: 'noversion' })
 
     const underIdentity = await computeCalibrationFromUsage(db, { fromVersions: ['identity'] })
-    expect(underIdentity.sampleCount).toBe(1) // null version treated as identity (coalesce)
+    expect(underIdentity.sampleCount).toBe(1) // default snapshot version is identity
 
     const underIso = await computeCalibrationFromUsage(db, { fromVersions: ['iso-v1'] })
     expect(underIso.sampleCount).toBe(0) // not counted under a different version

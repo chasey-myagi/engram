@@ -86,12 +86,11 @@ async function selfAuthor(claimText: string): Promise<string> {
 /** Seed a non-zero ECE: a high-confidence recall that was refuted (S5/S28 calibration fuel). */
 async function seedMiscalibration(claimText: string, query: string): Promise<void> {
   const claimId = await selfAuthor(claimText)
-  const [hit] = await recallClaims(db, embedder, query)
+  const [hit] = await recallClaims(db, embedder, query, { byRole: 'consumer:test' })
   if (!hit) return
   await reportUsage(db, claimId, 'refuted', {
     byRole: 'consumer:test',
-    confidenceAtRecall: hit.confidence.value,
-    calibrationVersion: hit.confidence.calibrationVersion,
+    recallSnapshotId: hit.confidence.recallSnapshotId,
   })
 }
 
@@ -169,15 +168,16 @@ describe('S31 longitudinal frozen-golden recompete — the 8th dimension (reloca
     // actually admits them as separate samples ⇒ ECE drops vs T0. (Same-identity spam would NOT move it —
     // EGR-CR-027: the gate blocks spam, not real distinct-identity signal.)
     const claimId = await selfAuthor(L3_GOLDEN[1]!.expectedClaimTexts[0]!)
-    const [hit] = await recallClaims(db, embedder, L3_GOLDEN[1]!.query)
     for (let i = 0; i < 10; i++) {
-      // hit.confidence.value is a high recall confidence; adopted at high confidence is WELL-calibrated,
-      // diluting the one mis-calibrated high-conf-refuted sample from T0 ⇒ ECE falls.
+      // Each distinct consumer does its OWN recall (gets its own snapshot bound to its by_role); the recall
+      // confidence is high, so adopted-at-high-confidence is WELL-calibrated, diluting the one mis-calibrated
+      // high-conf-refuted sample from T0 ⇒ ECE falls. (Same-identity spam would NOT move it — EGR-CR-027.)
+      const byRole = `consumer:wc-${i}`
+      const [hit] = await recallClaims(db, embedder, L3_GOLDEN[1]!.query, { byRole })
       await reportUsage(db, claimId, 'adopted', {
-        byRole: `consumer:wc-${i}`,
+        byRole,
         taskId: `task-${i}`,
-        confidenceAtRecall: hit!.confidence.value,
-        calibrationVersion: hit!.confidence.calibrationVersion,
+        recallSnapshotId: hit!.confidence.recallSnapshotId,
       })
     }
     const t1 = await runRecompeteSnapshot(db, embedder, 'T1')
@@ -198,13 +198,12 @@ describe('S31 longitudinal frozen-golden recompete — the 8th dimension (reloca
     // T1: a single consumer spams the SAME (byRole, taskId) 100× with well-calibrated adopted reports.
     // Under the OLD raw reader this would flood the diagram and drop ECE (faking "the system got better").
     const claimId = await selfAuthor(L3_GOLDEN[1]!.expectedClaimTexts[0]!)
-    const [hit] = await recallClaims(db, embedder, L3_GOLDEN[1]!.query)
+    const [hit] = await recallClaims(db, embedder, L3_GOLDEN[1]!.query, { byRole: 'consumer:spam' })
     for (let i = 0; i < 100; i++) {
       await reportUsage(db, claimId, 'adopted', {
         byRole: 'consumer:spam',
         taskId: 't-spam',
-        confidenceAtRecall: hit!.confidence.value,
-        calibrationVersion: hit!.confidence.calibrationVersion,
+        recallSnapshotId: hit!.confidence.recallSnapshotId,
       })
     }
     const t1 = await runRecompeteSnapshot(db, embedder, 'T1')
@@ -264,13 +263,13 @@ describe('S31 longitudinal frozen-golden recompete — the 8th dimension (reloca
     // A2) INTERLEAVE a mid snapshot whose value is DISTINCT from outer0: grow the KB (more coverage)
     //     and add well-calibrated distinct usages (lowers ECE) so BOTH dims move before the mid read.
     const claimId = await selfAuthor(L3_GOLDEN[1]!.expectedClaimTexts[0]!)
-    const [hit] = await recallClaims(db, embedder, L3_GOLDEN[1]!.query)
     for (let i = 0; i < 10; i++) {
+      const byRole = `consumer:mid-${i}`
+      const [hit] = await recallClaims(db, embedder, L3_GOLDEN[1]!.query, { byRole })
       await reportUsage(db, claimId, 'adopted', {
-        byRole: `consumer:mid-${i}`,
+        byRole,
         taskId: `mid-task-${i}`,
-        confidenceAtRecall: hit!.confidence.value,
-        calibrationVersion: hit!.confidence.calibrationVersion,
+        recallSnapshotId: hit!.confidence.recallSnapshotId,
       })
     }
     const mid = await runRecompeteSnapshot(db, embedder, 'T0', { ring: RING.mid })

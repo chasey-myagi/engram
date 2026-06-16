@@ -23,6 +23,7 @@ import {
   makeFakeSameFactJudge,
   reportUsage,
   schema,
+  seedRecallSnapshot,
   type DB,
   type Embedder,
 } from '@engram/core'
@@ -99,10 +100,15 @@ async function seedUnrelatedUsageTruth(marker: string): Promise<void> {
     },
     [{ sourceId: src.sourceId, locator: `unrel:${marker}`, relevance: 'exact' }],
   )
+  const recallSnapshotId = await seedRecallSnapshot(db, {
+    claimId,
+    value: 0.9,
+    byRole: 'agent:eval-consumer',
+  })
   await reportUsage(db, claimId, 'adopted', {
     taskId: `unrelated-${marker}`,
     byRole: 'agent:eval-consumer',
-    confidenceAtRecall: 0.9,
+    recallSnapshotId,
   })
 }
 
@@ -325,9 +331,14 @@ describe('M3-A · lean 真实世界 ECE 骨架', () => {
       },
       [{ sourceId: src.sourceId, locator: `notaskid:${otherClaimMarker}`, relevance: 'exact' }],
     )
+    const recallSnapshotId = await seedRecallSnapshot(db, {
+      claimId,
+      value: 0.7,
+      byRole: 'agent:eval-consumer',
+    })
     await reportUsage(db, claimId, 'adopted', {
       byRole: 'agent:eval-consumer',
-      confidenceAtRecall: 0.7,
+      recallSnapshotId,
     })
 
     const { collectFactSamples } = await import('../calibration-pilot/pilot.js')

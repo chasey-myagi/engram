@@ -48,6 +48,14 @@ export {
   type ReportUsageContext,
   type UsageEvent,
 } from './spi/report-usage.js'
+// EGR-CR-003 方案 A：recall_snapshot 读写口 + test-only seed-真快照 helper（让预测概率只能来自真实 recall）。
+export {
+  persistRecallSnapshot,
+  getRecallSnapshot,
+  seedRecallSnapshot,
+  type RecallSnapshotRow,
+  type PersistRecallSnapshotInput,
+} from './spi/recall-snapshot.js'
 export {
   computeReliability,
   computeCalibrationFromUsage,

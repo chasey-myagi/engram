@@ -42,6 +42,7 @@ import {
 import { latestEntailmentFactors } from '../verifier/patrol-verdict.js'
 import { latestUsageCorrectFactors } from '../harvest/usage-correct.js'
 import { latestHumanReviewFactors } from '../editor/human-review.js'
+import { persistRecallSnapshot } from './recall-snapshot.js'
 import { recordGap } from './metrics.js'
 
 // 内核消费门常量定义在命门模块；这里 re-export 保持既有 import 路径（index / adapter / bidding）不变。
@@ -61,6 +62,11 @@ export interface ConfidenceSnapshot {
   calibrationVersion: string
   /** 召回瞬间（同一次 recall 内所有结果共享同一 takenAt）。 */
   takenAt: Date
+  /**
+   * 本次 recall 为该结果拍下的 recall_snapshot 行 id（EGR-CR-003 方案 A）。
+   * 消费方据此调 report_usage(recallSnapshotId)——「预测概率」只能来自这次真实 recall，杜绝自报。
+   */
+  recallSnapshotId: string
 }
 
 /**
@@ -119,6 +125,11 @@ export interface RecallContext {
   topK?: number
   /** 候选 cosine 相似度下界（默认见 DEFAULT_RECALL_MIN_SIMILARITY）；低于此的近邻视为不相关。 */
   minSimilarity?: number
+  /**
+   * 召回方身份（EGR-CR-003）：落进每条结果的 recall_snapshot.by_role。后续 report_usage(recallSnapshotId)
+   * 须以**同一** by_role 上报（决策 c），否则被拒——杜绝 A 召回、B 冒名上报别人的预测。缺省 'consumer:unknown'。
+   */
+  byRole?: string
 }
 
 /**
@@ -331,6 +342,8 @@ export async function recallClaims(
         weights: std.factorWeights, // 活动权重入快照——"为什么当时这么信"可重建（历史快照随它冻结）
         calibrationVersion: g.calibrationVersion,
         takenAt,
+        // EGR-CR-003：先占位空串，下方对**最终返回集**逐条落 recall_snapshot 行后回填真 id。
+        recallSnapshotId: '',
       },
       provenances,
       mustVerify: g.value < std.mustVerifyThreshold, // 配置态信任门
@@ -360,6 +373,23 @@ export async function recallClaims(
       embedderVersion: embedder.version,
     })
     return []
+  }
+
+  // EGR-CR-003 方案 A：只对**最终返回集**逐条落 recall_snapshot（拍下 value/raw/factors/weights/版本 + 召回方
+  // by_role + takenAt），把生成的 snapshotId 回填到该结果的快照。被 slice 掉的候选不写快照（不产生消费燃料锚）。
+  // 「预测概率」自此只能来自这次真实 recall——消费方据 recallSnapshotId 上报，report_usage 按 id 查表、caller 无法自报。
+  const byRole = ctx.byRole ?? 'consumer:unknown'
+  for (const r of final) {
+    r.confidence.recallSnapshotId = await persistRecallSnapshot(db, {
+      claimId: r.claim.id,
+      value: r.confidence.value,
+      raw: r.confidence.raw,
+      factors: r.confidence.factors,
+      weights: r.confidence.weights,
+      calibrationVersion: r.confidence.calibrationVersion,
+      byRole,
+      takenAt,
+    })
   }
   return final
 }

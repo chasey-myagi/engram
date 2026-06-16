@@ -186,6 +186,48 @@ export const claimVerification = pgTable(
 )
 
 /**
+ * recall_snapshot：一次真实 recall 拍下的**预测概率快照**的 append-only 持久化（EGR-CR-003 方案 A，命门 A.3）。
+ *
+ * 背景威胁：report_usage 旧签名收 caller **自报**的 confidenceAtRecall / calibrationVersion 直接落进 usage_truth，
+ * 校准取样器（collectUsageCalibrationSamples）据此算 ECE / 拟合 g。任何 caller 都能伪造一组「完美校准」的预测值，
+ * 把 g 训歪（Goodhart）。根治：让「预测概率」**只能来自一次真实 recall**——recall 拍快照落本表、生成 snapshotId，
+ * report_usage 改收 snapshotId、按 id 查回**表里的** value/version 写 usage_truth，caller 再也碰不到这俩写入口。
+ *
+ * 一行 = 一条 claim 在某次 recall 瞬间的 ConfidenceSnapshot 值拷贝 + 召回方身份（by_role）+ 召回时刻（taken_at）。
+ * value/raw/factors/weights/calibration_version 逐字对应 ConfidenceSnapshot（"为什么当时这么信"可重建、历史冻结）。
+ * by_role = 召回方身份：report_usage 校验上报方 by_role 与本表一致（c），杜绝 A 召回、B 冒名上报别人的预测。
+ *
+ * 沿 standards / governance_state 的独立 append-only 新表式样，**绝不动**冻结的 verification_kind 枚举（红线#4，
+ * a3-firewall.test.ts ⑤ 字节钉死）——本表是独立新表，零触碰任何冻结枚举。纯校准燃料溯源锚，不进任何在线判据。
+ */
+export const recallSnapshot = pgTable(
+  'recall_snapshot',
+  {
+    id: uuid('id').primaryKey(),
+    // 被召回的 claim（FK ⇒ claim 不存在则物理写不进）。
+    claimId: uuid('claim_id')
+      .notNull()
+      .references(() => claim.id),
+    // 召回瞬间的 value=g(raw)（预测概率 ∈[0,1]）—— 校准燃料的预测值（report_usage 据此写 predictedConfidence）。
+    value: doublePrecision('value').notNull(),
+    // 写时存档证据聚合（去桶后的连续值）；与 ConfidenceSnapshot.raw 对应（审计 / 可重建）。
+    raw: doublePrecision('raw').notNull(),
+    // 七因子拆解 + 活动权重快照（ConfidenceSnapshot.factors / weights）；"为什么当时这么信"可重建，历史冻结。
+    factors: jsonb('factors').notNull(),
+    weights: jsonb('weights').notNull(),
+    // 产生该 value 的 g 版本（ConfidenceSnapshot.calibrationVersion）—— report_usage 据此写 calibrationVersion。
+    calibrationVersion: text('calibration_version').notNull(),
+    // 召回方身份（report_usage 校验上报方 by_role 与此一致，c）；缺省 'consumer:unknown'。
+    byRole: text('by_role').notNull(),
+    // 召回瞬间（同一次 recall 内所有结果共享同一 taken_at）。
+    takenAt: timestamp('taken_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // 按 claim 反查该 claim 的召回快照史 —— 归因 / 校准 JOIN。
+  (t) => [index('idx_recall_snapshot_claim').on(t.claimId)],
+)
+
+/**
  * standards：配置态规范表（A.2/A.3，主编设）。append-only —— 每次 setStandards 落一行新版本，
  * 「活动」= createdAt 最新一行。改后**新召回请求**用活动权重/门限即刻重算，历史快照（已返回的值拷贝）冻结。
  * 写时护不变量：authority 权重 >0（护 D1）、Σw ≤1、各权重 ≥0；consume_floor ≥ 内核 0.4 且 ≤ must_verify ≤1。

@@ -17,6 +17,7 @@ import { and, asc, eq, sql } from 'drizzle-orm'
 
 import type { DB } from '../db/client.js'
 import { claim, claimVerification } from '../db/schema.js'
+import { getRecallSnapshot } from './recall-snapshot.js'
 
 /** 消费结局四态（A.2）。 */
 export const USAGE_OUTCOMES = ['adopted', 'corrected', 'refuted', 'partial'] as const
@@ -33,12 +34,14 @@ export interface ReportUsageContext {
   /** 自由文本备注。 */
   note?: string
   /**
-   * 消费时所见的 ConfidenceSnapshot.value（召回瞬间的预测概率，∈[0,1]）—— 校准燃料（S5）。
-   * 把它和观测结局配对持久化，ECE 才能在「评测=消费」下从落地数据算出（绝不查询时重算 confidence）。
+   * 绑定本次消费的**一次真实 recall** 的快照 id（EGR-CR-003 方案 A）。给了即按 id 查 recall_snapshot：
+   *   - 快照不存在 → 拒（伪造 / 未召回的 claim 上报，fail-loud，不写半条）；
+   *   - 快照 by_role ≠ 本次上报 by_role → 拒（决策 c：杜绝 A 召回、B 冒名上报别人的预测）；
+   *   - 否则用**表里的** value/calibrationVersion 写 usage_truth 的 predictedConfidence/calibrationVersion。
+   * **caller 再也不能自报 confidence/version**——预测概率只能来自一次真实 recall 拍下的快照。
+   * 不给 snapshotId（如纯 adopted/refuted 真值上报、不喂校准）→ predictedConfidence/calibrationVersion 记 null。
    */
-  confidenceAtRecall?: number
-  /** 产生该预测值的 g 版本（快照的 calibrationVersion）；用于将来按 g 版本分段校准（S28）。 */
-  calibrationVersion?: string
+  recallSnapshotId?: string
   /**
    * 触发本次消费的原始召回 query（消费方在 recall 时已知）。失败回流（S11）据此把池中失败**重放过 recall_claims**
    * 给当前行为打 pass/fail —— 没有它，refuted/corrected 事件就无法回放成活回归集。
@@ -65,10 +68,12 @@ export interface UsageEvent {
   byRole: string
   taskId: string | null
   note: string | null
-  /** 召回瞬间预测概率（无则 null）。 */
+  /** 召回瞬间预测概率（来自绑定的 recall_snapshot.value；无绑定则 null）。 */
   predictedConfidence: number | null
-  /** 该预测值的 g 版本（无则 null）。 */
+  /** 该预测值的 g 版本（来自绑定的 recall_snapshot.calibration_version；无绑定则 null）。 */
   calibrationVersion: string | null
+  /** 绑定的真实 recall 快照 id（EGR-CR-003）；无绑定（裸行）则 null。 */
+  recallSnapshotId: string | null
   /** 触发本次消费的原始召回 query（无则 null）—— S11 回放用。 */
   query: string | null
   /** 人确认「KB 压根没有正确答案」（缺省 false）—— S11 路由 L5 候选用。 */
@@ -85,6 +90,7 @@ interface UsageVerdict {
   note: string | null
   predictedConfidence: number | null
   calibrationVersion: string | null
+  recallSnapshotId: string | null
   query: string | null
   kbLacksAnswer: boolean
   evalRunId: string | null
@@ -115,6 +121,8 @@ function toUsageEvent(row: typeof claimVerification.$inferSelect): UsageEvent {
       typeof verdict.predictedConfidence === 'number' ? verdict.predictedConfidence : null,
     calibrationVersion:
       typeof verdict.calibrationVersion === 'string' ? verdict.calibrationVersion : null,
+    recallSnapshotId:
+      typeof verdict.recallSnapshotId === 'string' ? verdict.recallSnapshotId : null,
     query: typeof verdict.query === 'string' ? verdict.query : null,
     kbLacksAnswer: verdict.kbLacksAnswer === true,
     // 旧行无此字段 → null（防御性读取，向后兼容）。
@@ -138,19 +146,29 @@ export async function reportUsage(
       `report_usage: invalid outcome ${JSON.stringify(outcome)} (expected one of ${USAGE_OUTCOMES.join(', ')})`,
     )
   }
-  // confidenceAtRecall 是概率，给了就必须在 [0,1]（顺带挡 NaN：NaN>=0 为 false）。
-  if (
-    ctx.confidenceAtRecall !== undefined &&
-    !(ctx.confidenceAtRecall >= 0 && ctx.confidenceAtRecall <= 1)
-  ) {
-    throw new Error(
-      `report_usage: confidenceAtRecall must be in [0,1] (got ${JSON.stringify(ctx.confidenceAtRecall)})`,
-    )
-  }
   // 前置存在性检查：claimId 不存在直接拒、连 insert 都不发（claim_verification.claim_id 的 NOT NULL FK 是兜底）。
   const exists = await db.select({ id: claim.id }).from(claim).where(eq(claim.id, claimId)).limit(1)
   if (exists.length === 0) {
     throw new Error(`report_usage: claim ${claimId} not found`)
+  }
+  // 预测概率绑定（EGR-CR-003 方案 A）：给了 recallSnapshotId 就按 id 查回**那次真实 recall** 的快照，
+  // 校验存在 + by_role 匹配（决策 c），用**表里的** value/version 作预测值；caller 无法自报 confidence/version。
+  const reporterRole = ctx.byRole ?? 'consumer:unknown'
+  let predictedConfidence: number | null = null
+  let calibrationVersion: string | null = null
+  if (ctx.recallSnapshotId !== undefined) {
+    const snap = await getRecallSnapshot(db, ctx.recallSnapshotId)
+    if (snap === null) {
+      throw new Error(`report_usage: recall snapshot ${ctx.recallSnapshotId} not found`)
+    }
+    if (snap.byRole !== reporterRole) {
+      throw new Error(
+        `report_usage: recall snapshot ${ctx.recallSnapshotId} was recalled by_role ${JSON.stringify(snap.byRole)}, ` +
+          `but this usage is reported by_role ${JSON.stringify(reporterRole)} (决策 c: reporter must match recaller)`,
+      )
+    }
+    predictedConfidence = snap.value
+    calibrationVersion = snap.calibrationVersion
   }
   const id = randomUUID()
   // query 是 S11 回放的题面：空白串无法形成可回答的问题，归一化为 null（等同省略 query）。
@@ -162,8 +180,11 @@ export async function reportUsage(
     outcome,
     taskId: ctx.taskId ?? null,
     note: ctx.note ?? null,
-    predictedConfidence: ctx.confidenceAtRecall ?? null,
-    calibrationVersion: ctx.calibrationVersion ?? null,
+    // 预测值/版本来自 recall_snapshot 表（绝非 caller 自报）；无 snapshot 则为 null。
+    predictedConfidence,
+    calibrationVersion,
+    // 绑定的真实 recall 快照 id（校准取样器据此 JOIN recall_snapshot 取 verified 样本）。无绑定为 null（裸行）。
+    recallSnapshotId: ctx.recallSnapshotId ?? null,
     query: normalizedQuery,
     kbLacksAnswer: ctx.kbLacksAnswer ?? false,
     evalRunId: ctx.evalRunId ?? null,
@@ -173,7 +194,7 @@ export async function reportUsage(
     claimId,
     kind: 'usage_truth',
     verdict,
-    byRole: ctx.byRole ?? 'consumer:unknown',
+    byRole: reporterRole,
   })
   return { verificationId: id }
 }
