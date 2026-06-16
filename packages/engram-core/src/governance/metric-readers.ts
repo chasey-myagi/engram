@@ -11,13 +11,20 @@
  * 状态机 transitionClaim 不落带时戳的迁移流水），故**无可靠数据源** → 本 reader 诚实返回中性 0 并标 degraded，
  * 绝不杜撰延迟（呼应 gap_recorded 的「不知道就说不知道」取向）。真延迟统计待状态迁移事件落库后接入。
  */
-import { eq, inArray, sql } from 'drizzle-orm'
+import { and, eq, gte, inArray, sql } from 'drizzle-orm'
 
 import type { DB } from '../db/client.js'
 import { claim, claimVerification } from '../db/schema.js'
 import { getEditorConflictQueue } from '../spi/conflict-arbiter.js'
 import { getHumanOverturns } from '../editor/human-overturn.js'
-import type { GovernanceMetrics } from './control-law.js'
+import {
+  DEFAULT_CONTROL_CONFIG,
+  type ControlConfig,
+  type GovernanceMetrics,
+} from './control-law.js'
+
+/** entailRejectRate 纳入统计的 claim 状态：仍参与晋升/消费/可被治理收紧的 claim（EGR-CR-047 维度 A）。 */
+const ENTAIL_GOVERNABLE_STATUSES = ['draft', 'active', 'flagged'] as const
 
 /** 单个指标读取结果：度量值 + 是否有意降级（无数据源/部分降级）+ 原因。 */
 export interface MetricRead {
@@ -57,10 +64,20 @@ export async function readDistillBacklog(db: DB): Promise<MetricRead> {
 }
 
 /**
- * entailRejectRate：patrol 巡查里 entailment ∈ {fail, not_co_true} 的占比（每 claim 取最新一条 entailment 裁决）。
- * 无任何 entailment 巡查 → 0（无拒绝压力）。与 patrol-verdict 同口径：倒序逐行、每 claim 取首条带 entailment 的。
+ * entailRejectRate：**近期、可治理** patrol 巡查里 entailment ∈ {fail, not_co_true} 的占比
+ * （每 claim 取最新一条 entailment 裁决）。无任何符合条件的 entailment 巡查 → 0（无拒绝压力，silent-safe）。
+ *
+ * EGR-CR-047：读的是「当前/近期晋升压力」，不是「全历史事故累积」。两道正交过滤（缺一不可）：
+ *   - 维度 A（join claim.status）：只统计仍参与治理链路的 claim（draft/active/flagged），排除已下线的
+ *     superseded/quarantined 历史坏账——对齐 readDistillBacklog/readFalseQuarantineRate 的 status 纪律。
+ *   - 维度 B（滑动时间窗）：只看 created_at ≥ now−entailWindowSeconds 的近期巡查，让陈年裁决随时间滚出统计。
+ * 两者正交：A 防「已下线坏账」、B 防「在线 claim 的陈年裁决」。窗口参数取自 ControlConfig（确定性不变量、进审计快照）。
  */
-export async function readEntailRejectRate(db: DB): Promise<MetricRead> {
+export async function readEntailRejectRate(
+  db: DB,
+  config: Pick<ControlConfig, 'entailWindowSeconds'> = DEFAULT_CONTROL_CONFIG,
+): Promise<MetricRead> {
+  const since = new Date(Date.now() - config.entailWindowSeconds * 1000)
   const rows = await db
     .select({
       claimId: claimVerification.claimId,
@@ -69,7 +86,14 @@ export async function readEntailRejectRate(db: DB): Promise<MetricRead> {
       id: claimVerification.id,
     })
     .from(claimVerification)
-    .where(eq(claimVerification.kind, 'patrol'))
+    .innerJoin(claim, eq(claim.id, claimVerification.claimId))
+    .where(
+      and(
+        eq(claimVerification.kind, 'patrol'),
+        gte(claimVerification.createdAt, since), // 维度 B：仅窗口内近期巡查
+        inArray(claim.status, ENTAIL_GOVERNABLE_STATUSES), // 维度 A：仅当前可治理 claim
+      ),
+    )
     .orderBy(sql`${claimVerification.createdAt} desc`, sql`${claimVerification.id} desc`)
   const latestByClaim = new Map<string, 'pass' | 'fail' | 'not_co_true'>()
   for (const r of rows) {
@@ -119,7 +143,8 @@ export async function readFalseQuarantineRate(db: DB): Promise<MetricRead> {
 /** 生产默认 readers：全部接真 SPI/表。 */
 export const defaultMetricReaders: MetricReaders = {
   distillBacklog: readDistillBacklog,
-  entailRejectRate: readEntailRejectRate,
+  // 闭包绑定默认窗口：保持 MetricReader = (db) => Promise<MetricRead> 契约不破（EGR-CR-047）。
+  entailRejectRate: (db) => readEntailRejectRate(db, DEFAULT_CONTROL_CONFIG),
   conflictQueueDepth: readConflictQueueDepth,
   immuneLag: readImmuneLag,
   falseQuarantineRate: readFalseQuarantineRate,

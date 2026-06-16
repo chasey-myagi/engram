@@ -62,6 +62,11 @@ export interface ControlConfig {
   readonly lagScale: number
   /** falseQuarantineRate → patrol 反向拉低的强度系数（闭环 counter-force 增益）。 */
   readonly falseQuarantineLoosen: number
+  /**
+   * entailRejectRate 的滑动时间窗（秒，>0）。只统计 created_at ≥ now−window 的近期 patrol 巡查，
+   * 让陈年事故裁决随时间自然滚出统计（EGR-CR-047 维度 B）。属确定性不变量、进审计快照，可调。
+   */
+  readonly entailWindowSeconds: number
 }
 
 /** 起步基线控制参数。gain<1 + maxStep<1 双重阻尼；deadband 给迟滞。刻度按当前体量的经验值，可调。 */
@@ -73,6 +78,7 @@ export const DEFAULT_CONTROL_CONFIG: ControlConfig = {
   conflictScale: 20,
   lagScale: 3600, // 1h 中位延迟视为满压
   falseQuarantineLoosen: 1,
+  entailWindowSeconds: 7 * 24 * 3600, // 近 7 天巡查视为「当前晋升压力」窗口（EGR-CR-047）
 }
 
 /** 全乐观基线策略（系统健康时的归宿：四旋钮归零，不收紧任何东西）。 */
