@@ -15,21 +15,31 @@ import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import {
+  addSource,
+  appendClaim,
   createDb,
   makeFakeEmbedder,
+  makeFakeEntailmentJudge,
   makeFakeSameFactJudge,
+  reportUsage,
   schema,
   type DB,
   type Embedder,
 } from '@engram/core'
 
 import { makeFakeSourceReader } from '../../read/fake-source-reader.js'
-import { buildRealWorldCorpus, type RealWorldFact } from '../realworld-ece/corpus.js'
+import {
+  buildCorroboratedCorpus,
+  buildRealWorldCorpus,
+  type RealWorldFact,
+} from '../realworld-ece/corpus.js'
 import {
   ingestCorpus,
   makeExtractingFakeRuntime,
   promoteEligible,
+  runCorroboratedEce,
   runRealWorldEce,
+  type CorroboratedDeps,
   type RealWorldDeps,
 } from '../realworld-ece/harness.js'
 
@@ -58,6 +68,42 @@ function deps(): RealWorldDeps {
     runtime: makeExtractingFakeRuntime(),
     reader: makeFakeSourceReader(),
   }
+}
+
+function corroboratedDeps(): CorroboratedDeps {
+  return { ...deps(), entailmentJudge: makeFakeEntailmentJudge() }
+}
+
+/**
+ * 预置一条**与本次评测无关**的、能被旧 `collectFactSamples` 误收的 usage_truth 行(EGR-CR-060)。
+ * 走真写路径:addSource + appendClaim 落一条真 claim,再 reportUsage 记一条满足 shape 过滤
+ * (predictedConfidence 为数、outcome='adopted')的样本。它**没有**本次 run 的 evalRunId,
+ * 故修复后(读端按 evalRunId 过滤)不得被本次测量收进来。
+ */
+async function seedUnrelatedUsageTruth(marker: string): Promise<void> {
+  const src = await addSource(db, {
+    content: `unrelated historical artifact ${marker}`,
+    kind: 'historical_artifact',
+    authorityScore: 0.9,
+  })
+  const { claimId } = await appendClaim(
+    db,
+    embedder,
+    {
+      claimText: `Unrelated-${marker} is a stray usage_truth sample`,
+      subject: `Unrelated-${marker}`,
+      predicate: 'is',
+      object: 'a stray usage_truth sample',
+      asOf: new Date(),
+      createdBy: 'agent:eval-seed',
+    },
+    [{ sourceId: src.sourceId, locator: `unrel:${marker}`, relevance: 'exact' }],
+  )
+  await reportUsage(db, claimId, 'adopted', {
+    taskId: `unrelated-${marker}`,
+    byRole: 'agent:eval-consumer',
+    confidenceAtRecall: 0.9,
+  })
 }
 
 beforeAll(async () => {
@@ -216,5 +262,78 @@ describe('M3-A · lean 真实世界 ECE 骨架', () => {
     expect(stats.promoted).toBe(0)
     expect(stats.expectedBlocked).toBe(1)
     expect(stats.outcomes[0]!.kind).toBe('expected_blocked')
+  }, 120_000)
+
+  it('⑤ 回归(EGR-CR-060):预置无关 usage_truth 后,extraction-only 仍测空集(本次 run 隔离)', async () => {
+    // 台账 Regression Test Map 第 1471 行的硬性回归:runRealWorldEce 的 measurement 必须只含本次 run 产出的样本,
+    // 不得把库里已有的历史 usage_truth(M2 pilot / 旧 M3-A / reflux 回放等)混进来。
+    // red(未修前必失败):旧 collectFactSamples(deps.db) 无差别读整库 ⇒ 收到 N 条预置样本 ⇒ sampleCount=N>0、measurement 非 null。
+    const marker = randomUUID()
+    // 预置 3 条与本次 corpus 无关、但满足 collectFactSamples shape 过滤(能被旧实现误收)的历史样本。
+    await seedUnrelatedUsageTruth(`${marker}-a`)
+    await seedUnrelatedUsageTruth(`${marker}-b`)
+    await seedUnrelatedUsageTruth(`${marker}-c`)
+
+    const result = await runRealWorldEce(deps(), { sourcesPerFact: 1, entailmentPass: true })
+
+    // 本次 extraction-only 确实 0 晋升、0 usage(与测② 一致)。
+    expect(result.usage.usageRows).toBe(0)
+    // 关键:尽管库里有 3 条预置样本,本次测量集仍只含本 run 样本(=0)。
+    expect(result.sampleCount).toBe(0)
+    // 空集 ⇒ 无曲线,不得因历史样本返回非 null。
+    expect(result.measurement).toBeNull()
+  }, 120_000)
+
+  it('⑥ 回归(EGR-CR-060):有真实样本时 sampleCount 严格等于本次 usageRows(护栏不变量)', async () => {
+    // 用 runCorroboratedEce(多源印证路径,会真产出 active claim 与 usage 样本)跑一次;调用前同样预置无关 usage_truth。
+    // red:旧实现 sampleCount = usageRows + N(混入预置)⇒ 断言失败。green:按 evalRunId 过滤后精确相等。
+    const marker = randomUUID()
+    await seedUnrelatedUsageTruth(`co-${marker}-a`)
+    await seedUnrelatedUsageTruth(`co-${marker}-b`)
+
+    const facts = buildCorroboratedCorpus()
+    const result = await runCorroboratedEce(corroboratedDeps(), { binCount: 20, heldoutEvery: 3 })
+
+    // 本次写入 usage 行数 = 本次读回样本数,预置历史样本一条都不混入。
+    expect(result.usage.usageRows).toBe(facts.length)
+    expect(result.sampleCount).toBe(result.usage.usageRows)
+    // ECE 完全基于本 run 数据。
+    expect(result.measurement).not.toBeNull()
+    expect(result.measurement!.totalSamples).toBe(result.usage.usageRows)
+  }, 120_000)
+
+  it('⑦ 单元(EGR-CR-060):evalRunId 不匹配且 taskId 缺失的样本不被本次过滤收入', async () => {
+    // 守 pilot.ts 的 taskId 缺失退化空串隐患:即便 taskId 缺失,只要 evalRunId 不属于本次 run,过滤后就不该返回它。
+    const runId = randomUUID()
+    const otherClaimMarker = randomUUID()
+    // 落一条真 claim,reportUsage 时**故意不带 taskId**(退化空串),且不带本次 runId 的 evalRunId。
+    const src = await addSource(db, {
+      content: `unrelated no-taskid artifact ${otherClaimMarker}`,
+      kind: 'historical_artifact',
+      authorityScore: 0.9,
+    })
+    const { claimId } = await appendClaim(
+      db,
+      embedder,
+      {
+        claimText: `NoTaskId-${otherClaimMarker} is a stray sample`,
+        subject: `NoTaskId-${otherClaimMarker}`,
+        predicate: 'is',
+        object: 'a stray sample',
+        asOf: new Date(),
+        createdBy: 'agent:eval-seed',
+      },
+      [{ sourceId: src.sourceId, locator: `notaskid:${otherClaimMarker}`, relevance: 'exact' }],
+    )
+    await reportUsage(db, claimId, 'adopted', {
+      byRole: 'agent:eval-consumer',
+      confidenceAtRecall: 0.7,
+    })
+
+    const { collectFactSamples } = await import('../calibration-pilot/pilot.js')
+    // 按本次(空)run 过滤:不应收到那条 evalRunId 不匹配、taskId 缺失的样本。
+    const scoped = await collectFactSamples(db, { evalRunId: runId })
+    expect(scoped.some((s) => s.factId === '')).toBe(false)
+    expect(scoped.length).toBe(0)
   }, 120_000)
 })

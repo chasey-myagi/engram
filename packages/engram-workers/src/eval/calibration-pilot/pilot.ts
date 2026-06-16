@@ -7,7 +7,7 @@
  * 泛化的单元是「事实」:每档很多事实凑出可测正确率,g 用该档**训练事实**学到的比率,去预测该档**留出(未见)事实**
  * ⇒ 真泛化(非查表)。切分按 fact 整组进 fit 或 heldout,故无一事实跨两边(factsInBothSides=0 钉死)。
  */
-import { eq } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 
 import {
   addSource,
@@ -225,12 +225,29 @@ export async function generateUsage(
   return { recallHits, recallMisses, usageRows }
 }
 
-/** 从真 usage_truth 读回校准燃料,带 factId(taskId):评测=消费,只读 outcome+predictedConfidence(A3:无胜负率通道)。 */
-export async function collectFactSamples(db: DB): Promise<FactSample[]> {
+/**
+ * 从真 usage_truth 读回校准燃料,带 factId(taskId):评测=消费,只读 outcome+predictedConfidence(A3:无胜负率通道)。
+ *
+ * **本次 run 隔离(EGR-CR-060)**:传 `opts.evalRunId` 时,只收 verdict→evalRunId 命中本次 run 的样本
+ * (SQL 端 JSONB 路径过滤,不整表扫描),把库里历史/无关 usage_truth 挡在测量集外。不传时保持旧行为(整库),
+ * 不破坏 runCalibrationPilot(自有临时库)等不需隔离的调用方。
+ */
+export async function collectFactSamples(
+  db: DB,
+  opts: { evalRunId?: string } = {},
+): Promise<FactSample[]> {
+  const kindFilter = eq(schema.claimVerification.kind, 'usage_truth')
+  const where =
+    opts.evalRunId !== undefined
+      ? and(
+          kindFilter,
+          sql`(${schema.claimVerification.verdict} ->> 'evalRunId') = ${opts.evalRunId}`,
+        )
+      : kindFilter
   const rows = await db
     .select({ verdict: schema.claimVerification.verdict })
     .from(schema.claimVerification)
-    .where(eq(schema.claimVerification.kind, 'usage_truth'))
+    .where(where)
   const out: FactSample[] = []
   for (const r of rows) {
     const v = r.verdict as { outcome?: unknown; taskId?: unknown; predictedConfidence?: unknown }

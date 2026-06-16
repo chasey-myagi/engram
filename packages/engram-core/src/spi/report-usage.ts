@@ -49,6 +49,12 @@ export interface ReportUsageContext {
    * 仅当上报方是人（by_role 'human…' 前缀）时这条信号才被回流路由进 L5 缺口候选队列（S11），等 QA 晋升（S12）。
    */
   kbLacksAnswer?: boolean
+  /**
+   * 评测 run 的隔离标签（EGR-CR-060）：一次性可复用评测入口（如 runRealWorldEce）给本次写入的 usage_truth 打上
+   * 同一个 run id，读端据此只收**本次 run** 的样本，不把库里历史/无关样本混进测量集。
+   * **纯归因/隔离标签**——不参与 g 拟合、不进 collectUsageCalibrationSamples 的胜负率通道（A3 红线之外），缺省 null（向后兼容旧行）。
+   */
+  evalRunId?: string
 }
 
 /** usage_truth 事件的读出形状（verdict JSONB 展平 + 列字段）。 */
@@ -67,6 +73,8 @@ export interface UsageEvent {
   query: string | null
   /** 人确认「KB 压根没有正确答案」（缺省 false）—— S11 路由 L5 候选用。 */
   kbLacksAnswer: boolean
+  /** 评测 run 隔离标签（EGR-CR-060）；无则 null —— 读端据此只收本次 run 样本。 */
+  evalRunId: string | null
   createdAt: Date
 }
 
@@ -79,6 +87,7 @@ interface UsageVerdict {
   calibrationVersion: string | null
   query: string | null
   kbLacksAnswer: boolean
+  evalRunId: string | null
 }
 
 function isUsageOutcome(x: unknown): x is UsageOutcome {
@@ -108,6 +117,8 @@ function toUsageEvent(row: typeof claimVerification.$inferSelect): UsageEvent {
       typeof verdict.calibrationVersion === 'string' ? verdict.calibrationVersion : null,
     query: typeof verdict.query === 'string' ? verdict.query : null,
     kbLacksAnswer: verdict.kbLacksAnswer === true,
+    // 旧行无此字段 → null（防御性读取，向后兼容）。
+    evalRunId: typeof verdict.evalRunId === 'string' ? verdict.evalRunId : null,
     createdAt: row.createdAt,
   }
 }
@@ -155,6 +166,7 @@ export async function reportUsage(
     calibrationVersion: ctx.calibrationVersion ?? null,
     query: normalizedQuery,
     kbLacksAnswer: ctx.kbLacksAnswer ?? false,
+    evalRunId: ctx.evalRunId ?? null,
   }
   await db.insert(claimVerification).values({
     id,
