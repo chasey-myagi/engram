@@ -169,6 +169,13 @@
       "when": 1781594877315,
       "tag": "0023_overrated_zuras",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1781596427981,
+      "tag": "0024_lethal_serpent_society",
+      "breakpoints": true
     }
   ]
 }

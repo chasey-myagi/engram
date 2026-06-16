@@ -501,6 +501,48 @@ describe('S30 L3 system dimensions (substrate-ready 7) — append-only events th
     expect(r2.dimensions.coverage).toBeGreaterThan(r1.dimensions.coverage) // run-B sees the new claim
   })
 
+  // EGR-CR-056 (#131): runId = 一轮评测的唯一身份。同 runId 重跑必须**整体拒绝**（写前 fail-loud、零半批），
+  // 否则 series 出幽灵重复点、aggregate 静默 last-wins，两个读口对同一份脏数据给出互相矛盾的图景。
+  it('EGR-CR-056: same-runId rerun is rejected; series/aggregate never split one logical run into a duplicate point + last-wins', async () => {
+    // 1. 第一批：2/4 answered ⇒ coverage 0.5。
+    await answerTwoGolden()
+    const r1 = await runSystemDimensions(db, embedder, 'rerun-1')
+    expect(r1.dimensions.coverage).toBe(0.5)
+    const firstRows = await getDimensionEvents(db, { runId: 'rerun-1' })
+    expect(firstRows).toHaveLength(6) // immunity 未度量 ⇒ 6 行
+
+    // 2. 改变 KB 状态：再答一题 ⇒ 重跑本应得到不同读数（coverage 0.75），用来证明拒绝的是「同 runId 重跑」而非读数相同。
+    await selfAuthor(L3_GOLDEN[2]!.expectedClaimTexts[0]!)
+
+    // A1 写侧 fail-loud：用同一个 runId 重跑被整体拒绝。
+    await expect(runSystemDimensions(db, embedder, 'rerun-1')).rejects.toThrow(
+      /runId .*(已存在|exists)/,
+    )
+
+    // A2 零半批副作用：重跑失败后 rerun-1 的行数仍 = 第一批，且每行 id/value 一一对应未变（无第二批残留）。
+    const afterReject = await getDimensionEvents(db, { runId: 'rerun-1' })
+    expect(afterReject).toEqual(firstRows)
+
+    // A3 series 不重复：coverage 序列里 runId === 'rerun-1' 的点恰好 1 个，value === 第一批读数（无幽灵重复点）。
+    const coverageSeries = await getDimensionSeries(db, DIMENSION.coverage)
+    const rerun1Points = coverageSeries.filter((p) => p.runId === 'rerun-1')
+    expect(rerun1Points).toHaveLength(1)
+    expect(rerun1Points[0]!.value).toBe(r1.dimensions.coverage)
+
+    // A4 aggregate 一致：聚合口径与 series 唯一点一致、无 last-wins 分裂。
+    const agg = await aggregateLatest(db, { runId: 'rerun-1' })
+    expect(agg.coverage).toBe(r1.dimensions.coverage)
+
+    // A5 新 runId 正常：换新 runId 重跑成功，coverage > 第一批（证明拒绝的是「同 runId」而非「重跑本身」）。
+    const r2 = await runSystemDimensions(db, embedder, 'rerun-2')
+    expect(r2.dimensions.coverage).toBeGreaterThan(r1.dimensions.coverage)
+
+    // A6 DB UNIQUE 兜底：绕过写函数直接 recordDimension 同 (runId, dimension) 也被唯一约束挡住。
+    await expect(
+      recordDimension(db, { runId: 'rerun-1', dimension: DIMENSION.coverage, value: 0.9 }),
+    ).rejects.toThrow()
+  })
+
   it('ECE-down / coverage-up time-series are DRAWABLE: getDimensionSeries reads the value series over runs', async () => {
     // run 0: nothing answered ⇒ coverage 0
     await runSystemDimensions(db, embedder, 'r0')
