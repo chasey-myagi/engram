@@ -24,12 +24,12 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@engram/core": "workspace:*",
-    "drizzle-orm": "^0.45.2"
+    "@engram/core": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/pg": "^8.20.0",
+    "drizzle-orm": "^0.45.2",
     "pg": "^8.21.0",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

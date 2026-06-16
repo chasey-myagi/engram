@@ -25,6 +25,7 @@ export {
   KERNEL_CONFIDENCE_FLOOR,
   MUST_VERIFY_THRESHOLD,
   DEFAULT_RECALL_LIMIT,
+  RECALL_SOURCE_META_KEYS,
   type RecallResult,
   type RecallContext,
   type ConfidenceSnapshot,

@@ -40,7 +40,7 @@ function makeResult(id: string, value: number, sourceId = `src-${id}`): RecallRe
       calibrationVersion: 'identity',
       takenAt: new Date('2025-01-01T00:00:00Z'),
     },
-    provenances: [{ sourceId, locator: 'p1', relevance: 'exact' }],
+    provenances: [{ sourceId, locator: 'p1', relevance: 'exact', sourceMeta: {} }],
     mustVerify: value < 0.6,
     contradicts: [],
     embeddingVersion: null,
@@ -103,7 +103,12 @@ describe('applyAdapter — monotone-tightening operator (A.2/A.6)', () => {
     const rewriteSource: RecallAdapter = (rs) =>
       rs.map((r) =>
         r.claim.id === 'a'
-          ? { ...r, provenances: [{ sourceId: 'forged', locator: 'p1', relevance: 'exact' }] }
+          ? {
+              ...r,
+              provenances: [
+                { sourceId: 'forged', locator: 'p1', relevance: 'exact', sourceMeta: {} },
+              ],
+            }
           : { ...r },
       )
     expect(() => applyAdapter(kernel(), rewriteSource)).toThrow(/adapter relaxed.*provenance/i)
@@ -115,7 +120,7 @@ describe('applyAdapter — monotone-tightening operator (A.2/A.6)', () => {
               ...r,
               provenances: [
                 ...r.provenances,
-                { sourceId: 'extra', locator: 'p2', relevance: 'supporting' },
+                { sourceId: 'extra', locator: 'p2', relevance: 'supporting', sourceMeta: {} },
               ],
             }
           : { ...r },
@@ -283,8 +288,8 @@ describe('applyAdapter — monotone-tightening operator (A.2/A.6)', () => {
     const twoProv: RecallResult = {
       ...makeResult('m', 0.9),
       provenances: [
-        { sourceId: 's1', locator: 'l1', relevance: 'exact' },
-        { sourceId: 's2', locator: 'l2', relevance: 'supporting' },
+        { sourceId: 's1', locator: 'l1', relevance: 'exact', sourceMeta: {} },
+        { sourceId: 's2', locator: 'l2', relevance: 'supporting', sourceMeta: {} },
       ],
     }
     const reorder: RecallAdapter = (rs) =>

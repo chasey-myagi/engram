@@ -13,6 +13,7 @@
     "typecheck": "pnpm -r typecheck",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
+    "check:adapter-boundary": "node tools/check-adapter-boundary.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
