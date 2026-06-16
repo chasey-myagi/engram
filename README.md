@@ -102,7 +102,7 @@ CLAUDE.md                           给在本仓库干活的 agent 的工作指�
 | **Harvester** | `report_usage` + cron | 纯统计,无 LLM | 从 usage_truth 统 observed_correctness(只计独立用户,防刷单)喂 f4 与校准 |
 | **Arbiter** | `conflict.detected` | 有界 agent loop | 冲突按固定优先级裁(人工>取代>时效>权威>独立印证数),能定唯一胜者则机判、否则升级主编 |
 
-`judge ≠ athlete`:各工种独立 DB 角色 + 会话隔离,巡查者不给自己产出背书。
+`judge ≠ athlete`:各工种带**独立逻辑角色**(`by_role` / `created_by` 标记)+ **会话审计**;物理 DB role 隔离(CREATE ROLE / GRANT / RLS)**待实现**——当前角色边界由**应用层守卫**(`isHumanRole` 等,见 EGR-CR-002)强制,非 DB 物理隔离。巡查者不给自己产出背书。
 
 ## 命门:confidence 从「来源计数器」到「可校准的概率」
 

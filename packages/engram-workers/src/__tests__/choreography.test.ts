@@ -6,7 +6,8 @@
  *   1. 无中心编排的级联：一次 `source.ingested` 经各工种**声明的触发**驱动正确下游级联，跑到收敛，无单一在线模型调度。
  *      并物理证明负判「无在线 meta-orchestrator」——路由解自各工种导出的 TRIGGER 常量，非模型。
  *   2. 静默降级 / 无单点失效：逐一杀掉每个工种（处理器抛错），读写主干（appendClaim/recallClaims）仍服务、其余工种仍触发。
- *   3. by_role + 各自 DB 角色贯穿级联（judge≠athlete）：各工种把行写在自己的 by_role 下，绝不给自己产出背书。
+ *   3. by_role 逻辑角色标记贯穿级联（judge≠athlete）：各工种把行写在自己的 by_role 下，绝不给自己产出背书。
+ *      注意是**应用层逻辑角色**（by_role 标记），非 DB 物理 role 隔离（后者待实现，见 EGR-CR-006）。
  *   4. loop-vs-one-shot 形态匹配 A.7：结构性断言 Distiller/Arbiter 是有界 loop（带 AgentRuntime + maxTurns），
  *      Verifier/Reconciler/Harvester 是函数 + 点状 LLM（无 AgentRuntime / 无 loop）。
  *
@@ -813,8 +814,8 @@ describe('S24 choreography integration — A.7 event-driven cascade, no online m
     })
   })
 
-  // ── 断言 3：by_role + 各自 DB 角色贯穿级联（judge≠athlete）────────────────────────────────
-  describe('3. by_role + own DB role across the cascade (judge≠athlete)', () => {
+  // ── 断言 3：by_role 逻辑角色标记贯穿级联（judge≠athlete；非 DB 物理 role 隔离，后者待实现）──────────
+  describe('3. by_role + own logical role (by_role tag) across the cascade (judge≠athlete)', () => {
     it('after a full cascade each worker’s rows carry its OWN by_role, and no worker endorses its own athlete output', async () => {
       // source.ingested 链：Distiller 产两条矛盾 draft claim → Verifier 巡查写 patrol 行（fail）→ 收紧由 NC/A.4 决定。
       // conflict.detected 链（同一总线）：Arbiter 在既有 active KB 对上机判自裁、落采信标记。

@@ -427,7 +427,7 @@ conf        = g(raw)                                 # 见下;无法计算的因
 | Arbiter | `conflict.detected` | **有界 loop** | 升级主编 |
 | Harvester | report_usage batch + 每日 | 纯统计 | 无 g 更新,维持现状 |
 
-**loop vs one-shot 工程判据**:执行前状态空间是否已收敛 —— `若需多步、且下一步依赖上一步产出(分支因子运行时才知)→ 真 agent loop(Distiller/Arbiter);否则 = 函数/统计 + 点状一次 LLM(内嵌 1×LLM ≠ loop)`。judge≠athlete:各工种独立 DB 角色 + 会话隔离(`by_role` 入 `claim_verification`),巡查者不给自己背书。
+**loop vs one-shot 工程判据**:执行前状态空间是否已收敛 —— `若需多步、且下一步依赖上一步产出(分支因子运行时才知)→ 真 agent loop(Distiller/Arbiter);否则 = 函数/统计 + 点状一次 LLM(内嵌 1×LLM ≠ loop)`。judge≠athlete:各工种带独立逻辑角色(`by_role` 入 `claim_verification`)+ 会话审计,巡查者不给自己背书;物理 DB role 隔离(CREATE ROLE / RLS)**待实现**,当前角色边界由应用层守卫强制(见 EGR-CR-006)。
 
 ## A.8 控制面:恒温器五指标 + Advisor 验收门
 
