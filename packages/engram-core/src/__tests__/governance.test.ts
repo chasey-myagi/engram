@@ -532,7 +532,6 @@ describe('S26 governance — rollbackTo restores the ACTIVE consume gate, not ju
     })
     const { sourceId } = await addSource(db, {
       content: 'b',
-      contentHash: randomUUID(),
       kind: 'structured_spec',
       authorityScore: 0.9,
     })
