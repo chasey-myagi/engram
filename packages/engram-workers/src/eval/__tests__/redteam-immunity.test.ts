@@ -38,6 +38,7 @@ import {
   transitionClaim,
   type DB,
   type ProvenanceInput,
+  type RedTeamItem,
 } from '@engram/core'
 
 import { runNearDupPoison, runRedTeamGeneration, type ClassScore } from '../redteam-injector.js'
@@ -126,11 +127,12 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
     let scores: ClassScore[]
 
     beforeAll(async () => {
-      scores = await runRedTeamGeneration(
+      // EGR-CR-019：公开入口现自带 A1（内建 admission）；干净世代 item 全过 A1，classScores 与加固前等价。
+      ;({ classScores: scores } = await runRedTeamGeneration(
         { db, embedder },
         REDTEAM_GENERATION_ITEMS,
         resetWorkTables,
-      )
+      ))
     })
 
     it('false → Verifier entailment fail → claim flagged（每条都被真 Verifier 逮到）', () => {
@@ -286,11 +288,11 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
         items: [...REDTEAM_GENERATION_ITEMS],
         reason: 'S29 dimension test generation',
       })
-      scores = await runRedTeamGeneration(
+      ;({ classScores: scores } = await runRedTeamGeneration(
         { db, embedder },
         REDTEAM_GENERATION_ITEMS,
         resetWorkTables,
-      )
+      ))
       for (const s of scores) {
         await recordImmunityScore(db, {
           generationVersion: 'rt-dim-test',
@@ -424,7 +426,7 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
           .map((s) => `${s.redteamClass}:${s.detected}/${s.injected}`)
           .sort()
           .join('|')
-      expect(sig(run1)).toBe(sig(run2)) // 同一冻结集、同一确定性工种 → 同分
+      expect(sig(run1.classScores)).toBe(sig(run2.classScores)) // 同一冻结集、同一确定性工种 → 同分
     })
   })
 
@@ -615,7 +617,7 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
 
     it('T1：正常返回后所有 work tables 为空，且 scores 四类各 injected>=1', async () => {
       // 干净起跑（beforeEach 已清）；跑完整世代，最后一条 item 的写入若不被后清就会残留。
-      const scores = await runRedTeamGeneration(
+      const { classScores: scores } = await runRedTeamGeneration(
         { db, embedder },
         REDTEAM_GENERATION_ITEMS,
         resetWorkTables,
@@ -659,6 +661,135 @@ describe('S29 · red-team four-class immunity (real workers via SPI)', () => {
       for (const t of EVAL_WORK_TABLES) {
         expect(counts[t]).toBe(0)
       }
+    })
+  })
+
+  // EGR-CR-019（#97）：公开评分入口 runRedTeamGeneration() 必须**自带** A1 题免疫边界——未 A1-admitted 的
+  // 带毒 item 经公开入口直喂时，结构性**不计进任何 ClassScore 的 injected 分母**、且永不进 golden。落实台账
+  // Regression Test Map：「redteam scorer 测试验证未 A1-admitted item 不能通过公开 runRedTeamGeneration() 计分」。
+  // 现有 A1 测试要么直调 promoteCandidate、要么经外层 runRedBlueRound——无一覆盖公开入口的**直喂**路径。
+  describe('EGR-CR-019 · 公开 runRedTeamGeneration() 自带 A1：未 admitted 的带毒 item 直喂不计分、不进 golden', () => {
+    beforeEach(resetWorkTables)
+
+    it('T1（红线主测）· 库本能答的带毒 item 直喂 → BLOCK，不计入任何 class 分母、不进 golden', async () => {
+      // 带毒 item：claimText 与一条**预先 active** 的同义 claim 重合 → recall 命中 → kbTrulyLacks=false →
+      // 这是污染真值的带毒考题（库本能答），A1 必 BLOCK。再配一条干净 false item（库真没答案 → 过 A1）。
+      const poisoned: RedTeamItem = {
+        id: 'cr019-poisoned-kb-answers',
+        redteamClass: 'false',
+        claimText: 'The cr019 poisoned exam asks an already-answered question wibble-42',
+        evidence: 'The cr019 poisoned exam asks an already-answered question wibble-42.',
+        sourceKind: 'formal_document',
+      }
+      const cleanFalse = REDTEAM_GENERATION_ITEMS.find((i) => i.redteamClass === 'false')!
+
+      // 与 red-blue-round.test.ts:343 同款 seedingReset：每条 item 前清库后**重新 seed** 那条同义 active claim，
+      // 让 A1 在 clean+seed 的 KB 上对带毒 item 验真（评测=消费，经真 append/transition，不旁路改状态）。
+      const seedingReset = async () => {
+        await resetWorkTables()
+        await appendActiveClaim({ claimText: poisoned.claimText })
+      }
+
+      // 直喂公开入口（方案 A 签名：第四参 { confirmedBy }）。
+      const res = await runRedTeamGeneration(
+        { db, embedder },
+        [cleanFalse, poisoned],
+        seedingReset,
+        {
+          confirmedBy: 'human:curator',
+        },
+      )
+
+      // ① 带毒 item 出现在 blockedItemIds、且 A1 给了人读理由（库已能答）。
+      expect(res.blockedItemIds).toContain(poisoned.id)
+      const poisonAdm = res.admissions.find((a) => a.itemId === poisoned.id)!
+      expect(poisonAdm.admitted).toBe(false)
+      expect(poisonAdm.reasons.some((r) => r.includes('KB already answers'))).toBe(true)
+
+      // ② 带毒 item **不计入任何 class 的 injected 分母**：'false' 类只含 cleanFalse（injected===1，而非 2）。
+      const falseScore = scoreOf(res.classScores, 'false')
+      expect(falseScore.injected).toBe(1)
+      expect(falseScore.outcomes.map((o) => o.itemId)).toContain(cleanFalse.id)
+      expect(falseScore.outcomes.map((o) => o.itemId)).not.toContain(poisoned.id)
+      // 带毒 item 也不在任何 class 的任何 outcome 里（绝不进分母）。
+      const allScored = res.classScores.flatMap((s) => s.outcomes.map((o) => o.itemId))
+      expect(allScored).not.toContain(poisoned.id)
+
+      // ③ 带毒 item 的 claimText **绝不进 golden_questions**（永不计分）。
+      const poisonGolden = await db
+        .select()
+        .from(schema.goldenQuestions)
+        .where(eq(schema.goldenQuestions.query, poisoned.claimText))
+      expect(poisonGolden.length).toBe(0)
+    })
+
+    it('T2 · 自相矛盾的结构化毒株 item 直喂 → BLOCK，不计分、不进 golden（覆盖第二条 A1 BLOCK 分支）', async () => {
+      // contradiction 类的 anchor（同 S/P、正 object）作锚，item 自身 object 反向 → A1 透传 S/P/O 造毒株 → S8 落
+      // contradicts 边 → noSelfContradiction=false → BLOCK。claimText 用与库无 trigram 交集的独特 token →
+      // kbTrulyLacks=true，逼 A1 走到 self-contradiction 检查（否则会先被 kbTrulyLacks=false 提前 BLOCK）。
+      const contra = REDTEAM_GENERATION_ITEMS.find((i) => i.redteamClass === 'contradiction')!
+      const selfContra: RedTeamItem = {
+        ...contra,
+        id: 'cr019-self-contradicting',
+        claimText: 'zqxwvk-cr019 gap question with no kb answer',
+      }
+      const anchor = selfContra.anchor!
+      // seedingReset：清库后 seed 那条与 item 同 S/P、正 object 的 active 锚（item 自身 object 反向）。
+      const seedingReset = async () => {
+        await resetWorkTables()
+        await appendActiveClaim({
+          claimText: anchor.claimText,
+          ...(anchor.subject !== undefined ? { subject: anchor.subject } : {}),
+          ...(anchor.predicate !== undefined ? { predicate: anchor.predicate } : {}),
+          ...(anchor.object !== undefined ? { object: anchor.object } : {}),
+        })
+      }
+
+      const res = await runRedTeamGeneration({ db, embedder }, [selfContra], seedingReset, {
+        confirmedBy: 'human:curator',
+      })
+
+      // BLOCK：不进被计分 cohort、A1 给了自相矛盾的人读理由。
+      expect(res.blockedItemIds).toContain(selfContra.id)
+      const adm = res.admissions.find((a) => a.itemId === selfContra.id)!
+      expect(adm.admitted).toBe(false)
+      expect(adm.reasons.some((r) => r.includes('self-contradict'))).toBe(true)
+      // 全被 BLOCK ⇒ 空 cohort ⇒ 无分可判（classScores 为空，毒株不在任何分母）。
+      expect(res.classScores).toEqual([])
+      // 永不进 golden（带 unique token 的 query 一条都不该落 golden）。
+      const goldens = await db.select().from(schema.goldenQuestions)
+      expect(goldens.filter((g) => g.query.includes('zqxwvk-cr019')).length).toBe(0)
+    })
+
+    it('T3（回归保护）· 全部 item 过 A1 时，公开入口的 per-class 检出率与重打分确定性不变', async () => {
+      // 干净世代（全过 A1）经公开入口直喂：每类 admitted、各 injected>=3、detected===injected（与加固前等价），
+      // 且 blockedItemIds 为空——证明加固是外科手术式的，没回退正常路径。
+      const run1 = await runRedTeamGeneration(
+        { db, embedder },
+        REDTEAM_GENERATION_ITEMS,
+        resetWorkTables,
+      )
+      expect(run1.blockedItemIds).toEqual([])
+      expect(run1.admissions.every((a) => a.admitted)).toBe(true)
+      expect(new Set(run1.classScores.map((s) => s.redteamClass))).toEqual(
+        new Set(['false', 'contradiction', 'stale', 'near_dup_poison']),
+      )
+      for (const s of run1.classScores) {
+        expect(s.injected).toBeGreaterThanOrEqual(3)
+        expect(s.detected).toBe(s.injected) // 全检出（正常路径行为不变）
+      }
+      // 重打分确定性：同一冻结集再跑得同一 per-class 签名（固定敌手 → 可纵向比较）。
+      const run2 = await runRedTeamGeneration(
+        { db, embedder },
+        REDTEAM_GENERATION_ITEMS,
+        resetWorkTables,
+      )
+      const sig = (scores: ClassScore[]) =>
+        scores
+          .map((s) => `${s.redteamClass}:${s.detected}/${s.injected}`)
+          .sort()
+          .join('|')
+      expect(sig(run1.classScores)).toBe(sig(run2.classScores))
     })
   })
 })

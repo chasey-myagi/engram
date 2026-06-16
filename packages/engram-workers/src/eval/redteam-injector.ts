@@ -37,6 +37,7 @@ import {
 } from '@engram/core'
 import { eq } from 'drizzle-orm'
 
+import { admitViaA1, type ItemAdmission } from './a1-admission.js'
 import { runVerifier } from '../verifier.js'
 import { reconcileBatch } from '../reconciler.js'
 import { arbitrateConflicts } from '../arbiter.js'
@@ -553,14 +554,16 @@ export async function injectAndAssert(
 }
 
 /**
- * 跑整个世代的红队注入 → per-class 打分（detected/injected → detectionRate）。
+ * **内部**打分器（EGR-CR-019）：跑整个世代的红队注入 → per-class 打分（detected/injected → detectionRate）。
+ * **只对已 A1-admitted 的 cohort 注入打分**——它假设调用方已过 A1（编排层 red-blue-round 在②步自跑，公开
+ * runRedTeamGeneration 在内部自跑），自身**不带** A1 边界。故**不**从 index.ts 导出（避免暴露一个绕过 A1 的旁路入口）。
  * resetDb 在**每条样本前**清库：每条对抗样本独立注入（互不串扰），与 l1-reconciler golden 的 per-item 隔离同款。
  *
  * **后置不变量（EGR-CR-049）**：调用返回后 work tables 已清空——`finally` 在正常返回与异常抛出两条路径上都补一次
  * resetDb，兜底清掉最后一条样本（红队 item 都是故意构造的毒株）。caller 拿回的永远是干净 DB，**无需**自己后清。
  * 取舍：不保留最后样本供调试（诊断应走返回的 outcome 快照，而非靠脏库）。
  */
-export async function runRedTeamGeneration(
+export async function scoreAdmittedGeneration(
   deps: RedTeamRunDeps,
   items: readonly RedTeamItem[],
   resetDb: () => Promise<void>,
@@ -589,6 +592,67 @@ export async function runRedTeamGeneration(
     return scores
   } finally {
     // 返回前（含异常路径）兜底清掉最后一条样本：把「返回后 DB 干净」从隐性契约升级为单点强制的不变量。
+    await resetDb()
+  }
+}
+
+/** 公开评分入口的可选项（A1 晋升人；人的架构权威，须 'human…' 前缀）。 */
+export interface RunRedTeamOptions {
+  /** A1 晋升人。默认 'human:red-team-curator'。 */
+  confirmedBy?: string
+}
+
+/** 公开评分入口的结构化结果：per-class 检出率 + A1 逐条裁决 + 被 BLOCK 的 item id（不进任何 ClassScore 分母）。 */
+export interface RedTeamGenerationResult {
+  /** per-class detection（纯报告维度）。**只**含 A1-admitted item——被 BLOCK 的毒株结构性不进任何分母。 */
+  classScores: ClassScore[]
+  /** A1 逐条裁决（admitted=true 才进被计分 cohort）。 */
+  admissions: ItemAdmission[]
+  /** 被 A1 BLOCK、永不计分的 item id（库本能答 / 自相矛盾 / 不可溯的带毒考题）。 */
+  blockedItemIds: string[]
+}
+
+/**
+ * **公开评分入口（EGR-CR-019 加固）**：A1 题免疫成为 scorer **自带的边界**，而非调用方的可选前置步骤。
+ *
+ * 每条 item 先过**真** S12 promoteCandidate（admitViaA1，与编排层 red-blue-round 复用同一条路径）：
+ *   - admitted ⇒ 进被计分 cohort；
+ *   - BLOCK（库本能答 / 自相矛盾 / 不可溯的带毒考题）⇒ 结构性排除出**任何** ClassScore 的 injected 分母，
+ *     并出现在 blockedItemIds——带毒考题在 scorer 内部就被物理排除，调用方拿不到「跳过 A1 直接打分」的能力。
+ *
+ * resetDb 既用于 A1 逐条隔离（每条 item 在 clean KB 上验真），也用于蓝队注入逐条隔离（与 scoreAdmittedGeneration 共用）。
+ * **后置不变量（EGR-CR-049）**：返回后 work tables 已清空。整条路径（A1 循环 + 打分）包在 try/finally 内，故正常返回、
+ * 全 BLOCK 空 cohort、以及 **A1 阶段中途抛错**（如注入器 embed 抛）三条路径都由 finally 兜底清——A1 写到一半的脏行
+ * 不会残留给 caller（与加固前 scorer 的 EGR-CR-049 不变量对齐）。
+ */
+export async function runRedTeamGeneration(
+  deps: RedTeamRunDeps,
+  items: readonly RedTeamItem[],
+  resetDb: () => Promise<void>,
+  options: RunRedTeamOptions = {},
+): Promise<RedTeamGenerationResult> {
+  const confirmedBy = options.confirmedBy ?? 'human:red-team-curator'
+  try {
+    // ── A1 题免疫（铁律）：每条 item 在 clean KB 上先过真 promoteCandidate；只 admitted 者进被计分 cohort。 ──
+    const admissions: ItemAdmission[] = []
+    for (const item of items) {
+      await resetDb()
+      const decision = await admitViaA1(deps, item, confirmedBy)
+      admissions.push(decision.admission)
+    }
+    const admittedSet = new Set(admissions.filter((a) => a.admitted).map((a) => a.itemId))
+    const blockedItemIds = admissions.filter((a) => !a.admitted).map((a) => a.itemId)
+    const scoredItems = items.filter((i) => admittedSet.has(i.id))
+
+    // 空 cohort（全被 A1 BLOCK）⇒ 无分可判；最后一条 A1 样本由外层 finally 兜底清。
+    if (scoredItems.length === 0) {
+      return { classScores: [], admissions, blockedItemIds }
+    }
+    // 蓝队对**被计分 cohort** 注入打分（scoreAdmittedGeneration 内部也 per-item reset）。
+    const classScores = await scoreAdmittedGeneration(deps, scoredItems, resetDb)
+    return { classScores, admissions, blockedItemIds }
+  } finally {
+    // 返回前（含 A1/打分任一阶段异常路径）兜底清：把「返回后 DB 干净」对全部路径单点强制（EGR-CR-049）。
     await resetDb()
   }
 }

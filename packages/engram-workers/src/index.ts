@@ -100,6 +100,8 @@ export {
   type RedTeamRunDeps,
   type InjectionOutcome,
   type ClassScore,
+  type RunRedTeamOptions,
+  type RedTeamGenerationResult,
 } from './eval/redteam-injector.js'
 export { REDTEAM_GENERATION_VERSION, REDTEAM_GENERATION_ITEMS } from './eval/redteam.gen.js'
 
