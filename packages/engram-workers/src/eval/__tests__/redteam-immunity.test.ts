@@ -25,7 +25,6 @@ import {
   addSource,
   appendClaim,
   collectUsageCalibrationSamples,
-  seedRecallSnapshot,
   computeSystemDimensions,
   agentActor,
   trustedHumanActor,
@@ -43,6 +42,7 @@ import {
   type ProvenanceInput,
   type RedTeamItem,
 } from '@engram/core'
+import { seedRecallSnapshot } from '@engram/core/test-fixtures/recall-snapshot'
 
 import { runNearDupPoison, runRedTeamGeneration, type ClassScore } from '../redteam-injector.js'
 import { REDTEAM_GENERATION_ITEMS } from '../redteam.gen.js'

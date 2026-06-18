@@ -25,9 +25,9 @@ import {
   recordDecisionEval,
   reportUsage,
   schema,
-  seedRecallSnapshot,
   type DB,
 } from '@engram/core'
+import { seedRecallSnapshot } from '@engram/core/test-fixtures/recall-snapshot'
 
 import {
   assertRoundsDisjoint,
