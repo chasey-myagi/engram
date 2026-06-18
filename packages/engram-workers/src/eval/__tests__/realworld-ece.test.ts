@@ -23,10 +23,10 @@ import {
   makeFakeSameFactJudge,
   reportUsage,
   schema,
-  seedRecallSnapshot,
   type DB,
   type Embedder,
 } from '@engram/core'
+import { seedRecallSnapshot } from '@engram/core/test-fixtures/recall-snapshot'
 
 import { makeFakeSourceReader } from '../../read/fake-source-reader.js'
 import {

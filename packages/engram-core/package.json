@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./test-fixtures/recall-snapshot": {
+      "types": "./dist/test-fixtures/recall-snapshot.d.ts",
+      "default": "./dist/test-fixtures/recall-snapshot.js"
     }
   },
   "files": [

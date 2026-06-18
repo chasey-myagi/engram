@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest'
 
+import * as core from './index.js'
 import { ENGRAM_VERSION, addSource, appendClaim, supersedeClaim } from './index.js'
 
 test('@engram/core public surface: version + Consumer SPI write path exported', () => {
@@ -8,4 +9,8 @@ test('@engram/core public surface: version + Consumer SPI write path exported', 
   expect(typeof addSource).toBe('function')
   expect(typeof appendClaim).toBe('function')
   expect(typeof supersedeClaim).toBe('function')
+})
+
+test('@engram/core public surface excludes test-only recall snapshot seeder', () => {
+  expect(core).not.toHaveProperty('seedRecallSnapshot')
 })

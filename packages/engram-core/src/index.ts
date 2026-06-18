@@ -52,7 +52,6 @@ export {
 export {
   persistRecallSnapshot,
   getRecallSnapshot,
-  seedRecallSnapshot,
   type RecallSnapshotRow,
   type PersistRecallSnapshotInput,
 } from './spi/recall-snapshot.js'
