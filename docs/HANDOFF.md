@@ -8,9 +8,25 @@
 
 ---
 
-## 1. 一句话现状
+## 0 · 现状（2026-06-18 更新 · ⚠️ 以本节为准；下文 §1/§6/§7/§9 是早期快照已过时）
 
-Engram = agent 原生可生长知识库,**独立产品**(repo: `~/MOI/projects/engram`,commit `5a6fda8`,无 remote、未 push)。当前是 **设计稿 + 可执行 PRD**,**实现 ≈ 0**。bidding-agent 是 Engram 第一个领域适配器,不是主人。
+**实现早已不是 ≈0。** engram 已建出 **P0–P3 + P4b 自闭环 runner**，并刚完成一轮 **code-review 台账清零**（24/24 修复合入 main，全程 review-gate 三门 + 组合态验证）。
+
+- **仓库**：`chasey-myagi/engram`（GitHub，有 remote），本地 `~/Dev/personal-projects/engram`，默认/集成分支 **`main`**，迁移链到 `0025`。pnpm monorepo 三包：`@engram/core`（内核）+ `@engram/workers`（5 工种 + 红蓝对抗 + P4b `EngramRunner`）+ `@engram/bidding-adapter`。测试需 pg 5433（`docker compose up -d db`），现 **660(core)+259(workers) 测试绿**。
+- **管理面**：经 项目看板（workspace Chasey，Engram project `ec90df1a`，issue 镜像自 GitHub、带 `repo:engram`）。GitHub=代码真相，项目看板=管理面。
+- **实现进度**：P0 连续 conf+g / P1 评测 / P2 五工种+L1·L2 / P3 系统八维+纵向+归因脊柱 + P4b 红蓝代际自闭环 **均已落地并加固**。**命门（confidence 连续化+校准）早已解决**；CR-003（recall_snapshot 绑定）刚把「真实 usage 锚 + 校准完整性」补到位。
+- **本轮关键裁决（owner 拍板）**：EGR-CR-006 走**方案 B**（文档诚实化，真 DB role/RLS 隔离延后）；EGR-CR-003 走**方案 A**（recall_snapshot 表绑定预测概率 + 校准 INNER JOIN 硬排除裸行 + report 校验 by_role）。
+- **下一阶段（已建票，GitHub→项目看板 镜像）**：
+  - `#199`(CHA-178, AFK · **进行中**) seedRecallSnapshot test-only helper 移出 `@engram/core` 公开 barrel。
+  - `#200`(CHA-177, HITL · backlog) 工种物理 DB role/RLS 隔离（CR-006 方案 A，延后；触发条件：不可信 worker / 多租户 / 合规）。
+  - `#201`(CHA-176, EPIC · needs-decision · backlog) **P4 红蓝北极星**——PRD 明确远期，3 前置（连续可校准 conf ✅ / 独立 judge 待确认 / 真实 usage 锚 ✅）齐备才解锁；含待决策（蓝队评分 0/1 vs Brier、红队信息档位、ELO 是否进对客报告）。
+- **harness-pi 上游**：DX #38/#39 已 CLOSED，engram 锁 `@earendil-works/pi-ai ^0.2.1`（详见 `engram/CLAUDE.md`）。
+
+> 下文 **§2 由来 / §3 已定架构裁决 / §5 审美方向 仍有效**（历史与决策，别推翻）；**§1 / §6 / §7 / §9 是 greenfield 初期快照，已被本节取代**。
+
+## 1. 一句话现状（⚠️ 早期快照，现状见 §0）
+
+Engram = agent 原生可生长知识库,**独立产品**(原 repo: `~/MOI/projects/engram`,commit `5a6fda8`,无 remote)。~~当前是设计稿 + 可执行 PRD,实现 ≈ 0~~ **← 已过时：实现已达 P0–P3+P4b、有 GitHub remote，见 §0**。bidding-agent 是 Engram 第一个领域适配器,不是主人。
 
 ## 2. 由来:这个想法怎么长出来的(对话轨迹)
 

@@ -1,0 +1,1098 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>2026-06-04 Hugging Face Agent Harness Memory Research</title>
+  <style>
+    :root {
+      --bg: #f6f3ee;
+      --bg-alt: #efe9df;
+      --panel: rgba(255, 255, 255, 0.78);
+      --panel-strong: rgba(255, 255, 255, 0.92);
+      --text: #1f1a17;
+      --muted: #6b615a;
+      --line: rgba(61, 49, 40, 0.12);
+      --accent: #b24d24;
+      --accent-2: #1d6b63;
+      --accent-soft: rgba(178, 77, 36, 0.12);
+      --accent-soft-2: rgba(29, 107, 99, 0.12);
+      --shadow: 0 18px 48px rgba(54, 39, 26, 0.12);
+      --hero: linear-gradient(135deg, #f5e6d8 0%, #efe9df 48%, #dce9e5 100%);
+      --max: 1120px;
+      --body: 65ch;
+      --radius: 22px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #141313;
+        --bg-alt: #1b1a19;
+        --panel: rgba(27, 26, 25, 0.76);
+        --panel-strong: rgba(31, 30, 28, 0.92);
+        --text: #f3eee7;
+        --muted: #b9aca3;
+        --line: rgba(255, 245, 235, 0.1);
+        --accent: #ff8a59;
+        --accent-2: #65c8ba;
+        --accent-soft: rgba(255, 138, 89, 0.14);
+        --accent-soft-2: rgba(101, 200, 186, 0.14);
+        --shadow: 0 22px 50px rgba(0, 0, 0, 0.32);
+        --hero: linear-gradient(135deg, #2b201c 0%, #1b1a19 50%, #102522 100%);
+      }
+    }
+
+    :root[data-theme="light"] {
+      color-scheme: light;
+    }
+
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #141313;
+      --bg-alt: #1b1a19;
+      --panel: rgba(27, 26, 25, 0.76);
+      --panel-strong: rgba(31, 30, 28, 0.92);
+      --text: #f3eee7;
+      --muted: #b9aca3;
+      --line: rgba(255, 245, 235, 0.1);
+      --accent: #ff8a59;
+      --accent-2: #65c8ba;
+      --accent-soft: rgba(255, 138, 89, 0.14);
+      --accent-soft-2: rgba(101, 200, 186, 0.14);
+      --shadow: 0 22px 50px rgba(0, 0, 0, 0.32);
+      --hero: linear-gradient(135deg, #2b201c 0%, #1b1a19 50%, #102522 100%);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+    }
+
+    a {
+      color: inherit;
+      text-decoration-color: rgba(178, 77, 36, 0.45);
+      text-underline-offset: 0.2em;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.92em;
+      background: var(--accent-soft);
+      padding: 0.14rem 0.36rem;
+      border-radius: 0.45rem;
+    }
+
+    .progress {
+      position: fixed;
+      inset: 0 0 auto;
+      height: 4px;
+      background: transparent;
+      z-index: 50;
+    }
+
+    .progress > span {
+      display: block;
+      width: 0;
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      transform-origin: left center;
+    }
+
+    .shell {
+      position: relative;
+      overflow: hidden;
+    }
+
+    .shell::before,
+    .shell::after {
+      content: "";
+      position: fixed;
+      width: 34rem;
+      height: 34rem;
+      border-radius: 999px;
+      filter: blur(46px);
+      pointer-events: none;
+      opacity: 0.24;
+      z-index: 0;
+    }
+
+    .shell::before {
+      top: -8rem;
+      right: -10rem;
+      background: var(--accent-soft);
+    }
+
+    .shell::after {
+      bottom: 6rem;
+      left: -14rem;
+      background: var(--accent-soft-2);
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      backdrop-filter: blur(18px);
+      background: rgba(246, 243, 238, 0.78);
+      border-bottom: 1px solid var(--line);
+    }
+
+    [data-theme="dark"] .topbar {
+      background: rgba(20, 19, 19, 0.78);
+    }
+
+    .topbar-inner,
+    .hero-inner,
+    .section-inner,
+    .footer-inner {
+      width: min(var(--max), calc(100vw - 2rem));
+      margin: 0 auto;
+      position: relative;
+      z-index: 1;
+    }
+
+    .topbar-inner {
+      display: flex;
+      gap: 1rem;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.9rem 0;
+    }
+
+    .brand {
+      display: flex;
+      gap: 0.8rem;
+      align-items: center;
+      font-size: 0.95rem;
+      color: var(--muted);
+    }
+
+    .brand-mark {
+      width: 0.9rem;
+      height: 0.9rem;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      box-shadow: 0 0 0 6px var(--accent-soft);
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 0.6rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .pill,
+    .theme-toggle {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 0.48rem 0.78rem;
+      background: var(--panel);
+      color: var(--muted);
+      font: inherit;
+    }
+
+    .theme-toggle {
+      cursor: pointer;
+    }
+
+    .hero {
+      background: var(--hero);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .hero-inner {
+      padding: 4.6rem 0 3.4rem;
+      display: grid;
+      gap: 1.5rem;
+    }
+
+    .eyebrow {
+      color: var(--accent);
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      font-size: 0.86rem;
+    }
+
+    h1,
+    h2,
+    h3 {
+      line-height: 1.12;
+      margin: 0;
+    }
+
+    h1 {
+      max-width: 15ch;
+      font-size: clamp(2.3rem, 5vw, 4.8rem);
+      letter-spacing: -0.04em;
+    }
+
+    .hero-copy {
+      max-width: var(--body);
+      color: var(--muted);
+      font-size: 1.08rem;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.9rem;
+    }
+
+    .stat {
+      padding: 1rem 1.05rem;
+      border-radius: 1.1rem;
+      background: var(--panel-strong);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .stat-label {
+      color: var(--muted);
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .stat-value {
+      margin-top: 0.3rem;
+      font-size: 1.7rem;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+    }
+
+    section {
+      position: relative;
+      z-index: 1;
+    }
+
+    section:nth-of-type(odd) {
+      background: var(--bg);
+    }
+
+    section:nth-of-type(even) {
+      background: var(--bg-alt);
+    }
+
+    .section-inner {
+      padding: 3.8rem 0;
+    }
+
+    .section-head {
+      display: grid;
+      gap: 0.8rem;
+      margin-bottom: 1.8rem;
+    }
+
+    .section-head p,
+    .lede,
+    .finding p,
+    .deep-grid p,
+    .callout p,
+    .footer-inner p {
+      max-width: var(--body);
+      color: var(--muted);
+      margin: 0;
+    }
+
+    .callout {
+      padding: 1.2rem 1.25rem;
+      border-left: 4px solid var(--accent);
+      background: var(--panel);
+      border-radius: 1rem;
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .method-grid,
+    .finding-grid,
+    .deep-grid,
+    .next-grid {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .method-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin-top: 1.5rem;
+    }
+
+    .method-card,
+    .finding,
+    .deep-card,
+    .next-card {
+      padding: 1.2rem;
+      border-radius: 1.1rem;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .method-card strong,
+    .finding strong,
+    .deep-card strong,
+    .next-card strong {
+      display: block;
+      margin-bottom: 0.55rem;
+      font-size: 1rem;
+    }
+
+    .finding-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .finding-top {
+      display: flex;
+      gap: 0.9rem;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 0.65rem;
+    }
+
+    .finding-title-wrap {
+      display: grid;
+      gap: 0.3rem;
+    }
+
+    .meta,
+    .sources,
+    .mini-list,
+    .kicker {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.35rem 0.6rem;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.84rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .badge.alt {
+      background: var(--accent-soft-2);
+      color: var(--accent-2);
+    }
+
+    .sources {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
+      margin-top: 0.7rem;
+    }
+
+    .sources a {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+
+    .deep-grid {
+      grid-template-columns: 1.2fr 0.8fr;
+      align-items: start;
+    }
+
+    .deep-stack {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .matrix {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 0.9rem;
+      font-size: 0.96rem;
+      background: var(--panel);
+      border-radius: 1rem;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .matrix th,
+    .matrix td {
+      padding: 0.95rem 1rem;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .matrix tr:last-child td {
+      border-bottom: none;
+    }
+
+    .matrix th {
+      background: var(--accent-soft);
+      color: var(--text);
+      font-size: 0.86rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .next-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .footer-inner {
+      padding: 2.4rem 0 4rem;
+      display: grid;
+      gap: 0.9rem;
+    }
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(18px);
+      transition: opacity 0.55s ease, transform 0.55s ease;
+    }
+
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .hero .reveal {
+      opacity: 1;
+      transform: none;
+    }
+
+    .muted-note {
+      margin-top: 1rem;
+      font-size: 0.94rem;
+      color: var(--muted);
+    }
+
+    @media (max-width: 920px) {
+      .stats,
+      .method-grid,
+      .finding-grid,
+      .deep-grid,
+      .next-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .finding-top {
+        flex-direction: column;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      .reveal {
+        opacity: 1;
+        transform: none;
+        transition: none;
+      }
+
+      .progress > span {
+        transition: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="progress" aria-hidden="true"><span id="progressBar"></span></div>
+  <div class="shell">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <span class="brand-mark"></span>
+          <span>Daily HF Agent Harness Memory Research</span>
+        </div>
+        <div class="toolbar">
+          <span class="pill">As of 2026-06-04 15:33 CST</span>
+          <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题">切换主题</button>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-inner">
+          <div class="reveal">
+            <div class="eyebrow">Hugging Face First</div>
+            <h1>Agent Harness / Memory 每日高信号扫描</h1>
+          </div>
+          <p class="hero-copy reveal">
+            本轮只把 Hugging Face 作为主发现面，然后仅用它直接链接或精确标题可验证到的
+            GitHub、arXiv、项目页补充出处、复现性、许可证、维护状态和 benchmark 证据。
+            结果偏向能为 <code>harness-pi</code> 的 runtime / orchestration / eval loop，
+            以及 <code>Engram</code> 的 <code>claim / provenance / confidence / report_usage</code>
+            设计提供可复用抓手的开源对象。
+          </p>
+          <div class="stats">
+            <div class="stat reveal">
+              <div class="stat-label">高信号条目</div>
+              <div class="stat-value" data-count="10">10</div>
+            </div>
+            <div class="stat reveal">
+              <div class="stat-label">首选深挖</div>
+              <div class="stat-value">AMA-Bench</div>
+            </div>
+            <div class="stat reveal">
+              <div class="stat-label">本地映射轴</div>
+              <div class="stat-value">Runtime + Provenance</div>
+            </div>
+            <div class="stat reveal">
+              <div class="stat-label">深挖结论</div>
+              <div class="stat-value">可直接试接</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-inner">
+          <div class="section-head reveal">
+            <div class="eyebrow">Method</div>
+            <h2>筛选方法与本地对照</h2>
+            <p>
+              先读本地上下文，再决定 deep dive 方向。本地对照点来自：
+              <code>/Users/chasey/Dev/coding/harness-pi/packages/core/src/session.ts</code> 的
+              <code>AgentSession / RunSummary / LiveEvent</code>，
+              <code>/Users/chasey/Dev/coding/harness-pi/packages/plugins/src/controllers/gap-explorer.ts</code>
+              的 bounded 闭环控制器，
+              以及 <code>/Users/chasey/MOI/projects/engram/packages/engram-core/src/spi/{append-claim,recall-claims}.ts</code>
+              和 <code>.../confidence/confidence.ts</code> 的 Consumer SPI、强制 provenance 和连续 confidence 管线。
+            </p>
+          </div>
+          <div class="callout reveal">
+            <p>
+              结论先行：这轮最值得深入的不是“再找一个更花哨的 multi-agent shell”，而是
+              <strong>带可复现 dataset / repo / leaderboard 的 memory benchmark 栈</strong>，
+              因为它最容易直接落到 <code>harness-pi</code> 的 orchestration seam 和
+              <code>Engram</code> 的 claim-level eval seam 上。
+            </p>
+          </div>
+          <div class="method-grid">
+            <div class="method-card reveal">
+              <strong>发现源</strong>
+              <p>只纳入 Hugging Face 的 papers / datasets / spaces / models 作为入口。</p>
+            </div>
+            <div class="method-card reveal">
+              <strong>验证源</strong>
+              <p>只补 GitHub、arXiv、项目文档这类一手出处；不做泛二手摘要堆叠。</p>
+            </div>
+            <div class="method-card reveal">
+              <strong>阈值</strong>
+              <p>优先保留带 license、repo、示例、leaderboard、近期更新或明确 benchmark 证据的对象。</p>
+            </div>
+          </div>
+          <p class="muted-note reveal">
+            证据与推断分开写：文中凡“论文声称”“repo 显示”“dataset card 标注”都属于证据；
+            “更适合 harness-pi/Engram”属于基于这些证据的推断。
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-inner">
+          <div class="section-head reveal">
+            <div class="eyebrow">Top Findings</div>
+            <h2>Top 10 高置信发现</h2>
+            <p>
+              排序按“与本地 runtime / memory / eval 的直接可用性”而不是纯学术热度。
+              每条都保留一个主链接和必要的辅链。
+            </p>
+          </div>
+          <div class="finding-grid">
+            <article class="finding reveal">
+              <div class="finding-top">
+                <div class="finding-title-wrap">
+                  <h3>1. AMA-Bench</h3>
+                  <div class="meta">类型：HF dataset + benchmark stack</div>
+                </div>
+                <span class="badge">置信度 5/5</span>
+              </div>
+              <p>
+                这是当前最完整的 Hugging Face 记忆 benchmark 栈之一：HF dataset 卡明确给出
+                网站、GitHub、leaderboard、paper 四个入口；GitHub README 则把方法接口收敛成
+                <code>memory_construction</code> 与 <code>memory_retrieve</code> 两段式，且 repo
+                显示 2026 年 3 到 5 月连续放出 dataset、leaderboard 与 AMA-Agent code。
+              </p>
+              <p class="mini-list"><strong>为什么重要：</strong>它天然对应 <code>harness-pi</code> 的“确定性 orchestration + per-run terminal result”与 <code>Engram</code> 的“memory object / retrieval seam”。</p>
+              <p class="mini-list"><strong>Recency：</strong>HF dataset 发布于 2026-02；GitHub README 记录 2026-03 repo 启动、2026-05 论文被 ICML 2026 接收。</p>
+              <p class="mini-list"><strong>Caveat：</strong>默认接口更偏“从 trajectory 构建 memory object”，还没直接约束 provenance 或 claim 级写治理。</p>
+              <div class="sources">
+                <a href="https://huggingface.co/datasets/AMA-bench/AMA-bench">HF Dataset</a>
+                <a href="https://github.com/AMA-Bench/AMA-Bench">GitHub</a>
+                <a href="https://huggingface.co/papers/2602.22769">HF Paper</a>
+                <a href="https://arxiv.org/abs/2602.22769">arXiv</a>
+              </div>
+            </article>
+
+            <article class="finding reveal">
+              <div class="finding-top">
+                <div class="finding-title-wrap">
+                  <h3>2. AMA-Bench Leaderboard</h3>
+                  <div class="meta">类型：HF Space / operational eval surface</div>
+                </div>
+                <span class="badge alt">置信度 4.5/5</span>
+              </div>
+              <p>
+                与很多只发论文的 benchmark 不同，AMA-Bench 同步给了 Hugging Face Space 形式的 leaderboard。
+                这让它不只是“一个 dataset”，而是一个已经具备提交与对比路径的公共评测表面。
+              </p>
+              <p class="mini-list"><strong>为什么重要：</strong>对本地最有价值的不是排行榜名次，而是它迫使 benchmark 设计走向可提交、可复验、可比较的标准接口。</p>
+              <p class="mini-list"><strong>Recency：</strong>HF dataset 卡与 GitHub README 都记录该 leaderboard 于 2026-03 上线。</p>
+              <p class="mini-list"><strong>Caveat：</strong>Space 本身是评测入口，不提供 claim/provenance 语义；需要和主 benchmark 配套理解。</p>
+              <div class="sources">
+                <a href="https://huggingface.co/spaces/AMA-bench/AMA-bench-Leaderboard">HF Space</a>
+                <a href="https://huggingface.co/datasets/AMA-bench/AMA-bench">HF Dataset</a>
+                <a href="https://github.com/AMA-Bench/AMA-Bench">GitHub</a>
+              </div>
+            </article>
+
+            <article class="finding reveal">
+              <div class="finding-top">
+                <div class="finding-title-wrap">
+                  <h3>3. MemoryArena</h3>
+                  <div class="meta">类型：HF paper + HF dataset + project site</div>
+                </div>
+                <span class="badge">置信度 4.5/5</span>
+              </div>
+              <p>
+                MemoryArena 把评测中心从“记住长上下文”推进到“跨 session 的 interdependent subtasks”。
+                项目主页公开列出 Stanford / UCSD / UIUC 等作者背景，并直接连到 HF dataset 与 GitHub。
+                HF dataset 以五个子集组织任务，包含 bundled shopping、progressive search、group travel planner 与 formal reasoning。
+              </p>
+              <p class="mini-list"><strong>为什么重要：</strong>它最贴近 <code>harness-pi</code> 的 resume / fan-out / reanswer 闭环，也最贴近 Engram 想做的“越用越准”而非单次 recall。</p>
+              <p class="mini-list"><strong>Recency：</strong>HF paper 发布于 2026-02；HF dataset 现有 12 likes，项目页和数据页都在线。</p>
+              <p class="mini-list"><strong>Caveat：</strong>复现栈比 AMA-Bench 轻一些，repo 和 leaderboard 信号没有那么强，适合作为任务形状参考，不一定先做主 benchmark。</p>
+              <div class="sources">
+                <a href="https://huggingface.co/papers/2602.16313">HF Paper</a>
+                <a href="https://huggingface.co/datasets/ZexueHe/memoryarena">HF Dataset</a>
+                <a href="https://memoryarena.github.io/">Project Page</a>
+                <a href="https://github.com/ZexueHe/MemoryArena">GitHub</a>
+              </div>
+            </article>
+
+            <article class="finding reveal">
+              <div class="finding-top">
+                <div class="finding-title-wrap">
+                  <h3>4. MemoryAgentBench</h3>
+                  <div class="meta">类型：HF paper + HF dataset + GitHub benchmark</div>
+                </div>
+                <span class="badge">置信度 5/5</span>
+              </div>
+              <p>
+                这是目前最清楚地把 memory 能力拆成四个 competency 的 HF benchmark：
+                Accurate Retrieval、Test-Time Learning、Long-Range Understanding、Conflict Resolution。
+                HF dataset 卡写明 MIT license、四个 split、最近月下载量 24,622，并给出公开 GitHub 代码仓库。
+              </p>
+              <p class="mini-list"><strong>为什么重要：</strong>如果 AMA-Bench 适合系统级 eval，MemoryAgentBench 更适合做 component eval，把 recall / update / contradiction 各自打散测。</p>
+              <p class="mini-list"><strong>Recency：</strong>HF paper 发布于 2025-07；dataset 卡记录 2025-09 到 2025-10 的多次数据修订。</p>
+              <p class="mini-list"><strong>Caveat：</strong>更偏受控增量交互，不如 MemoryArena 那样贴多 session 真实任务闭环。</p>
+              <div class="sources">
+                <a href="https://huggingface.co/datasets/ai-hyz/MemoryAgentBench">HF Dataset</a>
+                <a href="https://huggingface.co/papers/2507.05257">HF Paper</a>
+                <a href="https://github.com/HUST-AI-HYZ/MemoryAgentBench">GitHub</a>
+                <a href="https://arxiv.org/abs/2507.05257">arXiv</a>
+              </div>
+            </article>
+
+            <article class="finding reveal">
+              <div class="finding-top">
+                <div class="finding-title-wrap">
+                  <h3>5. OpenJudge Agent Memory Graders</h3>
+                  <div class="meta">类型：HF dataset + GitHub eval framework</div>
+                </div>
+                <span class="badge">置信度 5/5</span>
+              </div>
+              <p>
+                OpenJudge 在 HF dataset 卡里直接把 agent 维度拆出 Memory
+                <code>(Accuracy / Retrieval / Preservation)</code>，并给到每个任务目录都有
+                <code>evaluate_*.py</code> 的复现实验脚本。GitHub README 进一步说明它是
+                “Holistic Evaluation, Quality Rewards”的统一 grader 框架，覆盖 agent lifecycle、tool、memory、trajectory。
+              </p>
+              <p class="mini-list"><strong>为什么重要：</strong>这最适合借给 <code>harness-pi</code> 做 grader 层，而不是自己从零造 judge harness。</p>
+              <p class="mini-list"><strong>Recency：</strong>HF dataset 最近两周仍有 commit；GitHub README 标注 2026-04 新增 skill graders，站点仍在快速扩张。</p>
+              <p class="mini-list"><strong>Caveat：</strong>它是 grader 框架，不是 domain truth；如果把 judge 当 ground truth，会把 Engram 的“题先验真”红线踩穿。</p>
+              <div class="sources">
+                <a href="https://huggingface.co/datasets/agentscope-ai/OpenJudge">HF Dataset</a>
+                <a href="https://github.com/agentscope-ai/OpenJudge">GitHub</a>
+                <a href="https://huggingface.co/datasets/agentscope-ai/OpenJudge/blob/main/agent/memory/evaluate_memory.py">HF Script</a>
+              </div>
+            </article>
+
+            <article class="finding reveal">
+              <div class="finding-top">
+                <div class="finding-title-wrap">
+                  <h3>6. AlphaEval</h3>
+                  <div class="meta">类型：HF paper + GitHub production benchmark</div>
+                </div>
+                <span class="badge">置信度 5/5</span>
+              </div>
+              <p>
+                AlphaEval 不是 memory benchmark，但它对 agent harness 很关键。
+                GitHub README 明确写出 94 个来自 7 家公司的任务、6 个 O*NET 域、多范式评测与 Docker sandbox，
+                并强调它评估的是完整 agent product 而不只是模型。仓库是 MIT license。
+              </p>
+              <p class="mini-list"><strong>为什么重要：</strong>它为 <code>harness-pi</code> 提供了“评 agent product 而不是评模型”的现成论证，也适合给 Engram 做后续生产型 benchmark 包装。</p>
+              <p class="mini-list"><strong>Recency：</strong>HF paper 发布于 2026-04；GitHub 仓库同样是 2026 新项目。</p>
+              <p class="mini-list"><strong>Caveat：</strong>不是记忆专用 benchmark；直接借来测 Engram 会漏掉 claim / provenance 特有失效模式。</p>
+              <div class="sources">
+                <a href="https://huggingface.co/papers/2604.12162">HF Paper</a>
+                <a href="https://github.com/GAIR-NLP/AlphaEval">GitHub</a>
+                <a href="https://arxiv.org/abs/2604.12162">arXiv</a>
+              </div>
+            </article>
+
+            <article class="finding reveal">
+              <div class="finding-top">
+                <div class="finding-title-wrap">
+                  <h3>7. A-MEM</h3>
+                  <div class="meta">类型：HF paper + open-source memory system</div>
+                </div>
+                <span class="badge alt">置信度 4/5</span>
+              </div>
+              <p>
+                A-MEM 的亮点不在 benchmark，而在 memory shape：它把 Zettelkasten 风格的动态索引、链接、
+                note 演化与 agent 决策绑到一起。GitHub README 明说系统仓库负责 memory system 本身，
+                论文复现实验则在另一个评测仓库里。
+              </p>
+              <p class="mini-list"><strong>为什么重要：</strong>它是目前最接近 Engram “claim network / relation / evolution”气质的开源记忆系统之一。</p>
+              <p class="mini-list"><strong>Recency：</strong>HF paper 发布于 2025-02；主仓仍在线且安装/使用说明完整。</p>
+              <p class="mini-list"><strong>Caveat：</strong>system repo 与 evaluation repo 分裂，工程可读性可以，严格复现实验则要多走一步。</p>
+              <div class="sources">
+                <a href="https://huggingface.co/papers/2502.12110">HF Paper</a>
+                <a href="https://github.com/agiresearch/A-mem">System Repo</a>
+                <a href="https://github.com/WujiangXu/AgenticMemory">Eval Repo</a>
+                <a href="https://arxiv.org/abs/2502.12110">arXiv</a>
+              </div>
+            </article>
+
+            <article class="finding reveal">
+              <div class="finding-top">
+                <div class="finding-title-wrap">
+                  <h3>8. AtomMem</h3>
+                  <div class="meta">类型：HF paper + official code</div>
+                </div>
+                <span class="badge alt">置信度 4/5</span>
+              </div>
+              <p>
+                AtomMem 把 memory management 重写成可学习的 CRUD 原子操作决策问题，而不是固定 pipeline。
+                GitHub 搜索结果显示这是 official code，仓库有 25 commits，README 给了环境、依赖和数据准备路径。
+              </p>
+              <p class="mini-list"><strong>为什么重要：</strong>它为 Engram 的 <code>append / retrieve / supersede / delete-like quarantine</code> 操作空间提供了训练式视角，而不是纯手写策略。</p>
+              <p class="mini-list"><strong>Recency：</strong>HF paper发布于 2026-01，GitHub 最近一周仍可见。</p>
+              <p class="mini-list"><strong>Caveat：</strong>benchmark 主要还是长上下文 QA 族，不是完整 agent runtime；拿来借动作空间比借总架构更合适。</p>
+              <div class="sources">
+                <a href="https://huggingface.co/papers/2601.08323">HF Paper</a>
+                <a href="https://github.com/RUCBM/AtomMem">GitHub</a>
+                <a href="https://arxiv.org/abs/2601.08323">arXiv</a>
+              </div>
+            </article>
+
+            <article class="finding reveal">
+              <div class="finding-top">
+                <div class="finding-title-wrap">
+                  <h3>9. AgentOrchestra / DeepResearchAgent</h3>
+                  <div class="meta">类型：HF paper + active GitHub project</div>
+                </div>
+                <span class="badge">置信度 4.5/5</span>
+              </div>
+              <p>
+                HF paper 页把 AgentOrchestra 直接连到 <code>SkyworkAI/DeepResearchAgent</code>。
+                ar5iv 版本能看见它的 planning agent、specialized sub-agents、planning tool、memory record、
+                以及对 MCP / multimodal / sandbox 的统一处理；GitHub 搜索结果显示该 repo 是 MIT license，
+                133 commits，并在 2026-05 仍有更新。
+              </p>
+              <p class="mini-list"><strong>为什么重要：</strong>它不是 memory benchmark，而是对 <code>harness-pi</code> orchestration primitive 很有参考价值，尤其是 planner/sub-agent/tool 接口分层。</p>
+              <p class="mini-list"><strong>Recency：</strong>HF paper发布于 2025-06；GitHub 2026-05 仍更新。</p>
+              <p class="mini-list"><strong>Caveat：</strong>memory 在这里更像 execution trace / planner context，不带 Engram 需要的 provenance discipline。</p>
+              <div class="sources">
+                <a href="https://huggingface.co/papers/2506.12508">HF Paper</a>
+                <a href="https://github.com/SkyworkAI/DeepResearchAgent">GitHub</a>
+                <a href="https://ar5iv.labs.arxiv.org/html/2506.12508">ar5iv</a>
+              </div>
+            </article>
+
+            <article class="finding reveal">
+              <div class="finding-top">
+                <div class="finding-title-wrap">
+                  <h3>10. MATPO-14B</h3>
+                  <div class="meta">类型：HF model + rollout artifacts</div>
+                </div>
+                <span class="badge alt">置信度 4/5</span>
+              </div>
+              <p>
+                这是少数直接在 Hugging Face 上可拿 checkpoint 的“planner/worker 角色分化”模型工件。
+                Model card 明示 Apache-2.0，给出 GAIA / FRAMES / WebWalkerQA 结果，并说明训练脚本与 rollouts 已开放，
+                同时给出基于 <code>veRL</code> 的训练依赖。
+              </p>
+              <p class="mini-list"><strong>为什么重要：</strong>如果想做“角色分工来自 policy 训练，而不只是 runtime fan-out”，它是这轮候选里最容易直接试的 HF 模型对象。</p>
+              <p class="mini-list"><strong>Recency：</strong>model card 记录 2025-10 发布 checkpoints、rollouts 和 code。</p>
+              <p class="mini-list"><strong>Caveat：</strong>它偏训练研究，不是现成 harness；对本地更像对照组或实验模型，而不是直接拿来当 runtime。</p>
+              <div class="sources">
+                <a href="https://huggingface.co/veggiebird/MATPO-single-agent-14b">HF Model</a>
+                <a href="https://huggingface.co/veggiebird/MATPO-14b">HF Model Variant</a>
+                <a href="https://huggingface.co/datasets/veggiebird/MATPO-rollout">HF Rollouts</a>
+                <a href="https://github.com/mzf666/MATPO">GitHub</a>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-inner">
+          <div class="section-head reveal">
+            <div class="eyebrow">Deep Dive</div>
+            <h2>首选深挖：AMA-Bench</h2>
+            <p>
+              选择理由：不是它“最酷”，而是它在目前候选里同时满足
+              <strong>HF 主发现面、公开 dataset、公开 repo、公开 leaderboard、方法接口明确、能直接对接本地 runtime seam</strong>
+              这六个条件。
+            </p>
+          </div>
+          <div class="deep-grid">
+            <div class="deep-stack">
+              <div class="deep-card reveal">
+                <strong>它是什么</strong>
+                <p>
+                  AMA-Bench 是面向 agentic trajectory 的长时记忆 benchmark。HF dataset 卡显示它公开了
+                  208 行测试数据、MIT license、完整 quick links；arXiv 摘要则把问题定义为“连续 agent-environment
+                  interaction 的记忆”，并提出 AMA-Agent 作为参考方法。
+                </p>
+              </div>
+
+              <div class="deep-card reveal">
+                <strong>核心方法与实现抓手</strong>
+                <p>
+                  GitHub README 最值得借的不是具体模型，而是统一接口：<code>memory_construction(traj_text, task)</code>
+                  与 <code>memory_retrieve(memory, question)</code>。这把“构建 memory”和“按问题取证”拆成两个可替换阶段，
+                  非常接近本地已经存在的两条缝：<code>harness-pi</code> 的 session/controller 运行时骨架，和
+                  <code>Engram</code> 的 <code>append_claim / recall_claims</code> Consumer SPI。
+                </p>
+                <p class="mini-list"><strong>证据：</strong>GitHub README 明确写出 two-stage interface 和默认评测目录结构。</p>
+                <p class="mini-list"><strong>推断：</strong>这意味着本地完全可以先不改 kernel，只做一个 benchmark adapter 层试接。</p>
+              </div>
+
+              <div class="deep-card reveal">
+                <strong>评测主张</strong>
+                <p>
+                  arXiv 摘要声称：现有 memory systems 在 AMA-Bench 上普遍欠佳，主要缺 causality 与 objective information；
+                  AMA-Agent 以 causality graph + tool-augmented retrieval 取得 57.22% 平均准确率，比最强 baseline 高 11.16%。
+                </p>
+                <p class="mini-list"><strong>证据：</strong>这来自论文摘要，不是我复跑后的确认。</p>
+                <p class="mini-list"><strong>推断：</strong>如果这个结论成立，Engram 最应避免的是“只做相似度检索的 memory facade”。</p>
+              </div>
+
+              <div class="deep-card reveal">
+                <strong>源码质量与复现性</strong>
+                <p>
+                  这套东西比大多数“只有论文页面”的对象扎实：HF dataset、HF space、GitHub、项目主页都在线；
+                  GitHub README 记录 2026-03 到 2026-05 的连续发布；repo 有 MIT license、requirements、src、scripts、
+                  configs、evaluation 说明和提交 leaderboard 的入口。
+                </p>
+                <p class="mini-list"><strong>判断：</strong>足以列入“可做本地 follow-up”的高优先级，而不只是“值得关注”。</p>
+              </div>
+
+              <table class="matrix reveal">
+                <thead>
+                  <tr>
+                    <th>AMA-Bench 元素</th>
+                    <th>映射到 harness-pi</th>
+                    <th>映射到 Engram</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Trajectory-first memory construction</td>
+                    <td><code>AgentSession</code> / <code>RunSummary</code> / session store 输出可直接喂构建阶段</td>
+                    <td>构建阶段不要产 opaque summary，优先产 <code>claim + provenance + relation</code></td>
+                  </tr>
+                  <tr>
+                    <td>Question-time retrieval seam</td>
+                    <td>可做 controller 级评测适配器，不必改 kernel</td>
+                    <td>直接映射到 <code>recall_claims(query, ctx)</code></td>
+                  </tr>
+                  <tr>
+                    <td>Causality-aware memory</td>
+                    <td>适合补在 orchestration / replay / event lineage 上</td>
+                    <td>适合补 <code>relation</code> 与 contradiction / supersede 边，而不是只存 embedding</td>
+                  </tr>
+                  <tr>
+                    <td>Public leaderboard</td>
+                    <td>利于形成稳定 submission harness</td>
+                    <td>可把 claim-graph 方案与 summary baseline 做公开对比</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="deep-stack">
+              <div class="deep-card reveal">
+                <strong>为什么它优于 MemoryArena 成为首选</strong>
+                <p>
+                  MemoryArena 在“多 session + interdependent subtasks”上更像最终目标；
+                  但 AMA-Bench 的公开工件更完整，接口更明确，复现实验门槛更低，更适合先拿来搭第一版本地 eval adapter。
+                </p>
+              </div>
+
+              <div class="deep-card reveal">
+                <strong>主要局限</strong>
+                <p>
+                  1. 两段式接口会默认你把 memory 当成独立对象处理，天然弱化了 provenance / human governance。<br>
+                  2. 数据集只有 test split，适合 benchmarking，不适合拿来做训练闭环。<br>
+                  3. 开放式 QA 仍可能把 judge/metric 设计带回瓶颈。
+                </p>
+              </div>
+
+              <div class="deep-card reveal">
+                <strong>对本地最可复用的三个点</strong>
+                <p>
+                  1. 把 benchmark seam 固定在 build/retrieve 两段，而不是散在 runtime 内。<br>
+                  2. 让 leaderboard / submission 约束方法接口。<br>
+                  3. 用真实 agent trajectories 而不是静态书本段落做主数据面。
+                </p>
+              </div>
+
+              <div class="deep-card reveal">
+                <strong>对本地不该照抄的点</strong>
+                <p>
+                  1. 不要把 Engram memory object 退化成无 provenance 的摘要缓存。<br>
+                  2. 不要把 benchmark judge 直接当真值来源。<br>
+                  3. 不要为了适配 benchmark 而牺牲 claim-level 事务边界。
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-inner">
+          <div class="section-head reveal">
+            <div class="eyebrow">Next Steps</div>
+            <h2>建议的本地后续动作</h2>
+            <p>
+              这三步都能在不改大架构的前提下推进，而且每一步都能留出可验证工件。
+            </p>
+          </div>
+          <div class="next-grid">
+            <div class="next-card reveal">
+              <strong>1. 做一个 AMA-Bench adapter spike</strong>
+              <p>
+                目标不是追分，而是把 AMA-Bench 的 two-stage interface 映射到本地：
+                stage A 用 <code>harness-pi</code> 跑 trajectory 处理，
+                stage B 调 Engram 的 <code>recall_claims</code>。
+              </p>
+            </div>
+            <div class="next-card reveal">
+              <strong>2. 做 claim-graph vs summary baseline</strong>
+              <p>
+                最少两条 baseline：一个只做摘要记忆，一个走 <code>claim + provenance + relation</code>。
+                先比较 contradiction / long-horizon retrieval / mustVerify 行为，不必一开始追绝对分。
+              </p>
+            </div>
+            <div class="next-card reveal">
+              <strong>3. 把 OpenJudge 接到 grader 层</strong>
+              <p>
+                不把它当真值库，而是当自动 grader runner。这样可快速补一个“memory behavior regression”
+                套件，服务本地 loop，而不是再造 judge shell。
+              </p>
+            </div>
+          </div>
+          <div class="callout reveal" style="margin-top: 1.2rem;">
+            <p>
+              如果只选一个立即可做动作，我会选 <strong>AMA-Bench adapter spike</strong>。
+              原因很简单：它最容易逼出本地当前设计里“runtime state 和 durable memory state 的边界”到底够不够清楚。
+            </p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="footer-inner">
+        <p class="reveal">
+          Report path:
+          <code>/Users/chasey/MOI/projects/engram/reports/2026-06-04-huggingface-agent-harness-memory.html</code>
+        </p>
+        <p class="reveal">
+          Source policy: Hugging Face first; GitHub / arXiv / official project pages only as supporting verification for HF-discovered candidates.
+        </p>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    (() => {
+      const root = document.documentElement;
+      const progress = document.getElementById("progressBar");
+      const toggle = document.getElementById("themeToggle");
+      const stored = localStorage.getItem("hf-report-theme");
+      if (stored === "light" || stored === "dark") root.setAttribute("data-theme", stored);
+
+      const applyProgress = () => {
+        const total = document.documentElement.scrollHeight - window.innerHeight;
+        const ratio = total <= 0 ? 0 : Math.min(1, Math.max(0, window.scrollY / total));
+        progress.style.width = `${ratio * 100}%`;
+      };
+
+      const revealNodes = [...document.querySelectorAll(".reveal")];
+      const observer = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) entry.target.classList.add("visible");
+        }
+      }, { threshold: 0.12 });
+      revealNodes.forEach((node) => {
+        const rect = node.getBoundingClientRect();
+        if (rect.top < window.innerHeight * 0.92) node.classList.add("visible");
+        observer.observe(node);
+      });
+
+      const counters = [...document.querySelectorAll("[data-count]")];
+      const counterObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const el = entry.target;
+          const target = Number(el.getAttribute("data-count") || "0");
+          const start = performance.now();
+          const duration = 900;
+          const tick = (now) => {
+            const p = Math.min(1, (now - start) / duration);
+            el.textContent = String(Math.round(target * p));
+            if (p < 1) requestAnimationFrame(tick);
+          };
+          requestAnimationFrame(tick);
+          counterObserver.unobserve(el);
+        }
+      }, { threshold: 0.4 });
+      counters.forEach((node) => counterObserver.observe(node));
+
+      toggle.addEventListener("click", () => {
+        const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+        root.setAttribute("data-theme", next);
+        localStorage.setItem("hf-report-theme", next);
+      });
+
+      applyProgress();
+      window.addEventListener("scroll", applyProgress, { passive: true });
+      window.addEventListener("resize", applyProgress);
+    })();
+  </script>
+</body>
+</html>

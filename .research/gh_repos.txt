@@ -1,0 +1,8 @@
+huggingface/smolagents
+NJU-LINK/DR3-Eval
+nomic-ai/aec-bench
+DSAIL-Memory/EvoMemBench
+MemTensor/MemOS
+shengyin1224/SafeAgentBench
+open-compass/MMBench-GUI
+HaozheZhao/Crafter
